@@ -46,7 +46,7 @@ const transferInclude = {
   fromLocation: { select: { id: true, name: true } },
   toLocation: { select: { id: true, name: true } },
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
-  items: { include: { product: { select: { id: true, name: true, unit: true, sku: true } } } },
+  items: { include: { product: { select: { id: true, name: true, unit: true, sku: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } } } },
 } as const;
 
 stockTransfersRouter.get("/", async (req, res, next) => {

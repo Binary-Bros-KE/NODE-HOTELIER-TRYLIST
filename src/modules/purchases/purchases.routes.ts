@@ -71,7 +71,7 @@ const purchaseInclude = {
   supplier: { select: { id: true, name: true } },
   location: { select: { id: true, name: true } },
   requisition: { select: { id: true, requisitionNo: true } },
-  items: { include: { product: { select: { id: true, name: true, unit: true } } }, orderBy: { createdAt: "asc" } },
+  items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } } }, orderBy: { createdAt: "asc" } },
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
   updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
   goodsReceipts: {
@@ -301,7 +301,7 @@ purchasesRouter.get("/:id/goods-receipts", async (req, res, next) => {
       include: {
         location: { select: { id: true, name: true } },
         createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
-        items: { include: { product: { select: { id: true, name: true, unit: true } } } },
+        items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } } } },
       },
       orderBy: { receivedAt: "desc" },
     });
@@ -364,7 +364,7 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
             }),
           },
         },
-        include: { items: { include: { product: { select: { id: true, name: true, unit: true } } } } },
+        include: { items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } } } } },
       });
 
       let owed = 0;
