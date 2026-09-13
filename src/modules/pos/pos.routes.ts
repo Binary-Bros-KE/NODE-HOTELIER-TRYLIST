@@ -1218,7 +1218,7 @@ posRouter.get("/menu-items", async (req, res) => {
     where,
     include: {
       menuCategory: true,
-      product: { include: { stocks: { where: stockWhere, select: { quantity: true } } } },
+      product: { include: { packUnit: { select: { id: true, name: true } }, stocks: { where: stockWhere, select: { quantity: true } } } },
       locations: { select: { id: true, name: true } },
       recipe: { include: { ingredients: { include: { product: { include: { stocks: { where: stockWhere, select: { quantity: true } } } } } } } },
       variants: {
@@ -1252,11 +1252,14 @@ posRouter.get("/menu-items", async (req, res) => {
 
   const items = rows.map(({ menuCategory, taxRate, taxMode, taxTreatment, product, recipe, variants, stockQtyPerUnit, ...item }) => {
     let availableQuantity: number | null = null;
+    let availabilityUnitLabel: string | null = null;
     if (product) {
       availableQuantity = availabilityFor(Number(product.stocks[0]?.quantity ?? 0), stockQtyPerUnit != null ? Number(stockQtyPerUnit) : null);
+      availabilityUnitLabel = product.packUnit?.name ?? product.unit;
     } else if (recipe && recipe.ingredients.length > 0) {
       const perIngredient = recipe.ingredients.map((ing) => availabilityFor(Number(ing.product.stocks[0]?.quantity ?? 0), Number(ing.quantity)));
       availableQuantity = perIngredient.every((n) => n !== null) ? Math.min(...(perIngredient as number[])) : null;
+      availabilityUnitLabel = "servings";
     }
     const variantsWithStock = variants.map(({ stockProduct, stockQtyPerUnit: variantPerUnit, ...variant }) => ({
       ...variant,
@@ -1270,13 +1273,16 @@ posRouter.get("/menu-items", async (req, res) => {
           }
         : null,
       availableQuantity: stockProduct ? availabilityFor(Number(stockProduct.stocks[0]?.quantity ?? 0), variantPerUnit != null ? Number(variantPerUnit) : null) : null,
+      availabilityUnitLabel: stockProduct ? variant.name : null,
     }));
     // A base item with no stock link of its own but stock-tracked variants
     // (e.g. spirits: the item carries no product/recipe, each pour size —
     // Tot/Double/Bottle — draws from the same bottle stock independently) —
     // the card's at-a-glance figure is the best case among them.
     if (availableQuantity === null && variantsWithStock.some((v) => v.availableQuantity !== null)) {
-      availableQuantity = Math.max(...variantsWithStock.map((v) => v.availableQuantity ?? -1));
+      const bestVariant = variantsWithStock.reduce((best, v) => ((v.availableQuantity ?? -1) > (best.availableQuantity ?? -1) ? v : best));
+      availableQuantity = bestVariant.availableQuantity;
+      availabilityUnitLabel = bestVariant.availabilityUnitLabel;
     }
     if (!effectiveLocationId) availableQuantity = null;
     return {
@@ -1284,6 +1290,7 @@ posRouter.get("/menu-items", async (req, res) => {
       category: menuCategory,
       variants: variantsWithStock.map((v) => ({ ...v, availableQuantity: effectiveLocationId ? v.availableQuantity : null })),
       availableQuantity,
+      availabilityUnitLabel: effectiveLocationId ? availabilityUnitLabel : null,
       // Resolved effective tax (item override else tenant default) so the cart
       // can show a correct preview. The server re-resolves and snapshots this
       // on order create — the client value is never trusted for money.
