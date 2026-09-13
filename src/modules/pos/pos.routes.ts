@@ -1227,7 +1227,15 @@ posRouter.get("/menu-items", async (req, res) => {
         select: {
           id: true, name: true, price: true, sku: true,
           stockQtyPerUnit: true,
-          stockProduct: { select: { id: true, stocks: { where: stockWhere, select: { quantity: true } } } },
+          stockProduct: {
+            select: {
+              id: true,
+              name: true,
+              unit: true,
+              packUnit: { select: { id: true, name: true } },
+              stocks: { where: stockWhere, select: { quantity: true } },
+            },
+          },
         },
       },
     },
@@ -1252,6 +1260,15 @@ posRouter.get("/menu-items", async (req, res) => {
     }
     const variantsWithStock = variants.map(({ stockProduct, stockQtyPerUnit: variantPerUnit, ...variant }) => ({
       ...variant,
+      stockQtyPerUnit: variantPerUnit,
+      stockProduct: stockProduct
+        ? {
+            id: stockProduct.id,
+            name: stockProduct.name,
+            unit: stockProduct.unit,
+            packUnit: stockProduct.packUnit,
+          }
+        : null,
       availableQuantity: stockProduct ? availabilityFor(Number(stockProduct.stocks[0]?.quantity ?? 0), variantPerUnit != null ? Number(variantPerUnit) : null) : null,
     }));
     // A base item with no stock link of its own but stock-tracked variants
