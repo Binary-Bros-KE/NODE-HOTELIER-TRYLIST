@@ -40,6 +40,10 @@ const lineSchema = z.object({
   productId: z.string().trim().min(1),
   quantity: z.coerce.number().positive(),
   unitCost: z.coerce.number().min(0).default(0),
+  sellingPrice: z.coerce.number().min(0).optional(),
+  discountPerUnit: z.coerce.number().min(0).default(0),
+  taxRate: z.coerce.number().min(0).max(100).default(0),
+  taxTreatment: z.enum(["STANDARD", "ZERO_RATED", "EXEMPT"]).default("STANDARD"),
   note: optionalText(255),
 });
 
@@ -50,7 +54,6 @@ const createSchema = z.object({
   expectedDate: optionalDate,
   reference: optionalText(120),
   notes: optionalText(500),
-  taxRate: z.coerce.number().min(0).max(100).default(0),
   items: z.array(lineSchema).min(1, "Add at least one item"),
 });
 // Header fields stay editable while DRAFT; items are replaced wholesale when
@@ -86,12 +89,44 @@ const purchaseInclude = {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-function computeTotals<T extends { quantity: number; unitCost: number }>(items: T[], taxRate: number) {
-  const lines = items.map((i) => ({ ...i, lineTotal: round2(i.quantity * i.unitCost) }));
-  const subtotal = round2(lines.reduce((sum, l) => sum + l.lineTotal, 0));
-  const taxAmount = round2(subtotal * (taxRate / 100));
-  const total = round2(subtotal + taxAmount);
+function lineTaxAmount(lineTotal: number, taxRate: number, taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT") {
+  if (taxTreatment !== "STANDARD" || taxRate <= 0) return 0;
+  return round2(lineTotal - lineTotal / (1 + taxRate / 100));
+}
+
+function computeTotals<T extends { quantity: number; unitCost: number; discountPerUnit?: number; taxRate?: number; taxTreatment?: "STANDARD" | "ZERO_RATED" | "EXEMPT" }>(items: T[]) {
+  const lines = items.map((i) => {
+    const discountPerUnit = i.discountPerUnit ?? 0;
+    const taxRate = i.taxRate ?? 0;
+    const taxTreatment = i.taxTreatment ?? "STANDARD";
+    const netUnitCost = Math.max(0, i.unitCost - discountPerUnit);
+    const lineTotal = round2(i.quantity * netUnitCost);
+    const taxAmount = lineTaxAmount(lineTotal, taxRate, taxTreatment);
+    return { ...i, discountPerUnit, taxRate, taxTreatment, taxAmount, lineTotal };
+  });
+  const total = round2(lines.reduce((sum, l) => sum + l.lineTotal, 0));
+  const taxAmount = round2(lines.reduce((sum, l) => sum + l.taxAmount, 0));
+  const subtotal = round2(total - taxAmount);
   return { lines, subtotal, taxAmount, total };
+}
+
+async function updateProductPricing(
+  tx: Prisma.TransactionClient,
+  tid: string,
+  lines: { productId: string; unitCost: number; sellingPrice?: number; taxRate: number; taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT" }[],
+) {
+  for (const line of lines) {
+    await tx.product.updateMany({
+      where: { id: line.productId, tenantId: tid },
+      data: {
+        unitCost: line.unitCost,
+        ...(line.sellingPrice != null ? { sellingPrice: line.sellingPrice } : {}),
+        taxRate: line.taxRate,
+        taxMode: "INCLUSIVE",
+        taxTreatment: line.taxTreatment,
+      },
+    });
+  }
 }
 
 async function assertSupplier(tid: string, supplierId: string) {
@@ -167,28 +202,45 @@ purchasesRouter.post("/", async (req, res, next) => {
   const data = createSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid purchase", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
-  const { supplierId, items, taxRate, orderDate, ...rest } = data.data;
+  const { supplierId, items, orderDate, ...rest } = data.data;
   try {
     await assertSupplier(tid, supplierId);
     await assertProducts(tid, items);
     if (rest.locationId) await assertLocation(tid, rest.locationId);
-    const { lines, subtotal, taxAmount, total } = computeTotals(items, taxRate);
+    const { lines, subtotal, taxAmount, total } = computeTotals(items);
     const purchaseNo = await nextPurchaseNo(tid);
-    const purchase = await prisma.purchase.create({
-      data: {
-        tenantId: tid,
-        purchaseNo,
-        supplierId,
-        taxRate,
-        subtotal,
-        taxAmount,
-        total,
-        createdBy: req.userId,
-        ...(orderDate ? { orderDate } : {}),
-        ...rest,
-        items: { create: lines.map((l) => ({ productId: l.productId, quantity: l.quantity, unitCost: l.unitCost, lineTotal: l.lineTotal, note: l.note })) },
-      },
-      include: purchaseInclude,
+    const purchase = await prisma.$transaction(async (tx) => {
+      const created = await tx.purchase.create({
+        data: {
+          tenantId: tid,
+          purchaseNo,
+          supplierId,
+          taxRate: 0,
+          subtotal,
+          taxAmount,
+          total,
+          createdBy: req.userId,
+          ...(orderDate ? { orderDate } : {}),
+          ...rest,
+          items: {
+            create: lines.map((l) => ({
+              productId: l.productId,
+              quantity: l.quantity,
+              unitCost: l.unitCost,
+              sellingPrice: l.sellingPrice ?? null,
+              discountPerUnit: l.discountPerUnit,
+              taxRate: l.taxRate,
+              taxTreatment: l.taxTreatment,
+              taxAmount: l.taxAmount,
+              lineTotal: l.lineTotal,
+              note: l.note,
+            })),
+          },
+        },
+        include: purchaseInclude,
+      });
+      await updateProductPricing(tx, tid, lines);
+      return created;
     });
     res.status(201).json({ purchase });
   } catch (error) {
@@ -207,19 +259,42 @@ purchasesRouter.patch("/:id", async (req, res, next) => {
     if (!existing) { res.status(404).json({ error: "Purchase not found" }); return; }
     if (existing.status !== "DRAFT") { res.status(409).json({ error: `A ${existing.status.toLowerCase()} purchase can no longer be edited` }); return; }
 
-    const { supplierId, items, taxRate, orderDate, ...rest } = data.data;
+    const { supplierId, items, orderDate, ...rest } = data.data;
     if (supplierId) await assertSupplier(tid, supplierId);
     if (items) await assertProducts(tid, items);
     if (rest.locationId) await assertLocation(tid, rest.locationId);
 
-    const effectiveTaxRate = taxRate ?? Number(existing.taxRate);
-    const effectiveItems = (items ?? existing.items.map((i) => ({ productId: i.productId, quantity: Number(i.quantity), unitCost: Number(i.unitCost), note: i.note ?? undefined })));
-    const { lines, subtotal, taxAmount, total } = computeTotals(effectiveItems, effectiveTaxRate);
+    const effectiveItems = (items ?? existing.items.map((i) => ({
+      productId: i.productId,
+      quantity: Number(i.quantity),
+      unitCost: Number(i.unitCost),
+      sellingPrice: i.sellingPrice == null ? undefined : Number(i.sellingPrice),
+      discountPerUnit: Number(i.discountPerUnit),
+      taxRate: Number(i.taxRate),
+      taxTreatment: i.taxTreatment,
+      note: i.note ?? undefined,
+    })));
+    const { lines, subtotal, taxAmount, total } = computeTotals(effectiveItems);
 
     const purchase = await prisma.$transaction(async (tx) => {
       if (items) {
         await tx.purchaseItem.deleteMany({ where: { purchaseId: existing.id } });
-        await tx.purchaseItem.createMany({ data: lines.map((l) => ({ purchaseId: existing.id, productId: l.productId, quantity: l.quantity, unitCost: l.unitCost, lineTotal: l.lineTotal, note: l.note })) });
+        await tx.purchaseItem.createMany({
+          data: lines.map((l) => ({
+            purchaseId: existing.id,
+            productId: l.productId,
+            quantity: l.quantity,
+            unitCost: l.unitCost,
+            sellingPrice: l.sellingPrice ?? null,
+            discountPerUnit: l.discountPerUnit,
+            taxRate: l.taxRate,
+            taxTreatment: l.taxTreatment,
+            taxAmount: l.taxAmount,
+            lineTotal: l.lineTotal,
+            note: l.note,
+          })),
+        });
+        await updateProductPricing(tx, tid, lines);
       }
       return tx.purchase.update({
         where: { id: existing.id },
@@ -227,7 +302,7 @@ purchasesRouter.patch("/:id", async (req, res, next) => {
           ...rest,
           ...(supplierId ? { supplierId } : {}),
           ...(orderDate ? { orderDate } : {}),
-          taxRate: effectiveTaxRate,
+          taxRate: 0,
           subtotal,
           taxAmount,
           total,

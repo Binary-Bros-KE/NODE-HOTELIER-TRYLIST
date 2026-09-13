@@ -1374,7 +1374,7 @@ posRouter.post("/retail-orders", async (req, res) => {
   // Retail lines carry the tenant's default tax treatment as their snapshot,
   // the same way a menu line carries its own — keeps receipts and the tax
   // breakdown complete across every channel.
-  const retailLineTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
+  const retailFallbackTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
 
   try {
     const order = await prisma.$transaction(async (tx) => {
@@ -1387,14 +1387,24 @@ posRouter.post("/retail-orders", async (req, res) => {
         const products = await tx.product.findMany({ where: { id: { in: productIds }, tenantId: tid, isActive: true, sellingPrice: { not: null } } });
         if (products.length !== new Set(productIds).size) throw Object.assign(new Error("Every item must be an active, sellable product from this property"), { status: 400 });
         for (const p of products) productNames.set(p.id, p.name);
-        const prices = new Map(products.map((p) => [p.id, p.sellingPrice!]));
-        itemsCreate = parsed.data.items.map((item) => ({ productId: item.productId, quantity: item.quantity, unitPrice: prices.get(item.productId)!, ...retailLineTax }));
+        const productsById = new Map(products.map((p) => [p.id, p]));
+        itemsCreate = parsed.data.items.map((item) => {
+          const product = productsById.get(item.productId)!;
+          return {
+            productId: item.productId,
+            quantity: item.quantity,
+            unitPrice: product.sellingPrice!,
+            taxRate: product.taxRate ?? retailFallbackTax.taxRate,
+            taxMode: product.taxMode ?? retailFallbackTax.taxMode,
+            taxTreatment: product.taxTreatment ?? retailFallbackTax.taxTreatment,
+          };
+        });
       } else {
         const serviceIds = parsed.data.items.map((item) => item.serviceId);
         const services = await tx.service.findMany({ where: { id: { in: serviceIds }, tenantId: tid, isActive: true } });
         if (services.length !== new Set(serviceIds).size) throw Object.assign(new Error("Every item must be an active service from this property"), { status: 400 });
         const prices = new Map(services.map((s) => [s.id, s.price]));
-        itemsCreate = parsed.data.items.map((item) => ({ serviceId: item.serviceId, quantity: item.quantity, unitPrice: prices.get(item.serviceId)!, ...retailLineTax }));
+        itemsCreate = parsed.data.items.map((item) => ({ serviceId: item.serviceId, quantity: item.quantity, unitPrice: prices.get(item.serviceId)!, ...retailFallbackTax }));
       }
 
       const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });

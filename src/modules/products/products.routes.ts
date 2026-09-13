@@ -58,6 +58,9 @@ const createSchema = z.object({
   // nullableNumber (not optionalNumber) so blanking the field on an edit
   // actually clears it instead of silently leaving the old price in place.
   sellingPrice: nullableNumber(0).optional(),
+  taxRate: nullableNumber(0).optional(),
+  taxMode: z.enum(["INCLUSIVE", "EXCLUSIVE"]).optional(),
+  taxTreatment: z.enum(["STANDARD", "ZERO_RATED", "EXEMPT"]).optional(),
   preferredSupplier: optionalText(120),
   isActive: z.boolean().default(true),
 });
@@ -122,6 +125,9 @@ const productFields = {
   maxStockLevel: true,
   unitCost: true,
   sellingPrice: true,
+  taxRate: true,
+  taxMode: true,
+  taxTreatment: true,
   preferredSupplier: true,
   isActive: true,
   createdAt: true,
