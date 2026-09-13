@@ -203,6 +203,15 @@ enum Permission {
   // manager, accountant, ...) that aren't shift workers. A Super Admin
   // already bypasses every permission check, shift enforcement included.
   SHIFT_EXEMPT
+  // Raise, edit, submit, and cancel a purchase requisition (product +
+  // quantity only — this role never sees or sets cost). Typically a
+  // storekeeper or a counter/bar lead who notices something is running low.
+  REQUISITION_CREATE
+  // Approve or reject a submitted requisition (setting its estimated line
+  // costs as part of that review, since the raiser never enters them) and
+  // convert an approved one into a Purchase. Deliberately one permission —
+  // whoever can approve is trusted to also place the order.
+  REQUISITION_APPROVE
 }
 
 enum EmploymentType {

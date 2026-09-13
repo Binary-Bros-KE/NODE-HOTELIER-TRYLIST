@@ -46,7 +46,17 @@ export const ALL_SECTIONS = [
 export const ALL_PERMISSIONS = [
   "POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION",
   "SHIFT_MANAGE", "ATTENDANCE_MANAGE", "SHIFT_EXEMPT",
+  "REQUISITION_CREATE", "REQUISITION_APPROVE",
 ] as const;
+
+// Who raises a requisition (product + quantity only) vs. who approves it
+// (setting cost, then converting to a purchase) is deliberately not fixed
+// to one named role — a Storekeeper or a Barman noticing stock is low can
+// both raise one; whoever the property trusts to see cost and place the
+// order approves it. These are just the sensible starting defaults —
+// Roles & Permissions can grant either to any other role too.
+const REQUISITION_RAISER_PERMISSIONS = ["REQUISITION_CREATE"] as const;
+const REQUISITION_APPROVER_PERMISSIONS = ["REQUISITION_APPROVE"] as const;
 
 // Runs the counter in a bar/club: sees every order at the location (not
 // just ones they rang up), marks a counter-routed order served, and
@@ -60,10 +70,10 @@ export const SYSTEM_ROLES = [
   { name: "Receptionist", description: "Front desk check-in, reservations, and guest billing.", allowedSections: ["OVERVIEW", "RECEPTION"], permissions: [] },
   { name: "Chef", description: "Kitchen orders, menu, and recipes.", allowedSections: ["OVERVIEW", "KITCHEN"], permissions: [] },
   { name: "Waiter", description: "Point of sale, tables, and orders.", allowedSections: ["OVERVIEW", "SALES"], permissions: [] },
-  { name: "Barman", description: "Runs the counter — sees and serves orders waiters send in, approves returns.", allowedSections: ["OVERVIEW", "SALES"], permissions: BARMAN_PERMISSIONS },
+  { name: "Barman", description: "Runs the counter — sees and serves orders waiters send in, approves returns.", allowedSections: ["OVERVIEW", "SALES"], permissions: [...BARMAN_PERMISSIONS, ...REQUISITION_RAISER_PERMISSIONS] },
   { name: "Housekeeping", description: "Room tasks and cleanliness tracking.", allowedSections: ["OVERVIEW", "HOUSEKEEPING"], permissions: [] },
-  { name: "Storekeeper", description: "Inventory, stock, and supplier records.", allowedSections: ["OVERVIEW", "INVENTORY"], permissions: [] },
-  { name: "Accountant", description: "Finance, expenses, and reports.", allowedSections: ["OVERVIEW", "FINANCE", "REPORTS"], permissions: [] },
+  { name: "Storekeeper", description: "Inventory, stock, and supplier records.", allowedSections: ["OVERVIEW", "INVENTORY"], permissions: REQUISITION_RAISER_PERMISSIONS },
+  { name: "Accountant", description: "Finance, expenses, and reports.", allowedSections: ["OVERVIEW", "FINANCE", "REPORTS"], permissions: REQUISITION_APPROVER_PERMISSIONS },
 ] as const;
 
 const SYSTEM_PAYMENT_METHODS = [

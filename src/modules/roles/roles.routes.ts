@@ -9,7 +9,11 @@ export const rolesRouter = Router();
 const sections = ["OVERVIEW", "RECEPTION", "HOUSEKEEPING", "SALES", "KITCHEN", "SERVICE_CENTER", "INVENTORY", "TEAM", "FINANCE", "REPORTS", "SYSTEM"] as const;
 // Action-level capabilities (enforced server-side by requirePermission) —
 // separate from `allowedSections`, which only hides sidebar/routes.
-const permissions = ["POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION", "SHIFT_MANAGE", "ATTENDANCE_MANAGE", "SHIFT_EXEMPT"] as const;
+const permissions = [
+  "POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION",
+  "SHIFT_MANAGE", "ATTENDANCE_MANAGE", "SHIFT_EXEMPT",
+  "REQUISITION_CREATE", "REQUISITION_APPROVE",
+] as const;
 
 const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 
