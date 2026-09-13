@@ -34,7 +34,11 @@ const createSchema = z.object({
   brand: optionalText(80),
   description: optionalText(500),
   photoUrl: optionalText(2000),
-  unit: z.enum(UNITS_OF_MEASURE).default("Each"),
+  // Free text, not the fixed UNITS_OF_MEASURE list below (that's still used
+  // by Assets) — the product form now sources its options from this
+  // tenant's own UnitOfMeasure table (the same one packUnitId points at),
+  // so a name that table has and this list doesn't must still validate.
+  unit: z.string().trim().min(1).max(40).default("Each"),
   isPerishable: z.boolean().default(false),
   shelfLifeDays: optionalNumber(0),
   // Pack / container tracking. packUnitId points at a UnitOfMeasure row
