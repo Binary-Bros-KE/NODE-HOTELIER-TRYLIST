@@ -1207,36 +1207,81 @@ posRouter.get("/menu-items", async (req, res) => {
     ...(locationCount > 0 ? { OR: [{ locations: { none: {} } }, ...(effectiveLocationId ? [{ locations: { some: { id: effectiveLocationId } } }] : [])] } : {}),
   };
 
+  // A sentinel that can never match a real location id — used instead of
+  // omitting the `where` below (which would fetch every location's stock and
+  // wrongly sum them). When there's genuinely no location context yet,
+  // availableQuantity is forced to null (untracked) after the query, not
+  // computed from this deliberately-empty result.
+  const stockWhere = { locationId: effectiveLocationId ?? "__no_location__" };
+
   const rows = await prisma.menuItem.findMany({
     where,
     include: {
       menuCategory: true,
-      product: true,
+      product: { include: { stocks: { where: stockWhere, select: { quantity: true } } } },
       locations: { select: { id: true, name: true } },
-      recipe: { include: { ingredients: { include: { product: true } } } },
-      variants: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }], select: { id: true, name: true, price: true, sku: true } },
+      recipe: { include: { ingredients: { include: { product: { include: { stocks: { where: stockWhere, select: { quantity: true } } } } } } } },
+      variants: {
+        where: { isActive: true },
+        orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+        select: {
+          id: true, name: true, price: true, sku: true,
+          stockQtyPerUnit: true,
+          stockProduct: { select: { id: true, stocks: { where: stockWhere, select: { quantity: true } } } },
+        },
+      },
     },
     orderBy: [{ menuCategory: { sortOrder: "asc" } }, { sortOrder: "asc" }, { name: "asc" }],
   });
-  // The client still reads `.category` — keep that shape, sourced from the
-  // menu's own category table now. Add-ons come from GET /pos/addons (a flat
-  // catalog), not per item.
-  const items = rows.map(({ menuCategory, taxRate, taxMode, taxTreatment, ...item }) => ({
-    ...item,
-    category: menuCategory,
-    // Resolved effective tax (item override else tenant default) so the cart
-    // can show a correct preview. The server re-resolves and snapshots this
-    // on order create — the client value is never trusted for money.
-    taxRate: taxRate ?? taxDefaults?.taxRate ?? null,
-    taxMode: taxMode ?? taxDefaults?.taxMode ?? null,
-    taxTreatment: taxTreatment ?? taxDefaults?.taxTreatment ?? null,
-  }));
+
+  /** How many of this item (or variant) can be sold right now — floor(stock
+   * / qty-per-unit), or the minimum across a recipe's ingredients. null means
+   * untracked (no product/recipe link) — always orderable, no stock pill. */
+  function availabilityFor(stockQty: number, perUnit: number | null | undefined): number | null {
+    const per = Number(perUnit ?? 1);
+    return per > 0 ? Math.floor(stockQty / per) : null;
+  }
+
+  const items = rows.map(({ menuCategory, taxRate, taxMode, taxTreatment, product, recipe, variants, stockQtyPerUnit, ...item }) => {
+    let availableQuantity: number | null = null;
+    if (product) {
+      availableQuantity = availabilityFor(Number(product.stocks[0]?.quantity ?? 0), stockQtyPerUnit != null ? Number(stockQtyPerUnit) : null);
+    } else if (recipe && recipe.ingredients.length > 0) {
+      const perIngredient = recipe.ingredients.map((ing) => availabilityFor(Number(ing.product.stocks[0]?.quantity ?? 0), Number(ing.quantity)));
+      availableQuantity = perIngredient.every((n) => n !== null) ? Math.min(...(perIngredient as number[])) : null;
+    }
+    const variantsWithStock = variants.map(({ stockProduct, stockQtyPerUnit: variantPerUnit, ...variant }) => ({
+      ...variant,
+      availableQuantity: stockProduct ? availabilityFor(Number(stockProduct.stocks[0]?.quantity ?? 0), variantPerUnit != null ? Number(variantPerUnit) : null) : null,
+    }));
+    // A base item with no stock link of its own but stock-tracked variants
+    // (e.g. spirits: the item carries no product/recipe, each pour size —
+    // Tot/Double/Bottle — draws from the same bottle stock independently) —
+    // the card's at-a-glance figure is the best case among them.
+    if (availableQuantity === null && variantsWithStock.some((v) => v.availableQuantity !== null)) {
+      availableQuantity = Math.max(...variantsWithStock.map((v) => v.availableQuantity ?? -1));
+    }
+    if (!effectiveLocationId) availableQuantity = null;
+    return {
+      ...item,
+      category: menuCategory,
+      variants: variantsWithStock.map((v) => ({ ...v, availableQuantity: effectiveLocationId ? v.availableQuantity : null })),
+      availableQuantity,
+      // Resolved effective tax (item override else tenant default) so the cart
+      // can show a correct preview. The server re-resolves and snapshots this
+      // on order create — the client value is never trusted for money.
+      taxRate: taxRate ?? taxDefaults?.taxRate ?? null,
+      taxMode: taxMode ?? taxDefaults?.taxMode ?? null,
+      taxTreatment: taxTreatment ?? taxDefaults?.taxTreatment ?? null,
+    };
+  });
   res.status(200).json({ items });
 });
 
-/** Lists the products the cashier can add to a retail sale at their location.
- * A location "sells" a product iff it currently has stock there — no
- * separate allocation flag, same design as the rest of the stock ledger. */
+/** Lists the products the cashier can add to a retail sale at their location
+ * — every active sellable one, including zero-stock (shown, not hidden, so
+ * "we don't have this" is visible at a glance rather than the item just
+ * disappearing from the grid). */
 posRouter.get("/product-items", async (req, res) => {
   const tid = tenantIdFor(req);
   const query = z.object({ locationId: z.string().cuid().optional() }).safeParse(req.query);
@@ -1246,8 +1291,8 @@ posRouter.get("/product-items", async (req, res) => {
   if (!effectiveLocationId) { res.status(200).json({ items: [] }); return; }
 
   const items = await prisma.product.findMany({
-    where: { tenantId: tid, isActive: true, sellingPrice: { not: null }, stocks: { some: { locationId: effectiveLocationId, quantity: { gt: 0 } } } },
-    include: { category: true, stocks: { where: { locationId: effectiveLocationId }, select: { quantity: true } } },
+    where: { tenantId: tid, isActive: true, sellingPrice: { not: null } },
+    include: { category: true, packUnit: { select: { id: true, name: true } }, stocks: { where: { locationId: effectiveLocationId }, select: { quantity: true } } },
     orderBy: { name: "asc" },
   });
   res.status(200).json({ items: items.map((item) => ({ ...item, availableQuantity: item.stocks[0]?.quantity ?? 0 })) });
