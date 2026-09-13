@@ -53,9 +53,11 @@ const createSchema = z.object({
   reorderLevel: z.coerce.number().min(0).default(0),
   maxStockLevel: optionalNumber(0),
   unitCost: optionalNumber(0),
-  // Null/omitted means this product is never sold directly (e.g. a recipe
+  // Null means this product is never sold directly (e.g. a recipe
   // ingredient only) — the Products POS only lists ones with a price set.
-  sellingPrice: optionalNumber(0),
+  // nullableNumber (not optionalNumber) so blanking the field on an edit
+  // actually clears it instead of silently leaving the old price in place.
+  sellingPrice: nullableNumber(0).optional(),
   preferredSupplier: optionalText(120),
   isActive: z.boolean().default(true),
 });
