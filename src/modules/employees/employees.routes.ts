@@ -40,7 +40,7 @@ const createSchema = z.object({
   status: z.enum(statuses).default("ACTIVE"),
   dateHired: z.coerce.date(),
   supervisorId: optionalId,
-  roleId: optionalId,
+  roleId: z.string().trim().min(1, "Choose a role"),
   // Locations this employee is pinned to. Empty = works anywhere.
   locationIds: z.array(z.string().trim().min(1)).default([]),
   // The POS's pre-selected location for this employee — must be one of
