@@ -37,8 +37,22 @@ export const ALL_SECTIONS = [
 ] as const;
 
 // Action-level capabilities (enforced server-side) — separate from the
-// sections above, which only hide sidebar/routes client-side.
-export const ALL_PERMISSIONS = ["POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION"] as const;
+// sections above, which only hide sidebar/routes client-side. Kept as an
+// explicit list, same as roles.routes.ts's own `permissions` array — not
+// derived from the Prisma enum — so remember to add a new value here (and
+// there) when the enum grows; this one had drifted (missing SHIFT_MANAGE/
+// ATTENDANCE_MANAGE/SHIFT_EXEMPT), silently under-granting Super Admin and
+// Manager, until fixed 2026-09-13.
+export const ALL_PERMISSIONS = [
+  "POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION",
+  "SHIFT_MANAGE", "ATTENDANCE_MANAGE", "SHIFT_EXEMPT",
+] as const;
+
+// Runs the counter in a bar/club: sees every order at the location (not
+// just ones they rang up), marks a counter-routed order served, and
+// approves/rejects a waiter's cancellation or return request. Deliberately
+// no SHIFT_MANAGE/ATTENDANCE_MANAGE — that's a manager/accountant concern.
+const BARMAN_PERMISSIONS = ["POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION"] as const;
 
 export const SYSTEM_ROLES = [
   { name: "Super Admin", description: "Full access to every section of the workspace.", allowedSections: ALL_SECTIONS, permissions: ALL_PERMISSIONS },
@@ -46,6 +60,7 @@ export const SYSTEM_ROLES = [
   { name: "Receptionist", description: "Front desk check-in, reservations, and guest billing.", allowedSections: ["OVERVIEW", "RECEPTION"], permissions: [] },
   { name: "Chef", description: "Kitchen orders, menu, and recipes.", allowedSections: ["OVERVIEW", "KITCHEN"], permissions: [] },
   { name: "Waiter", description: "Point of sale, tables, and orders.", allowedSections: ["OVERVIEW", "SALES"], permissions: [] },
+  { name: "Barman", description: "Runs the counter — sees and serves orders waiters send in, approves returns.", allowedSections: ["OVERVIEW", "SALES"], permissions: BARMAN_PERMISSIONS },
   { name: "Housekeeping", description: "Room tasks and cleanliness tracking.", allowedSections: ["OVERVIEW", "HOUSEKEEPING"], permissions: [] },
   { name: "Storekeeper", description: "Inventory, stock, and supplier records.", allowedSections: ["OVERVIEW", "INVENTORY"], permissions: [] },
   { name: "Accountant", description: "Finance, expenses, and reports.", allowedSections: ["OVERVIEW", "FINANCE", "REPORTS"], permissions: [] },
