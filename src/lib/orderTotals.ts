@@ -37,6 +37,11 @@ export type TaxLine = {
   gross: number;
 };
 
+export type TaxLineItem = TaxLine & {
+  index: number;
+  quantity: number;
+};
+
 function round2(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
@@ -44,7 +49,7 @@ function round2(value: number) {
 function labelFor(treatment: TaxTreatment, rate: number, mode: TaxMode) {
   if (treatment === "EXEMPT") return "Exempt";
   if (treatment === "ZERO_RATED") return "Zero-rated (0%)";
-  return `VAT ${rate}%${mode === "INCLUSIVE" ? " (incl)" : ""}`;
+  return `VAT ${rate}% ${mode === "EXCLUSIVE" ? "exclusive" : "inclusive"}`;
 }
 
 /** Single source of truth for order money math, shared by the POS order
@@ -54,7 +59,7 @@ function labelFor(treatment: TaxTreatment, rate: number, mode: TaxMode) {
  * total correctly. The order discount is apportioned across lines in
  * proportion to their value before tax is worked out. */
 export function computeOrderFinancials(order: OrderForTotals, tax: TaxSettings) {
-  const fallbackRate = tax?.taxRate != null ? Number(tax.taxRate) : 0;
+  const fallbackRate = tax?.taxRate != null ? Number(tax.taxRate) : 16;
   const fallbackMode: TaxMode = tax?.taxMode ?? "INCLUSIVE";
   const fallbackTreatment: TaxTreatment = tax?.taxTreatment ?? "STANDARD";
 
@@ -72,8 +77,9 @@ export function computeOrderFinancials(order: OrderForTotals, tax: TaxSettings) 
   let grossTotal = 0;
   let zeroRatedAmount = 0;
   let exemptAmount = 0;
+  const taxLineItems: TaxLineItem[] = [];
 
-  for (const { lineSubtotal, item } of lines) {
+  for (const [index, { lineSubtotal, item }] of lines.entries()) {
     // Apportion the order discount by line value so each line's tax is worked
     // out on what that line actually contributes after the discount.
     const share = subtotal > 0 ? lineSubtotal - discount * (lineSubtotal / subtotal) : 0;
@@ -117,6 +123,18 @@ export function computeOrderFinancials(order: OrderForTotals, tax: TaxSettings) 
     bucket.tax += taxAmount;
     bucket.gross += gross;
     buckets.set(key, bucket);
+    taxLineItems.push({
+      key,
+      label: bucket.label,
+      treatment: effTreatment,
+      rate: bucket.rate,
+      mode,
+      net: round2(net),
+      tax: round2(taxAmount),
+      gross: round2(gross),
+      index,
+      quantity: item.quantity,
+    });
   }
 
   const taxLines = [...buckets.values()]
@@ -139,5 +157,6 @@ export function computeOrderFinancials(order: OrderForTotals, tax: TaxSettings) 
     exemptAmount: round2(exemptAmount),
     total: round2(grossTotal),
     taxLines,
+    taxLineItems,
   };
 }

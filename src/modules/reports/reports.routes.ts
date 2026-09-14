@@ -440,6 +440,129 @@ reportsRouter.get("/sales", async (req, res, next) => {
 });
 
 // ============================================================================
+// Tax Report — VAT collected by treatment/rate, with the highest-taxed items
+// under each bucket. Uses the same line-level tax snapshots as receipts.
+// ============================================================================
+
+reportsRouter.get("/tax", async (req, res, next) => {
+  try {
+    const query = salesQuerySchema.safeParse(req.query);
+    if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
+    const { period, date, from, to, locationId } = query.data;
+    const tid = tenantId(req);
+    const { start, end } = resolveSalesRange(period, date, from, to);
+
+    const [tax, orders] = await Promise.all([
+      taxSettingsFor(tid),
+      prisma.posOrder.findMany({
+        where: { tenantId: tid, status: "COMPLETED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
+        include: {
+          items: {
+            include: {
+              addons: { select: { quantity: true, unitPrice: true } },
+              menuItem: { select: { id: true, name: true, sku: true, menuCategory: { select: { name: true } } } },
+              variant: { select: { id: true, name: true, sku: true } },
+              product: { select: { id: true, name: true, sku: true, category: { select: { name: true } } } },
+              service: { select: { id: true, name: true, category: { select: { name: true } } } },
+            },
+          },
+        },
+      }),
+    ]);
+
+    const categories = new Map<string, {
+      key: string;
+      label: string;
+      treatment: string;
+      rate: number;
+      mode: string;
+      lines: number;
+      net: number;
+      tax: number;
+      gross: number;
+      items: Map<string, { itemId: string | null; name: string; sku: string | null; category: string | null; quantity: number; net: number; tax: number; gross: number }>;
+    }>();
+
+    let net = 0;
+    let taxAmount = 0;
+    let gross = 0;
+
+    for (const order of orders) {
+      const financials = computeOrderFinancials(order, tax);
+      net += financials.net;
+      taxAmount += financials.taxAmount;
+      gross += financials.total;
+
+      for (const line of financials.taxLineItems) {
+        const orderItem = order.items[line.index];
+        if (!orderItem) continue;
+        const itemId = orderItem.variantId ?? orderItem.menuItemId ?? orderItem.productId ?? orderItem.serviceId ?? null;
+        const sku = orderItem.variant?.sku ?? orderItem.menuItem?.sku ?? orderItem.product?.sku ?? null;
+        const baseName = orderItem.menuItem?.name ?? orderItem.product?.name ?? orderItem.service?.name ?? "Unknown";
+        const name = orderItem.variant ? `${baseName} (${orderItem.variant.name})` : baseName;
+        const category = orderItem.menuItem?.menuCategory?.name ?? orderItem.product?.category?.name ?? orderItem.service?.category?.name ?? null;
+
+        const bucket = categories.get(line.key) ?? {
+          key: line.key,
+          label: line.label,
+          treatment: line.treatment,
+          rate: line.rate,
+          mode: line.mode,
+          lines: 0,
+          net: 0,
+          tax: 0,
+          gross: 0,
+          items: new Map(),
+        };
+        bucket.lines += 1;
+        bucket.net += line.net;
+        bucket.tax += line.tax;
+        bucket.gross += line.gross;
+        const itemKey = `${line.key}|${itemId ?? name}`;
+        const itemBucket = bucket.items.get(itemKey) ?? { itemId, name, sku, category, quantity: 0, net: 0, tax: 0, gross: 0 };
+        itemBucket.quantity += line.quantity;
+        itemBucket.net += line.net;
+        itemBucket.tax += line.tax;
+        itemBucket.gross += line.gross;
+        bucket.items.set(itemKey, itemBucket);
+        categories.set(line.key, bucket);
+      }
+    }
+
+    const breakdown = [...categories.values()]
+      .map((category) => ({
+        key: category.key,
+        label: category.label,
+        treatment: category.treatment,
+        rate: category.rate,
+        mode: category.mode,
+        lines: category.lines,
+        net: round2(category.net),
+        tax: round2(category.tax),
+        gross: round2(category.gross),
+        topItems: [...category.items.values()]
+          .map((item) => ({ ...item, quantity: round2(item.quantity), net: round2(item.net), tax: round2(item.tax), gross: round2(item.gross) }))
+          .sort((a, b) => b.tax - a.tax || b.gross - a.gross)
+          .slice(0, 10),
+      }))
+      .sort((a, b) => b.tax - a.tax || b.gross - a.gross);
+
+    res.json({
+      range: { period, start: start.toISOString(), end: end.toISOString() },
+      summary: { net: round2(net), tax: round2(taxAmount), gross: round2(gross), orders: orders.length, lines: breakdown.reduce((sum, b) => sum + b.lines, 0) },
+      breakdown,
+      topItems: breakdown
+        .flatMap((b) => b.topItems.map((item) => ({ ...item, taxCategory: b.label })))
+        .filter((item) => item.tax > 0)
+        .sort((a, b) => b.tax - a.tax || b.gross - a.gross)
+        .slice(0, 10),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============================================================================
 // Inventory Report — a live (or as-of-date) stock snapshot: what's on hand
 // right now, its value by category, and a per-location breakdown. This is
 // deliberately a different report from GET /inventory above (which is a

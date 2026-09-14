@@ -67,7 +67,6 @@ const statusSchema = z.object({
 
 const convertSchema = z.object({
   supplierId: z.string().trim().min(1),
-  taxRate: z.coerce.number().min(0).max(100).default(0),
   expectedDate: optionalDate,
   reference: optionalText(120),
   notes: optionalText(500),
@@ -83,6 +82,11 @@ const requisitionInclude = {
 } as const;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+function lineTaxAmount(lineTotal: number, taxRate: number, taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT") {
+  if (taxTreatment !== "STANDARD" || taxRate <= 0) return 0;
+  return round2(lineTotal - lineTotal / (1 + taxRate / 100));
+}
 
 function withLineTotals<T extends { quantity: number; estimatedUnitCost: number; packSize?: Prisma.Decimal | number | null }>(items: T[]) {
   const lines = items.map((i) => ({ ...i, lineTotal: round2(stockQuantityToCostUnits(i.quantity, i.packSize) * i.estimatedUnitCost) }));
@@ -323,9 +327,12 @@ purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_A
   if (!data.success) { res.status(400).json({ error: "Invalid conversion", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   const id = req.params.id as string;
-  const { supplierId, taxRate, expectedDate, reference, notes } = data.data;
+  const { supplierId, expectedDate, reference, notes } = data.data;
   try {
-    const existing = await prisma.purchaseRequisition.findFirst({ where: { id, tenantId: tid }, include: { items: { include: { product: { select: { packSize: true } } } } } });
+    const existing = await prisma.purchaseRequisition.findFirst({
+      where: { id, tenantId: tid },
+      include: { items: { include: { product: { select: { packSize: true, taxRate: true, taxTreatment: true } } } } },
+    });
     if (!existing) { res.status(404).json({ error: "Requisition not found" }); return; }
     if (existing.status !== "APPROVED") { res.status(409).json({ error: "Only an approved requisition can be converted to a purchase" }); return; }
     await assertSupplier(tid, supplierId);
@@ -334,12 +341,15 @@ purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_A
       productId: i.productId,
       quantity: Number(i.quantity),
       unitCost: Number(i.estimatedUnitCost),
+      taxRate: i.product.taxRate != null ? Number(i.product.taxRate) : 16,
+      taxTreatment: i.product.taxTreatment ?? "STANDARD",
       lineTotal: round2(stockQuantityToCostUnits(i.quantity, i.product.packSize) * Number(i.estimatedUnitCost)),
       note: i.note ?? undefined,
     }));
-    const subtotal = round2(lines.reduce((sum, l) => sum + l.lineTotal, 0));
-    const taxAmount = round2(subtotal * (taxRate / 100));
-    const total = round2(subtotal + taxAmount);
+    const linesWithTax = lines.map((line) => ({ ...line, taxAmount: lineTaxAmount(line.lineTotal, line.taxRate, line.taxTreatment) }));
+    const total = round2(linesWithTax.reduce((sum, l) => sum + l.lineTotal, 0));
+    const taxAmount = round2(linesWithTax.reduce((sum, l) => sum + l.taxAmount, 0));
+    const subtotal = round2(total - taxAmount);
     const purchaseNo = await nextPurchaseNo(tid);
 
     const purchase = await prisma.$transaction(async (tx) => {
@@ -349,7 +359,7 @@ purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_A
           purchaseNo,
           supplierId,
           status: "DRAFT",
-          taxRate,
+          taxRate: 0,
           subtotal,
           taxAmount,
           total,
@@ -358,7 +368,7 @@ purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_A
           notes,
           requisitionId: existing.id,
           createdBy: req.userId,
-          items: { create: lines.map((l) => ({ productId: l.productId, quantity: l.quantity, unitCost: l.unitCost, lineTotal: l.lineTotal, note: l.note })) },
+          items: { create: linesWithTax.map((l) => ({ productId: l.productId, quantity: l.quantity, unitCost: l.unitCost, taxRate: l.taxRate, taxTreatment: l.taxTreatment, taxAmount: l.taxAmount, lineTotal: l.lineTotal, note: l.note })) },
         },
         include: {
           supplier: { select: { id: true, name: true } },
