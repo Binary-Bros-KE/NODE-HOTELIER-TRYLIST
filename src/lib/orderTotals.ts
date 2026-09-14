@@ -18,6 +18,7 @@ export type OrderLineForTotals = {
 
 export type OrderForTotals = {
   discount: Decimalish;
+  saleType?: "SALE" | "COMPLIMENTARY";
   items: OrderLineForTotals[];
 };
 
@@ -144,9 +145,27 @@ export function computeOrderFinancials(order: OrderForTotals, tax: TaxSettings) 
   // Back-compat scalar rate/mode: the standard bucket that carries the most
   // value, else the fallback.
   const dominantStandard = taxLines.filter((l) => l.treatment === "STANDARD").sort((a, b) => b.gross - a.gross)[0];
+  const rawSubtotal = round2(subtotal);
+  if (order.saleType === "COMPLIMENTARY") {
+    return {
+      subtotal: rawSubtotal,
+      discount: rawSubtotal,
+      taxable: 0,
+      net: 0,
+      taxRate: dominantStandard?.rate ?? (fallbackTreatment === "STANDARD" ? fallbackRate : 0),
+      taxMode: dominantStandard?.mode ?? fallbackMode,
+      taxAmount: 0,
+      zeroRatedAmount: 0,
+      exemptAmount: 0,
+      total: 0,
+      complimentaryValue: rawSubtotal,
+      taxLines: [],
+      taxLineItems: [],
+    };
+  }
 
   return {
-    subtotal: round2(subtotal),
+    subtotal: rawSubtotal,
     discount: round2(discount),
     taxable: round2(netTotal - zeroRatedAmount - exemptAmount),
     net: round2(netTotal),
@@ -156,6 +175,7 @@ export function computeOrderFinancials(order: OrderForTotals, tax: TaxSettings) 
     zeroRatedAmount: round2(zeroRatedAmount),
     exemptAmount: round2(exemptAmount),
     total: round2(grossTotal),
+    complimentaryValue: 0,
     taxLines,
     taxLineItems,
   };

@@ -150,6 +150,21 @@ enum PosOrderChannel {
   SERVICES
 }
 
+enum PosOrderSaleType {
+  SALE
+  COMPLIMENTARY
+}
+
+enum ComplimentaryOrderRole {
+  HOST_COMP
+  GUEST_SPEND
+}
+
+enum ComplimentarySessionStatus {
+  OPEN
+  CLOSED
+}
+
 enum TableStatus {
   AVAILABLE
   OCCUPIED
@@ -310,6 +325,7 @@ model Tenant {
   productStocks         ProductStock[]
   inventoryMovements    InventoryMovement[]
   posOrders             PosOrder[]
+  complimentarySessions ComplimentarySession[]
   addons                Addon[]
   menuItems             MenuItem[]
   menuCategories        MenuCategory[]
@@ -1784,6 +1800,11 @@ model PosOrder {
   orderNumber        Int
   status             PosOrderStatus        @default(OPEN)
   channel            PosOrderChannel       @default(FOOD)
+  saleType           PosOrderSaleType      @default(SALE)
+  complimentarySessionId String?
+  complimentarySession   ComplimentarySession? @relation(fields: [complimentarySessionId], references: [id], onDelete: SetNull)
+  complimentaryOrderRole ComplimentaryOrderRole?
+  complimentaryReason    String?
   discount           Decimal               @default(0) @db.Decimal(12, 2)
   notes              String?
   readyAt            DateTime?
@@ -1821,6 +1842,26 @@ model PosOrder {
   @@index([tableId])
   @@index([locationId])
   @@index([customerId])
+  @@index([tenantId, saleType, updatedAt])
+  @@index([complimentarySessionId])
+}
+
+model ComplimentarySession {
+  id          String                     @id @default(cuid())
+  tenantId    String
+  tenant      Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  title       String
+  hostName    String
+  hostPhone   String?
+  eventDate   DateTime                   @default(now())
+  status      ComplimentarySessionStatus @default(OPEN)
+  notes       String?
+  createdBy   String?
+  createdAt   DateTime                   @default(now())
+  updatedAt   DateTime                   @updatedAt
+  orders      PosOrder[]
+
+  @@index([tenantId, status, eventDate])
 }
 
 // One row per movement of a customer's balance: +ve raises it (an order

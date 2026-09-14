@@ -157,7 +157,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
         where: { tenantId: tid, status: "COMPLETED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
-        include: { items: { include: orderItemInclude }, location: { select: { id: true, name: true } }, customer: { select: { id: true, firstName: true, lastName: true } } },
+        include: { items: { include: orderItemInclude }, location: { select: { id: true, name: true } }, customer: { select: { id: true, firstName: true, lastName: true } }, complimentarySession: true },
       }),
       prisma.posOrder.findMany({
         where: { tenantId: tid, status: "CANCELLED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
@@ -216,6 +216,9 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const topItemsMap = new Map<string, { name: string; qty: number; revenue: number }>();
     const byLocationMap = new Map<string, { name: string; count: number; revenue: number; cogs: number }>();
     const byCustomerMap = new Map<string, { name: string; count: number; revenue: number }>();
+    const compSessions = new Map<string, { id: string; title: string; hostName: string | null; complimentaryValue: number; complimentaryCogs: number; guestRevenue: number; guestCogs: number; orders: number }>();
+    let complimentaryValue = 0;
+    let complimentaryCogs = 0;
 
     for (const order of completedOrders) {
       const fin = computeOrderFinancials(order, tax);
@@ -243,6 +246,31 @@ reportsRouter.get("/sales", async (req, res, next) => {
         topItemsMap.set(key, bucket);
       }
       cogsTotal += orderCogs;
+      if (order.saleType === "COMPLIMENTARY") {
+        complimentaryValue += fin.complimentaryValue;
+        complimentaryCogs += orderCogs;
+      }
+      if (order.complimentarySessionId) {
+        const session = compSessions.get(order.complimentarySessionId) ?? {
+          id: order.complimentarySessionId,
+          title: order.complimentarySession?.title ?? "Complimentary session",
+          hostName: order.complimentarySession?.hostName ?? null,
+          complimentaryValue: 0,
+          complimentaryCogs: 0,
+          guestRevenue: 0,
+          guestCogs: 0,
+          orders: 0,
+        };
+        session.orders += 1;
+        if (order.saleType === "COMPLIMENTARY") {
+          session.complimentaryValue += fin.complimentaryValue;
+          session.complimentaryCogs += orderCogs;
+        } else {
+          session.guestRevenue += fin.total;
+          session.guestCogs += orderCogs;
+        }
+        compSessions.set(order.complimentarySessionId, session);
+      }
 
       const locKey = order.locationId ?? "unassigned";
       const locBucket = byLocationMap.get(locKey) ?? { name: order.location?.name ?? "Unassigned", count: 0, revenue: 0, cogs: 0 };
@@ -261,6 +289,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
     cogsTotal = round2(cogsTotal);
     taxCollected = round2(taxCollected);
     discountsGiven = round2(discountsGiven);
+    complimentaryValue = round2(complimentaryValue);
+    complimentaryCogs = round2(complimentaryCogs);
 
     const topItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).slice(0, 10).map((i) => ({ ...i, revenue: round2(i.revenue) }));
     const taxBreakdown = [...taxBuckets.values()].map((b) => ({ ...b, net: round2(b.net), tax: round2(b.tax), gross: round2(b.gross) })).sort((a, b) => b.gross - a.gross);
@@ -415,9 +445,19 @@ reportsRouter.get("/sales", async (req, res, next) => {
       revenueBreakdown: {
         posSalesCash, folioDepositsCash, folioSettlementsCash, serviceCenterCash, totalRevenue,
         taxCollected, discountsGiven,
+        complimentaryValue, complimentaryCogs,
         completedSalesValue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
         serviceCenterExcludedByLocationFilter: !!locationId,
       },
+      complimentarySessions: [...compSessions.values()].map((s) => ({
+        ...s,
+        complimentaryValue: round2(s.complimentaryValue),
+        complimentaryCogs: round2(s.complimentaryCogs),
+        guestRevenue: round2(s.guestRevenue),
+        guestCogs: round2(s.guestCogs),
+        guestProfit: round2(s.guestRevenue - s.guestCogs),
+        netImpact: round2(s.guestRevenue - s.guestCogs - s.complimentaryCogs),
+      })).sort((a, b) => b.netImpact - a.netImpact),
       topItems,
       expensesByCategory,
       purchasesBySupplier,

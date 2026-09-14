@@ -40,7 +40,26 @@ const orderLineSchema = z.object({
   quantity: z.coerce.number().int().min(1).max(50),
   addons: z.array(z.object({ addonId: z.string().cuid(), quantity: z.coerce.number().int().min(1).max(20).default(1) })).default([]),
 });
-const orderSchema = z.object({ tableId: z.string().cuid().optional(), locationId: z.string().cuid().optional(), customerId: z.string().trim().min(1).optional(), reservationId: z.string().trim().min(1).optional(), notes: z.string().trim().max(500).optional(), discount: z.coerce.number().min(0).default(0), items: z.array(orderLineSchema).min(1) });
+const complimentarySessionSchema = z.object({
+  title: z.string().trim().min(1).max(150),
+  hostName: z.string().trim().min(1).max(120),
+  hostPhone: z.string().trim().max(40).optional(),
+  eventDate: z.coerce.date().optional(),
+  notes: z.string().trim().max(500).optional(),
+});
+const orderSchema = z.object({
+  tableId: z.string().cuid().optional(),
+  locationId: z.string().cuid().optional(),
+  customerId: z.string().trim().min(1).optional(),
+  reservationId: z.string().trim().min(1).optional(),
+  notes: z.string().trim().max(500).optional(),
+  discount: z.coerce.number().min(0).default(0),
+  saleType: z.enum(["SALE", "COMPLIMENTARY"]).default("SALE"),
+  complimentarySessionId: z.string().cuid().optional(),
+  complimentaryOrderRole: z.enum(["HOST_COMP", "GUEST_SPEND"]).optional(),
+  complimentaryReason: z.string().trim().max(255).optional(),
+  items: z.array(orderLineSchema).min(1),
+});
 const addItemsSchema = z.object({ items: z.array(orderLineSchema).min(1) });
 
 // Editing one existing line: any facet omitted keeps its current value.
@@ -201,9 +220,36 @@ export const orderInclude = {
   payments: { include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } } },
   table: true,
   location: true,
+  complimentarySession: true,
   customer: { select: { id: true, firstName: true, lastName: true, phone: true, balance: true } },
   reservation: { select: { id: true, reservationNo: true, customerId: true, customer: { select: { firstName: true, lastName: true } }, room: { select: { number: true } } } },
 } as const;
+
+posRouter.get("/complimentary-sessions", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const activeOnly = req.query.activeOnly === "true";
+  const sessions = await prisma.complimentarySession.findMany({
+    where: { tenantId: tid, ...(activeOnly ? { status: "OPEN" } : {}) },
+    include: { _count: { select: { orders: true } } },
+    orderBy: [{ status: "asc" }, { eventDate: "desc" }],
+    take: 100,
+  });
+  res.status(200).json({ sessions });
+});
+
+posRouter.post("/complimentary-sessions", async (req, res, next) => {
+  const parsed = complimentarySessionSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid complimentary session", details: parsed.error.flatten() }); return; }
+  try {
+    const session = await prisma.complimentarySession.create({
+      data: { tenantId: tenantIdFor(req), createdBy: req.userId, ...parsed.data },
+      include: { _count: { select: { orders: true } } },
+    });
+    res.status(201).json({ session });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /** Validates an explicitly-chosen customerId belongs to this tenant — who a
  * sale is for is always optional (a quick anonymous cash sale shouldn't have
@@ -475,6 +521,7 @@ posRouter.post("/orders", async (req, res) => {
 
   let customerId: string | undefined;
   let billToReservationId: string | undefined;
+  let complimentarySessionId: string | undefined;
   try {
     customerId = await resolveCustomerId(tid, parsed.data.customerId);
     if (parsed.data.reservationId) {
@@ -483,6 +530,11 @@ posRouter.post("/orders", async (req, res) => {
       // A tab picked to a room adopts that guest as its customer unless one
       // was explicitly chosen — same rule the settlement ROOM branch uses.
       customerId = customerId ?? reservation!.customerId;
+    }
+    if (parsed.data.complimentarySessionId) {
+      const session = await prisma.complimentarySession.findFirst({ where: { id: parsed.data.complimentarySessionId, tenantId: tid, status: "OPEN" }, select: { id: true } });
+      if (!session) throw Object.assign(new Error("Choose an open complimentary session"), { status: 400 });
+      complimentarySessionId = session.id;
     }
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
@@ -500,9 +552,14 @@ posRouter.post("/orders", async (req, res) => {
           locationId: effectiveLocationId,
           customerId,
           reservationId: billToReservationId,
+          saleType: parsed.data.saleType,
+          complimentarySessionId,
+          complimentaryOrderRole: parsed.data.saleType === "COMPLIMENTARY" ? "HOST_COMP" : parsed.data.complimentarySessionId ? (parsed.data.complimentaryOrderRole ?? "GUEST_SPEND") : undefined,
+          complimentaryReason: parsed.data.complimentaryReason,
           createdBy: req.userId,
           notes: parsed.data.notes,
-          discount: parsed.data.discount,
+          discount: parsed.data.saleType === "COMPLIMENTARY" ? 0 : parsed.data.discount,
+          paymentStatus: parsed.data.saleType === "COMPLIMENTARY" ? "PAID" : "UNPAID",
           status: instantServe ? "SERVED" : startsAtCounter ? "READY" : "OPEN",
           servedAt: instantServe ? new Date() : undefined,
           readyAt: startsAtCounter ? new Date() : undefined,
@@ -1014,6 +1071,10 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
     taxSettingsFor(tid),
   ]);
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (order.saleType === "COMPLIMENTARY") {
+    res.status(409).json({ error: "Complimentary orders do not take payments" });
+    return;
+  }
   const payable = order.status === "SERVED" || (order.status === "COMPLETED" && order.paymentStatus !== "PAID");
   if (!payable) { res.status(409).json({ error: order.status === "COMPLETED" ? "This order is already fully paid" : "The order must be served before it can be paid" }); return; }
   const { total } = computeOrderFinancials(order, tax);
