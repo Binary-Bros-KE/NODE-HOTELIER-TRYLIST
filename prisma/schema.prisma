@@ -352,6 +352,7 @@ model Tenant {
   goodsReceipts         GoodsReceipt[]
   stockTransfers        StockTransfer[]
   supplierPayments      SupplierPayment[]
+  supplierBalanceEntries SupplierBalanceEntry[]
   serviceCenterServices ServiceCenterService[]
   serviceProviders      ServiceProvider[]
   providerSchedules     ProviderSchedule[]
@@ -1079,6 +1080,7 @@ model Supplier {
   purchases         Purchase[]
   requisitions      PurchaseRequisition[]
   payments          SupplierPayment[]
+  balanceEntries    SupplierBalanceEntry[]
   transactions      Transaction[]
 
   @@unique([tenantId, name])
@@ -1096,6 +1098,8 @@ model SupplierPayment {
   paymentNo         String
   supplierId        String
   supplier          Supplier       @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  purchaseId        String?
+  purchase          Purchase?      @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
   amount            Decimal        @db.Decimal(12, 2)
   paymentMethodId   String?
   paymentMethod     PaymentMethod? @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
@@ -1105,10 +1109,46 @@ model SupplierPayment {
   createdBy         String?
   createdByEmployee Employee?      @relation("SupplierPaymentCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
   createdAt         DateTime       @default(now())
+  balanceEntries    SupplierBalanceEntry[]
 
   @@unique([tenantId, paymentNo])
   @@index([tenantId, supplierId])
   @@index([tenantId, paidAt])
+  @@index([purchaseId])
+}
+
+enum SupplierBalanceEntryType {
+  OPENING_BALANCE
+  GOODS_RECEIPT
+  PAYMENT
+  ADJUSTMENT
+}
+
+model SupplierBalanceEntry {
+  id                String                   @id @default(cuid())
+  tenantId          String
+  tenant            Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  supplierId        String
+  supplier          Supplier                 @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  type              SupplierBalanceEntryType
+  amount            Decimal                  @db.Decimal(12, 2)
+  balanceBefore     Decimal                  @db.Decimal(12, 2)
+  balanceAfter      Decimal                  @db.Decimal(12, 2)
+  note              String?
+  purchaseId        String?
+  purchase          Purchase?                @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+  goodsReceiptId    String?
+  goodsReceipt      GoodsReceipt?            @relation(fields: [goodsReceiptId], references: [id], onDelete: SetNull)
+  paymentId         String?
+  payment           SupplierPayment?         @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  createdBy         String?
+  createdByEmployee Employee?                @relation("SupplierBalanceEntryCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  createdAt         DateTime                 @default(now())
+
+  @@index([tenantId, supplierId, createdAt])
+  @@index([purchaseId])
+  @@index([goodsReceiptId])
+  @@index([paymentId])
 }
 
 enum PurchaseRequisitionStatus {
@@ -1199,6 +1239,7 @@ model Purchase {
   locationId        String?
   location          Location?            @relation("PurchaseLocation", fields: [locationId], references: [id], onDelete: SetNull)
   status            PurchaseStatus       @default(DRAFT)
+  paymentStatus     PosPaymentStatus     @default(UNPAID)
   orderDate         DateTime             @default(now())
   expectedDate      DateTime?
   reference         String?
@@ -1220,6 +1261,8 @@ model Purchase {
   updatedAt         DateTime             @updatedAt
   items             PurchaseItem[]
   goodsReceipts     GoodsReceipt[]
+  payments          SupplierPayment[]
+  supplierBalanceEntries SupplierBalanceEntry[]
 
   @@unique([tenantId, purchaseNo])
   @@index([tenantId, status])
@@ -1238,6 +1281,7 @@ model PurchaseItem {
   sellingPrice      Decimal?           @db.Decimal(12, 2)
   discountPerUnit   Decimal            @default(0) @db.Decimal(12, 2)
   taxRate           Decimal            @default(0) @db.Decimal(5, 2)
+  taxMode           TaxMode            @default(INCLUSIVE)
   taxTreatment      TaxTreatment       @default(STANDARD)
   taxAmount         Decimal            @default(0) @db.Decimal(12, 2)
   lineTotal         Decimal            @default(0) @db.Decimal(12, 2)
@@ -1247,8 +1291,22 @@ model PurchaseItem {
   note              String?
   createdAt         DateTime           @default(now())
   goodsReceiptItems GoodsReceiptItem[]
+  menuPriceUpdates  PurchaseItemMenuPriceUpdate[]
 
   @@index([purchaseId])
+}
+
+model PurchaseItemMenuPriceUpdate {
+  id             String       @id @default(cuid())
+  purchaseItemId String
+  purchaseItem   PurchaseItem @relation(fields: [purchaseItemId], references: [id], onDelete: Cascade)
+  menuItemId     String
+  menuItem       MenuItem     @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  sellingPrice   Decimal      @db.Decimal(12, 2)
+  createdAt      DateTime     @default(now())
+
+  @@unique([purchaseItemId, menuItemId])
+  @@index([menuItemId])
 }
 
 // One delivery event against a PO. A PO can be received in several batches
@@ -1274,6 +1332,7 @@ model GoodsReceipt {
   createdByEmployee Employee?          @relation("GoodsReceiptCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
   createdAt         DateTime           @default(now())
   items             GoodsReceiptItem[]
+  supplierBalanceEntries SupplierBalanceEntry[]
 
   @@unique([tenantId, receiptNo])
   @@index([tenantId, purchaseId])
@@ -1662,6 +1721,7 @@ model MenuItem {
   recipe          Recipe?           @relation(fields: [recipeId], references: [id], onDelete: SetNull)
   orderItems      PosOrderItem[]
   variants        MenuItemVariant[]
+  purchasePriceUpdates PurchaseItemMenuPriceUpdate[]
   // Empty = unallocated = sellable at every location (the default).
   locations       Location[]
 
@@ -2084,6 +2144,7 @@ model Employee {
   createdGoodsReceipts     GoodsReceipt[]        @relation("GoodsReceiptCreatedBy")
   createdStockTransfers    StockTransfer[]       @relation("StockTransferCreatedBy")
   createdSupplierPayments  SupplierPayment[]     @relation("SupplierPaymentCreatedBy")
+  createdSupplierBalanceEntries SupplierBalanceEntry[] @relation("SupplierBalanceEntryCreatedBy")
   createdRequisitions      PurchaseRequisition[] @relation("RequisitionCreatedBy")
   updatedRequisitions      PurchaseRequisition[] @relation("RequisitionUpdatedBy")
   reviewedRequisitions     PurchaseRequisition[] @relation("RequisitionReviewedBy")

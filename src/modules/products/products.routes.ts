@@ -136,6 +136,9 @@ const productFields = {
   isActive: true,
   createdAt: true,
   updatedAt: true,
+  menuItems: { select: { id: true, name: true, price: true } },
+  variantStocks: { select: { menuItem: { select: { id: true, name: true, price: true } } } },
+  recipeIngredients: { select: { recipe: { select: { menuItems: { select: { id: true, name: true, price: true } } } } } },
   stocks: { select: { locationId: true, quantity: true, location: { select: { id: true, name: true } } } },
 } as const;
 

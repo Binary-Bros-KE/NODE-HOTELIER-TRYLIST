@@ -83,8 +83,9 @@ const requisitionInclude = {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-function lineTaxAmount(lineTotal: number, taxRate: number, taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT") {
+function lineTaxAmount(lineTotal: number, taxRate: number, taxMode: "INCLUSIVE" | "EXCLUSIVE", taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT") {
   if (taxTreatment !== "STANDARD" || taxRate <= 0) return 0;
+  if (taxMode === "EXCLUSIVE") return round2(lineTotal * (taxRate / 100));
   return round2(lineTotal - lineTotal / (1 + taxRate / 100));
 }
 
@@ -96,7 +97,7 @@ function withLineTotals<T extends { quantity: number; estimatedUnitCost: number;
 
 async function productsForLines(tid: string, items: { productId: string }[]) {
   const ids = [...new Set(items.map((i) => i.productId))];
-  const products = await prisma.product.findMany({ where: { id: { in: ids }, tenantId: tid }, select: { id: true, packSize: true } });
+  const products = await prisma.product.findMany({ where: { id: { in: ids }, tenantId: tid }, select: { id: true, packSize: true, unitCost: true } });
   if (products.length !== ids.length) throw new HttpError(400, "One or more items reference a product that was not found");
   return new Map(products.map((product) => [product.id, product]));
 }
@@ -191,7 +192,11 @@ purchaseRequisitionsRouter.post("/", requirePermission("REQUISITION_CREATE"), as
   try {
     const productsById = await productsForLines(tid, items);
     if (suggestedSupplierId) await assertSupplier(tid, suggestedSupplierId);
-    const { lines, estimatedTotal } = withLineTotals(items.map((item) => ({ ...item, packSize: productsById.get(item.productId)?.packSize ?? null })));
+    const { lines, estimatedTotal } = withLineTotals(items.map((item) => {
+      const product = productsById.get(item.productId);
+      const estimatedUnitCost = item.estimatedUnitCost > 0 ? item.estimatedUnitCost : Number(product?.unitCost ?? 0);
+      return { ...item, estimatedUnitCost, packSize: product?.packSize ?? null };
+    }));
     const requisitionNo = await nextRequisitionNo(tid);
     const requisition = await prisma.purchaseRequisition.create({
       data: {
@@ -224,7 +229,7 @@ purchaseRequisitionsRouter.patch("/:id", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid requisition", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
-    const existing = await prisma.purchaseRequisition.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: { include: { product: { select: { packSize: true } } } } } });
+    const existing = await prisma.purchaseRequisition.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: { include: { product: { select: { packSize: true, unitCost: true } } } } } });
     if (!existing) { res.status(404).json({ error: "Requisition not found" }); return; }
     if (existing.status === "DRAFT" || existing.status === "REJECTED") {
       const allowed = await hasPermission(tid, req.userId, "REQUISITION_CREATE");
@@ -240,11 +245,15 @@ purchaseRequisitionsRouter.patch("/:id", async (req, res, next) => {
     if (suggestedSupplierId) await assertSupplier(tid, suggestedSupplierId);
 
     const effectiveItems = items
-      ? items.map((item) => ({ ...item, packSize: productsById?.get(item.productId)?.packSize ?? null }))
+      ? items.map((item) => {
+        const product = productsById?.get(item.productId);
+        const estimatedUnitCost = item.estimatedUnitCost > 0 ? item.estimatedUnitCost : Number(product?.unitCost ?? 0);
+        return { ...item, estimatedUnitCost, packSize: product?.packSize ?? null };
+      })
       : existing.items.map((i) => ({
         productId: i.productId,
         quantity: Number(i.quantity),
-        estimatedUnitCost: Number(i.estimatedUnitCost),
+        estimatedUnitCost: Number(i.estimatedUnitCost) > 0 ? Number(i.estimatedUnitCost) : Number(i.product.unitCost ?? 0),
         note: i.note ?? undefined,
         packSize: i.product.packSize,
       }));
@@ -331,7 +340,7 @@ purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_A
   try {
     const existing = await prisma.purchaseRequisition.findFirst({
       where: { id, tenantId: tid },
-      include: { items: { include: { product: { select: { packSize: true, taxRate: true, taxTreatment: true } } } } },
+      include: { items: { include: { product: { select: { packSize: true, unitCost: true, taxRate: true, taxMode: true, taxTreatment: true } } } } },
     });
     if (!existing) { res.status(404).json({ error: "Requisition not found" }); return; }
     if (existing.status !== "APPROVED") { res.status(409).json({ error: "Only an approved requisition can be converted to a purchase" }); return; }
@@ -340,13 +349,17 @@ purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_A
     const lines = existing.items.map((i) => ({
       productId: i.productId,
       quantity: Number(i.quantity),
-      unitCost: Number(i.estimatedUnitCost),
+      unitCost: Number(i.estimatedUnitCost) > 0 ? Number(i.estimatedUnitCost) : Number(i.product.unitCost ?? 0),
       taxRate: i.product.taxRate != null ? Number(i.product.taxRate) : 16,
+      taxMode: i.product.taxMode ?? "INCLUSIVE",
       taxTreatment: i.product.taxTreatment ?? "STANDARD",
-      lineTotal: round2(stockQuantityToCostUnits(i.quantity, i.product.packSize) * Number(i.estimatedUnitCost)),
+      lineTotal: round2(stockQuantityToCostUnits(i.quantity, i.product.packSize) * (Number(i.estimatedUnitCost) > 0 ? Number(i.estimatedUnitCost) : Number(i.product.unitCost ?? 0))),
       note: i.note ?? undefined,
     }));
-    const linesWithTax = lines.map((line) => ({ ...line, taxAmount: lineTaxAmount(line.lineTotal, line.taxRate, line.taxTreatment) }));
+    const linesWithTax = lines.map((line) => {
+      const taxAmount = lineTaxAmount(line.lineTotal, line.taxRate, line.taxMode, line.taxTreatment);
+      return { ...line, taxAmount, lineTotal: line.taxMode === "EXCLUSIVE" ? round2(line.lineTotal + taxAmount) : line.lineTotal };
+    });
     const total = round2(linesWithTax.reduce((sum, l) => sum + l.lineTotal, 0));
     const taxAmount = round2(linesWithTax.reduce((sum, l) => sum + l.taxAmount, 0));
     const subtotal = round2(total - taxAmount);
@@ -368,7 +381,7 @@ purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_A
           notes,
           requisitionId: existing.id,
           createdBy: req.userId,
-          items: { create: linesWithTax.map((l) => ({ productId: l.productId, quantity: l.quantity, unitCost: l.unitCost, taxRate: l.taxRate, taxTreatment: l.taxTreatment, taxAmount: l.taxAmount, lineTotal: l.lineTotal, note: l.note })) },
+          items: { create: linesWithTax.map((l) => ({ productId: l.productId, quantity: l.quantity, unitCost: l.unitCost, taxRate: l.taxRate, taxMode: l.taxMode, taxTreatment: l.taxTreatment, taxAmount: l.taxAmount, lineTotal: l.lineTotal, note: l.note })) },
         },
         include: {
           supplier: { select: { id: true, name: true } },

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { nextSupplierPaymentNo, nextTransactionNo } from "../../lib/sequence.js";
+import { recordSupplierBalanceEntry } from "../../lib/supplierBalance.js";
 
 // Suppliers/vendors the property buys stock from. A plain definitional
 // lookup for now — Purchases / Goods Received will consume it later — so
@@ -73,10 +74,28 @@ suppliersRouter.get("/:id", async (req, res) => {
 suppliersRouter.post("/", async (req, res, next) => {
   const data = createSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid supplier", details: data.error.flatten() }); return; }
+  const tid = tenantId(req);
   try {
-    const supplier = await prisma.supplier.create({
-      data: { tenantId: tenantId(req), createdBy: req.userId, ...data.data },
-      include: supplierInclude,
+    const supplier = await prisma.$transaction(async (tx) => {
+      const created = await tx.supplier.create({
+        data: { tenantId: tid, createdBy: req.userId, ...data.data },
+        include: supplierInclude,
+      });
+      if (data.data.balance && data.data.balance !== 0) {
+        await tx.supplierBalanceEntry.create({
+          data: {
+            tenantId: tid,
+            supplierId: created.id,
+            type: "OPENING_BALANCE",
+            amount: data.data.balance,
+            balanceBefore: 0,
+            balanceAfter: data.data.balance,
+            note: "Opening supplier balance",
+            createdBy: req.userId,
+          },
+        });
+      }
+      return created;
     });
     res.status(201).json({ supplier });
   } catch (error) {
@@ -103,6 +122,7 @@ suppliersRouter.patch("/:id", async (req, res, next) => {
 const paymentSchema = z.object({
   amount: z.coerce.number().positive(),
   paymentMethodId: z.string().trim().min(1),
+  purchaseId: z.string().trim().min(1).optional(),
   reference: optionalText(120),
   note: optionalText(500),
   paidAt: z.preprocess(blankToUndefined, z.coerce.date().optional()),
@@ -110,6 +130,7 @@ const paymentSchema = z.object({
 
 const paymentInclude = {
   paymentMethod: { select: { id: true, name: true, requiresReference: true } },
+  purchase: { select: { id: true, purchaseNo: true } },
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
 } as const;
 
@@ -118,6 +139,22 @@ async function resolvePaymentMethod(tid: string, paymentMethodId: string, refere
   if (!method) throw Object.assign(new Error("Choose a valid, active payment method"), { status: 400 });
   if (method.requiresReference && !reference) throw Object.assign(new Error(`${method.name} requires a reference number`), { status: 400 });
   return method;
+}
+
+function paymentStatusFrom(paid: number, owed: number) {
+  if (owed <= 0.0005 || paid <= 0.0005) return "UNPAID";
+  if (paid >= owed - 0.0005) return "PAID";
+  return "PARTIAL";
+}
+
+async function recomputePurchasePaymentStatus(tx: Prisma.TransactionClient, purchaseId: string) {
+  const [owedAgg, paidAgg] = await Promise.all([
+    tx.supplierBalanceEntry.aggregate({ where: { purchaseId, type: "GOODS_RECEIPT" }, _sum: { amount: true } }),
+    tx.supplierPayment.aggregate({ where: { purchaseId }, _sum: { amount: true } }),
+  ]);
+  const owed = Number(owedAgg._sum.amount ?? 0);
+  const paid = Number(paidAgg._sum.amount ?? 0);
+  return tx.purchase.update({ where: { id: purchaseId }, data: { paymentStatus: paymentStatusFrom(paid, owed) } });
 }
 
 /** Payment history for one supplier — the only thing that ever brings
@@ -134,6 +171,27 @@ suppliersRouter.get("/:id/payments", async (req, res, next) => {
   }
 });
 
+suppliersRouter.get("/:id/balance-entries", async (req, res, next) => {
+  try {
+    const tid = tenantId(req);
+    const supplier = await prisma.supplier.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
+    if (!supplier) { res.status(404).json({ error: "Supplier not found" }); return; }
+    const entries = await prisma.supplierBalanceEntry.findMany({
+      where: { supplierId: supplier.id, tenantId: tid },
+      include: {
+        purchase: { select: { id: true, purchaseNo: true } },
+        goodsReceipt: { select: { id: true, receiptNo: true } },
+        payment: { select: { id: true, paymentNo: true } },
+        createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ entries });
+  } catch (error) {
+    next(error);
+  }
+});
+
 /** Records real cash paid to a supplier — decrements balance and writes a
  * Transaction (the single unified cash ledger), same as Expense does. */
 suppliersRouter.post("/:id/payments", async (req, res, next) => {
@@ -144,6 +202,27 @@ suppliersRouter.post("/:id/payments", async (req, res, next) => {
     const supplier = await prisma.supplier.findFirst({ where: { id: req.params.id, tenantId: tid } });
     if (!supplier) { res.status(404).json({ error: "Supplier not found" }); return; }
     await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+    if (data.data.purchaseId) {
+      const purchase = await prisma.purchase.findFirst({ where: { id: data.data.purchaseId, tenantId: tid, supplierId: supplier.id }, select: { id: true, status: true } });
+      if (!purchase) { res.status(400).json({ error: "That purchase does not belong to this supplier" }); return; }
+      if (purchase.status === "DRAFT" || purchase.status === "ORDERED" || purchase.status === "CANCELLED") {
+        res.status(409).json({ error: "Receive goods before recording a payment for this purchase" });
+        return;
+      }
+      const [owedAgg, paidAgg] = await Promise.all([
+        prisma.supplierBalanceEntry.aggregate({ where: { purchaseId: purchase.id, type: "GOODS_RECEIPT" }, _sum: { amount: true } }),
+        prisma.supplierPayment.aggregate({ where: { purchaseId: purchase.id }, _sum: { amount: true } }),
+      ]);
+      const outstanding = Number(owedAgg._sum.amount ?? 0) - Number(paidAgg._sum.amount ?? 0);
+      if (data.data.amount > outstanding + 0.0005) {
+        res.status(400).json({ error: "This payment is more than the outstanding purchase balance" });
+        return;
+      }
+    }
+    if (data.data.amount > Number(supplier.balance) + 0.0005) {
+      res.status(400).json({ error: "This payment is more than the supplier balance" });
+      return;
+    }
 
     const paymentNo = await nextSupplierPaymentNo(tid);
     const transactionNo = await nextTransactionNo(tid);
@@ -153,6 +232,7 @@ suppliersRouter.post("/:id/payments", async (req, res, next) => {
           tenantId: tid,
           paymentNo,
           supplierId: supplier.id,
+          purchaseId: data.data.purchaseId,
           amount: data.data.amount,
           paymentMethodId: data.data.paymentMethodId,
           reference: data.data.reference,
@@ -162,7 +242,16 @@ suppliersRouter.post("/:id/payments", async (req, res, next) => {
         },
         include: paymentInclude,
       });
-      await tx.supplier.update({ where: { id: supplier.id }, data: { balance: { decrement: data.data.amount } } });
+      await recordSupplierBalanceEntry(tx, {
+        tenantId: tid,
+        supplierId: supplier.id,
+        type: "PAYMENT",
+        amount: -data.data.amount,
+        note: data.data.note ?? `Payment ${paymentNo}`,
+        purchaseId: data.data.purchaseId ?? null,
+        paymentId: created.id,
+        createdBy: req.userId ?? null,
+      });
       await tx.transaction.create({
         data: {
           tenantId: tid,
@@ -178,6 +267,7 @@ suppliersRouter.post("/:id/payments", async (req, res, next) => {
           sourceRefId: created.id,
         },
       });
+      if (data.data.purchaseId) await recomputePurchasePaymentStatus(tx, data.data.purchaseId);
       return created;
     });
     const updatedSupplier = await prisma.supplier.findUniqueOrThrow({ where: { id: supplier.id }, include: supplierInclude });

@@ -2,10 +2,11 @@ import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
-import { nextPurchaseNo, nextGoodsReceiptNo } from "../../lib/sequence.js";
+import { nextPurchaseNo, nextGoodsReceiptNo, nextSupplierPaymentNo, nextTransactionNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
 import { stockQuantityToCostUnits } from "../../lib/stockValuation.js";
+import { recordSupplierBalanceEntry } from "../../lib/supplierBalance.js";
 
 // Mirrors the PurchaseStatus enum in schema.prisma — kept as a local literal
 // list to match how every other module validates enums (never importing the
@@ -44,12 +45,15 @@ const lineSchema = z.object({
   sellingPrice: z.coerce.number().min(0).optional(),
   discountPerUnit: z.coerce.number().min(0).default(0),
   taxRate: z.coerce.number().min(0).max(100).default(0),
+  taxMode: z.enum(["INCLUSIVE", "EXCLUSIVE"]).default("INCLUSIVE"),
   taxTreatment: z.enum(["STANDARD", "ZERO_RATED", "EXEMPT"]).default("STANDARD"),
+  menuPriceUpdates: z.array(z.object({ menuItemId: z.string().trim().min(1), sellingPrice: z.coerce.number().min(0) })).default([]),
   note: optionalText(255),
 });
 
 const createSchema = z.object({
   supplierId: z.string().trim().min(1),
+  status: z.enum(["DRAFT", "ORDERED"]).default("DRAFT"),
   locationId: optionalText(60),
   orderDate: optionalDate,
   expectedDate: optionalDate,
@@ -75,7 +79,7 @@ const purchaseInclude = {
   supplier: { select: { id: true, name: true } },
   location: { select: { id: true, name: true } },
   requisition: { select: { id: true, requisitionNo: true } },
-  items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } } }, orderBy: { createdAt: "asc" } },
+  items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } }, menuPriceUpdates: { include: { menuItem: { select: { id: true, name: true, price: true } } } } }, orderBy: { createdAt: "asc" } },
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
   updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
   goodsReceipts: {
@@ -86,24 +90,35 @@ const purchaseInclude = {
     },
     orderBy: { receivedAt: "desc" },
   },
+  payments: {
+    include: {
+      paymentMethod: { select: { id: true, name: true, requiresReference: true } },
+      createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
+    },
+    orderBy: { paidAt: "desc" },
+  },
+  supplierBalanceEntries: { orderBy: { createdAt: "desc" } },
 } as const;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-function lineTaxAmount(lineTotal: number, taxRate: number, taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT") {
+function lineTaxAmount(amount: number, taxRate: number, taxMode: "INCLUSIVE" | "EXCLUSIVE", taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT") {
   if (taxTreatment !== "STANDARD" || taxRate <= 0) return 0;
-  return round2(lineTotal - lineTotal / (1 + taxRate / 100));
+  if (taxMode === "EXCLUSIVE") return round2(amount * (taxRate / 100));
+  return round2(amount - amount / (1 + taxRate / 100));
 }
 
-function computeTotals<T extends { quantity: number; unitCost: number; packSize?: Prisma.Decimal | number | null; discountPerUnit?: number; taxRate?: number; taxTreatment?: "STANDARD" | "ZERO_RATED" | "EXEMPT" }>(items: T[]) {
+function computeTotals<T extends { quantity: number; unitCost: number; packSize?: Prisma.Decimal | number | null; discountPerUnit?: number; taxRate?: number; taxMode?: "INCLUSIVE" | "EXCLUSIVE"; taxTreatment?: "STANDARD" | "ZERO_RATED" | "EXEMPT" }>(items: T[]) {
   const lines = items.map((i) => {
     const discountPerUnit = i.discountPerUnit ?? 0;
     const taxRate = i.taxRate ?? 0;
+    const taxMode = i.taxMode ?? "INCLUSIVE";
     const taxTreatment = i.taxTreatment ?? "STANDARD";
     const netUnitCost = Math.max(0, i.unitCost - discountPerUnit);
-    const lineTotal = round2(stockQuantityToCostUnits(i.quantity, i.packSize) * netUnitCost);
-    const taxAmount = lineTaxAmount(lineTotal, taxRate, taxTreatment);
-    return { ...i, discountPerUnit, taxRate, taxTreatment, taxAmount, lineTotal };
+    const baseAmount = round2(stockQuantityToCostUnits(i.quantity, i.packSize) * netUnitCost);
+    const taxAmount = lineTaxAmount(baseAmount, taxRate, taxMode, taxTreatment);
+    const lineTotal = taxMode === "EXCLUSIVE" ? round2(baseAmount + taxAmount) : baseAmount;
+    return { ...i, discountPerUnit, taxRate, taxMode, taxTreatment, taxAmount, lineTotal };
   });
   const total = round2(lines.reduce((sum, l) => sum + l.lineTotal, 0));
   const taxAmount = round2(lines.reduce((sum, l) => sum + l.taxAmount, 0));
@@ -114,7 +129,7 @@ function computeTotals<T extends { quantity: number; unitCost: number; packSize?
 async function updateProductPricing(
   tx: Prisma.TransactionClient,
   tid: string,
-  lines: { productId: string; unitCost: number; sellingPrice?: number; taxRate: number; taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT" }[],
+  lines: { productId: string; unitCost: number; sellingPrice?: number; taxRate: number; taxMode: "INCLUSIVE" | "EXCLUSIVE"; taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT" }[],
 ) {
   for (const line of lines) {
     await tx.product.updateMany({
@@ -123,7 +138,7 @@ async function updateProductPricing(
         unitCost: line.unitCost,
         ...(line.sellingPrice != null ? { sellingPrice: line.sellingPrice } : {}),
         taxRate: line.taxRate,
-        taxMode: "INCLUSIVE",
+        taxMode: line.taxMode,
         taxTreatment: line.taxTreatment,
       },
     });
@@ -147,6 +162,54 @@ async function assertLocation(tid: string, locationId: string) {
   const location = await prisma.location.findFirst({ where: { id: locationId, tenantId: tid }, select: { id: true, name: true } });
   if (!location) throw new HttpError(400, "Choose a location from this property");
   return location;
+}
+
+async function assertMenuPriceUpdates(tid: string, items: { menuPriceUpdates?: { menuItemId: string }[] }[]) {
+  const ids = [...new Set(items.flatMap((item) => item.menuPriceUpdates?.map((update) => update.menuItemId) ?? []))];
+  if (!ids.length) return;
+  const count = await prisma.menuItem.count({ where: { id: { in: ids }, tenantId: tid } });
+  if (count !== ids.length) throw new HttpError(400, "One or more menu price updates reference a menu item that was not found");
+}
+
+async function resolvePaymentMethod(tid: string, paymentMethodId: string, reference: string | undefined) {
+  const method = await prisma.paymentMethod.findFirst({ where: { id: paymentMethodId, tenantId: tid, isActive: true } });
+  if (!method) throw new HttpError(400, "Choose a valid, active payment method");
+  if (method.requiresReference && !reference) throw new HttpError(400, `${method.name} requires a reference number`);
+  return method;
+}
+
+function paymentStatusFrom(paid: number, owed: number) {
+  if (owed <= 0.0005 || paid <= 0.0005) return "UNPAID";
+  if (paid >= owed - 0.0005) return "PAID";
+  return "PARTIAL";
+}
+
+async function recomputePurchasePaymentStatus(tx: Prisma.TransactionClient, purchaseId: string) {
+  const [owedAgg, paidAgg] = await Promise.all([
+    tx.supplierBalanceEntry.aggregate({ where: { purchaseId, type: "GOODS_RECEIPT" }, _sum: { amount: true } }),
+    tx.supplierPayment.aggregate({ where: { purchaseId }, _sum: { amount: true } }),
+  ]);
+  const owed = Number(owedAgg._sum.amount ?? 0);
+  const paid = Number(paidAgg._sum.amount ?? 0);
+  return tx.purchase.update({ where: { id: purchaseId }, data: { paymentStatus: paymentStatusFrom(paid, owed) } });
+}
+
+function receiptLineTotal(
+  item: {
+    quantity: Prisma.Decimal;
+    discountPerUnit: Prisma.Decimal;
+    taxRate: Prisma.Decimal;
+    taxMode: "INCLUSIVE" | "EXCLUSIVE";
+    taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT";
+    product: { packSize: Prisma.Decimal | null };
+  },
+  quantity: number,
+  unitCost: number,
+) {
+  const netUnitCost = Math.max(0, unitCost - Number(item.discountPerUnit));
+  const baseAmount = round2(stockQuantityToCostUnits(quantity, item.product.packSize) * netUnitCost);
+  const taxAmount = lineTaxAmount(baseAmount, Number(item.taxRate), item.taxMode, item.taxTreatment);
+  return item.taxMode === "EXCLUSIVE" ? round2(baseAmount + taxAmount) : baseAmount;
 }
 
 // Which statuses each status may move to via the manual /status endpoint.
@@ -204,10 +267,11 @@ purchasesRouter.post("/", async (req, res, next) => {
   const data = createSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid purchase", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
-  const { supplierId, items, orderDate, ...rest } = data.data;
+  const { supplierId, items, orderDate, status, ...rest } = data.data;
   try {
     await assertSupplier(tid, supplierId);
     const productsById = await productsForLines(tid, items);
+    await assertMenuPriceUpdates(tid, items);
     if (rest.locationId) await assertLocation(tid, rest.locationId);
     const { lines, subtotal, taxAmount, total } = computeTotals(items.map((item) => ({ ...item, packSize: productsById.get(item.productId)?.packSize ?? null })));
     const purchaseNo = await nextPurchaseNo(tid);
@@ -217,6 +281,7 @@ purchasesRouter.post("/", async (req, res, next) => {
           tenantId: tid,
           purchaseNo,
           supplierId,
+          status,
           taxRate: 0,
           subtotal,
           taxAmount,
@@ -232,16 +297,17 @@ purchasesRouter.post("/", async (req, res, next) => {
               sellingPrice: l.sellingPrice ?? null,
               discountPerUnit: l.discountPerUnit,
               taxRate: l.taxRate,
+              taxMode: l.taxMode,
               taxTreatment: l.taxTreatment,
               taxAmount: l.taxAmount,
               lineTotal: l.lineTotal,
+              menuPriceUpdates: l.menuPriceUpdates.length ? { create: l.menuPriceUpdates } : undefined,
               note: l.note,
             })),
           },
         },
         include: purchaseInclude,
       });
-      await updateProductPricing(tx, tid, lines);
       return created;
     });
     res.status(201).json({ purchase });
@@ -257,13 +323,28 @@ purchasesRouter.patch("/:id", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid purchase", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
-    const existing = await prisma.purchase.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: { include: { product: { select: { packSize: true } } } } } });
+    const existing = await prisma.purchase.findFirst({
+      where: { id: req.params.id, tenantId: tid },
+      include: {
+        payments: { select: { id: true } },
+        items: { include: { product: { select: { packSize: true } } } },
+      },
+    });
     if (!existing) { res.status(404).json({ error: "Purchase not found" }); return; }
-    if (existing.status !== "DRAFT") { res.status(409).json({ error: `A ${existing.status.toLowerCase()} purchase can no longer be edited` }); return; }
+    if (existing.status !== "DRAFT" && existing.status !== "ORDERED") { res.status(409).json({ error: `A ${existing.status.toLowerCase()} purchase can no longer be edited` }); return; }
+    if (existing.items.some((i) => Number(i.receivedQuantity) > 0)) {
+      res.status(409).json({ error: "This purchase already has received goods and can no longer be edited" });
+      return;
+    }
+    if (existing.payments.length > 0) {
+      res.status(409).json({ error: "This purchase already has payments and can no longer be edited" });
+      return;
+    }
 
     const { supplierId, items, orderDate, ...rest } = data.data;
     if (supplierId) await assertSupplier(tid, supplierId);
     const productsById = items ? await productsForLines(tid, items) : null;
+    if (items) await assertMenuPriceUpdates(tid, items);
     if (rest.locationId) await assertLocation(tid, rest.locationId);
 
     const effectiveItems = items
@@ -275,7 +356,9 @@ purchasesRouter.patch("/:id", async (req, res, next) => {
         sellingPrice: i.sellingPrice == null ? undefined : Number(i.sellingPrice),
         discountPerUnit: Number(i.discountPerUnit),
         taxRate: Number(i.taxRate),
+        taxMode: i.taxMode,
         taxTreatment: i.taxTreatment,
+        menuPriceUpdates: [],
         note: i.note ?? undefined,
         packSize: i.product.packSize,
       }));
@@ -293,13 +376,18 @@ purchasesRouter.patch("/:id", async (req, res, next) => {
             sellingPrice: l.sellingPrice ?? null,
             discountPerUnit: l.discountPerUnit,
             taxRate: l.taxRate,
+            taxMode: l.taxMode,
             taxTreatment: l.taxTreatment,
             taxAmount: l.taxAmount,
             lineTotal: l.lineTotal,
             note: l.note,
           })),
         });
-        await updateProductPricing(tx, tid, lines);
+        for (const line of lines) {
+          if (!line.menuPriceUpdates.length) continue;
+          const purchaseItem = await tx.purchaseItem.findFirst({ where: { purchaseId: existing.id, productId: line.productId }, select: { id: true } });
+          if (purchaseItem) await tx.purchaseItemMenuPriceUpdate.createMany({ data: line.menuPriceUpdates.map((update) => ({ purchaseItemId: purchaseItem.id, ...update })) });
+        }
       }
       return tx.purchase.update({
         where: { id: existing.id },
@@ -368,6 +456,14 @@ const receiptSchema = z.object({
   items: z.array(receiptLineSchema).min(1, "Add at least one item"),
 });
 
+const paymentSchema = z.object({
+  amount: z.coerce.number().positive(),
+  paymentMethodId: z.string().trim().min(1),
+  reference: optionalText(120),
+  note: optionalText(500),
+  paidAt: optionalDate,
+});
+
 /** Lists the delivery events already posted against one PO — the receiving
  * history shown on its detail view. (GET /:id already nests these too;
  * this is a lighter-weight fetch for refreshing just the history panel.) */
@@ -402,7 +498,17 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid goods receipt", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
-    const purchase = await prisma.purchase.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: { include: { product: { select: { id: true, name: true, packSize: true } } } } } });
+    const purchase = await prisma.purchase.findFirst({
+      where: { id: req.params.id, tenantId: tid },
+      include: {
+        items: {
+          include: {
+            product: { select: { id: true, name: true, packSize: true } },
+            menuPriceUpdates: true,
+          },
+        },
+      },
+    });
     if (!purchase) { res.status(404).json({ error: "Purchase not found" }); return; }
     if (purchase.status !== "ORDERED" && purchase.status !== "PARTIALLY_RECEIVED") {
       res.status(409).json({ error: `A ${purchase.status.toLowerCase().replace("_", " ")} purchase can't receive goods` });
@@ -448,11 +554,13 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
       });
 
       let owed = 0;
+      const receivedPurchaseItems = new Map<string, { item: typeof purchase.items[number]; unitCost: number }>();
       for (const receiptItem of created.items) {
         const item = itemsById.get(receiptItem.purchaseItemId)!;
         const qty = Number(receiptItem.quantity);
         const cost = Number(receiptItem.unitCost);
-        owed += stockQuantityToCostUnits(qty, item.product.packSize) * cost;
+        owed += receiptLineTotal(item, qty, cost);
+        receivedPurchaseItems.set(item.id, { item, unitCost: cost });
         try {
           await recordStockMovement(tx, {
             tenantId: tid, productId: item.productId, locationId: location.id, type: "PURCHASE",
@@ -467,8 +575,31 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
         await tx.purchaseItem.update({ where: { id: item.id }, data: { receivedQuantity: { increment: qty } } });
       }
 
+      await updateProductPricing(tx, tid, [...receivedPurchaseItems.values()].map(({ item, unitCost }) => ({
+        productId: item.productId,
+        unitCost,
+        sellingPrice: item.sellingPrice == null ? undefined : Number(item.sellingPrice),
+        taxRate: Number(item.taxRate),
+        taxMode: item.taxMode,
+        taxTreatment: item.taxTreatment,
+      })));
+      for (const { item } of receivedPurchaseItems.values()) {
+        for (const update of item.menuPriceUpdates) {
+          await tx.menuItem.updateMany({ where: { id: update.menuItemId, tenantId: tid }, data: { price: update.sellingPrice } });
+        }
+      }
+
       if (owed > 0) {
-        await tx.supplier.update({ where: { id: purchase.supplierId }, data: { balance: { increment: round2(owed) } } });
+        await recordSupplierBalanceEntry(tx, {
+          tenantId: tid,
+          supplierId: purchase.supplierId,
+          type: "GOODS_RECEIPT",
+          amount: round2(owed),
+          note: data.data.note ?? `Goods receipt ${receiptNo}`,
+          purchaseId: purchase.id,
+          goodsReceiptId: created.id,
+          createdBy: req.userId ?? null,
+        });
       }
 
       const freshItems = await tx.purchaseItem.findMany({ where: { purchaseId: purchase.id }, select: { quantity: true, receivedQuantity: true } });
@@ -482,6 +613,7 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
           ...(purchase.locationId ? {} : { locationId: location.id }),
         },
       });
+      await recomputePurchasePaymentStatus(tx, purchase.id);
 
       return created;
     });
@@ -490,6 +622,99 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
   } catch (error) {
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
     if (error instanceof InsufficientStockError) { res.status(400).json({ error: error.message }); return; }
+    next(error);
+  }
+});
+
+purchasesRouter.post("/:id/payments", async (req, res, next) => {
+  const data = paymentSchema.safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: "Invalid payment", details: data.error.flatten() }); return; }
+  const tid = tenantId(req);
+  try {
+    const purchase = await prisma.purchase.findFirst({
+      where: { id: req.params.id, tenantId: tid },
+      include: { supplier: { select: { id: true, name: true, balance: true } } },
+    });
+    if (!purchase) { res.status(404).json({ error: "Purchase not found" }); return; }
+    if (purchase.status === "DRAFT" || purchase.status === "ORDERED" || purchase.status === "CANCELLED") {
+      res.status(409).json({ error: "Receive goods before recording a payment for this purchase" });
+      return;
+    }
+    await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+
+    const [owedAgg, paidAgg] = await Promise.all([
+      prisma.supplierBalanceEntry.aggregate({ where: { purchaseId: purchase.id, type: "GOODS_RECEIPT" }, _sum: { amount: true } }),
+      prisma.supplierPayment.aggregate({ where: { purchaseId: purchase.id }, _sum: { amount: true } }),
+    ]);
+    const owed = Number(owedAgg._sum.amount ?? 0);
+    const paid = Number(paidAgg._sum.amount ?? 0);
+    const outstanding = round2(owed - paid);
+    if (outstanding <= 0.0005) {
+      res.status(409).json({ error: "This purchase has no outstanding received balance" });
+      return;
+    }
+    if (data.data.amount > outstanding + 0.0005) {
+      res.status(400).json({ error: "This payment is more than the outstanding purchase balance" });
+      return;
+    }
+    if (data.data.amount > Number(purchase.supplier.balance) + 0.0005) {
+      res.status(400).json({ error: "This payment is more than the supplier balance" });
+      return;
+    }
+
+    const paymentNo = await nextSupplierPaymentNo(tid);
+    const transactionNo = await nextTransactionNo(tid);
+    const result = await prisma.$transaction(async (tx) => {
+      const payment = await tx.supplierPayment.create({
+        data: {
+          tenantId: tid,
+          paymentNo,
+          supplierId: purchase.supplierId,
+          purchaseId: purchase.id,
+          amount: data.data.amount,
+          paymentMethodId: data.data.paymentMethodId,
+          reference: data.data.reference,
+          note: data.data.note,
+          createdBy: req.userId,
+          ...(data.data.paidAt ? { paidAt: data.data.paidAt } : {}),
+        },
+        include: {
+          paymentMethod: { select: { id: true, name: true, requiresReference: true } },
+          createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
+        },
+      });
+      await recordSupplierBalanceEntry(tx, {
+        tenantId: tid,
+        supplierId: purchase.supplierId,
+        type: "PAYMENT",
+        amount: -data.data.amount,
+        note: data.data.note ?? `Payment ${paymentNo}`,
+        purchaseId: purchase.id,
+        paymentId: payment.id,
+        createdBy: req.userId ?? null,
+      });
+      await tx.transaction.create({
+        data: {
+          tenantId: tid,
+          transactionNo,
+          direction: "OUT",
+          source: "SUPPLIER_PAYMENT",
+          amount: data.data.amount,
+          paymentMethodId: data.data.paymentMethodId,
+          reference: data.data.reference,
+          supplierId: purchase.supplierId,
+          employeeId: req.userId,
+          description: `Payment for ${purchase.purchaseNo}`,
+          sourceRefId: payment.id,
+        },
+      });
+      await recomputePurchasePaymentStatus(tx, purchase.id);
+      return payment;
+    });
+    const updatedPurchase = await prisma.purchase.findUniqueOrThrow({ where: { id: purchase.id }, include: purchaseInclude });
+    res.status(201).json({ payment: result, purchase: updatedPurchase });
+  } catch (error) {
+    if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
     next(error);
   }
 });
