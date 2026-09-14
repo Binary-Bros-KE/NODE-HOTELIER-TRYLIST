@@ -103,7 +103,7 @@ const slugSchema = z.string().trim().toLowerCase().min(3).max(63)
 const createTenantSchema = z.object({
   name: z.string().trim().min(2).max(120),
   slug: slugSchema,
-  businessType: z.enum(["RESTAURANT", "CAFE", "HOTEL", "MOTEL"]),
+  businessType: z.enum(["RESTAURANT", "CAFE", "HOTEL", "MOTEL", "CLUB"]),
   currency: z.enum(["KES", "UGX", "TZS", "USD"]).default("KES"),
   // Seeds the tenant's BusinessProfile.email.
   contactEmail: z.string().trim().toLowerCase().email(),
@@ -416,7 +416,7 @@ const updateProfileSchema = z.object({
   // list as at creation — kept short by the operator, not auto-derived.
   slug: slugSchema.optional(),
   businessName: z.string().trim().min(2).max(120).optional(),
-  businessType: z.enum(["RESTAURANT", "CAFE", "HOTEL", "MOTEL"]).optional(),
+  businessType: z.enum(["RESTAURANT", "CAFE", "HOTEL", "MOTEL", "CLUB"]).optional(),
   currency: z.enum(["KES", "UGX", "TZS", "USD"]).optional(),
   email: optionalEmail,
   primaryPhone: optionalText(40),

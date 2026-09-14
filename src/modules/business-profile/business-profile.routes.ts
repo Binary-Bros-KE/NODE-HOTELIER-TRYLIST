@@ -12,7 +12,7 @@ import { logoUpload } from "./logoUpload.js";
 // intentionally not gated by requireModule.
 export const businessProfileRouter = Router();
 
-const businessTypes = ["RESTAURANT", "CAFE", "HOTEL", "MOTEL"] as const;
+const businessTypes = ["RESTAURANT", "CAFE", "HOTEL", "MOTEL", "CLUB"] as const;
 const currencies = ["KES", "UGX", "TZS", "USD"] as const;
 const taxModes = ["INCLUSIVE", "EXCLUSIVE"] as const;
 const taxTreatments = ["STANDARD", "ZERO_RATED", "EXEMPT"] as const;

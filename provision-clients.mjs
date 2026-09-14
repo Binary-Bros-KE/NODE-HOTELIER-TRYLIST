@@ -463,7 +463,7 @@ async function buildOmega(planId) {
 
 async function buildClub(planId) {
   console.log("\n### Club Homeland (club)");
-  const t = await findOrCreateTenant({ name: "Club Homeland", slug: "club", businessType: "RESTAURANT", currency: "KES", planId });
+  const t = await findOrCreateTenant({ name: "Club Homeland", slug: "club", businessType: "CLUB", currency: "KES", planId });
   const tid = t.id;
   const bc1 = await upsertLocation(tid, "Bar Counter 1", "BAR");
   const bc2 = await upsertLocation(tid, "Bar Counter 2", "BAR");
