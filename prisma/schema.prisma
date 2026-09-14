@@ -1805,6 +1805,7 @@ model PosOrder {
   complimentarySession   ComplimentarySession? @relation(fields: [complimentarySessionId], references: [id], onDelete: SetNull)
   complimentaryOrderRole ComplimentaryOrderRole?
   complimentaryReason    String?
+  complimentaryRecipientName String?
   discount           Decimal               @default(0) @db.Decimal(12, 2)
   notes              String?
   readyAt            DateTime?
@@ -1822,6 +1823,8 @@ model PosOrder {
   // Money state, kept apart from `status`: an order can be COMPLETED and
   // still UNPAID/PARTIAL when finished on credit.
   paymentStatus      PosPaymentStatus      @default(UNPAID)
+  creditReason       String?
+  creditExpectedAt   DateTime?
   // Opaque token for a public, no-auth receipt page. Minted on first Share,
   // reused thereafter. Globally unique so the public route needs no tenant.
   shareToken         String?               @unique
@@ -1844,6 +1847,7 @@ model PosOrder {
   @@index([customerId])
   @@index([tenantId, saleType, updatedAt])
   @@index([complimentarySessionId])
+  @@index([tenantId, creditExpectedAt])
 }
 
 model ComplimentarySession {
@@ -1854,6 +1858,8 @@ model ComplimentarySession {
   hostName    String
   hostPhone   String?
   eventDate   DateTime                   @default(now())
+  startsAt    DateTime?
+  endsAt      DateTime?
   status      ComplimentarySessionStatus @default(OPEN)
   notes       String?
   createdBy   String?
@@ -1862,6 +1868,7 @@ model ComplimentarySession {
   orders      PosOrder[]
 
   @@index([tenantId, status, eventDate])
+  @@index([tenantId, startsAt, endsAt])
 }
 
 // One row per movement of a customer's balance: +ve raises it (an order

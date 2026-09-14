@@ -216,7 +216,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const topItemsMap = new Map<string, { name: string; qty: number; revenue: number }>();
     const byLocationMap = new Map<string, { name: string; count: number; revenue: number; cogs: number }>();
     const byCustomerMap = new Map<string, { name: string; count: number; revenue: number }>();
-    const compSessions = new Map<string, { id: string; title: string; hostName: string | null; complimentaryValue: number; complimentaryCogs: number; guestRevenue: number; guestCogs: number; orders: number }>();
+    const compSessions = new Map<string, { id: string; title: string; hostName: string | null; startsAt: Date | null; endsAt: Date | null; complimentaryValue: number; complimentaryCogs: number; guestRevenue: number; guestCogs: number; orders: number }>();
     let complimentaryValue = 0;
     let complimentaryCogs = 0;
 
@@ -255,6 +255,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
           id: order.complimentarySessionId,
           title: order.complimentarySession?.title ?? "Complimentary session",
           hostName: order.complimentarySession?.hostName ?? null,
+          startsAt: order.complimentarySession?.startsAt ?? order.complimentarySession?.eventDate ?? null,
+          endsAt: order.complimentarySession?.endsAt ?? null,
           complimentaryValue: 0,
           complimentaryCogs: 0,
           guestRevenue: 0,
@@ -451,11 +453,14 @@ reportsRouter.get("/sales", async (req, res, next) => {
       },
       complimentarySessions: [...compSessions.values()].map((s) => ({
         ...s,
+        startsAt: s.startsAt?.toISOString() ?? null,
+        endsAt: s.endsAt?.toISOString() ?? null,
         complimentaryValue: round2(s.complimentaryValue),
         complimentaryCogs: round2(s.complimentaryCogs),
         guestRevenue: round2(s.guestRevenue),
         guestCogs: round2(s.guestCogs),
         guestProfit: round2(s.guestRevenue - s.guestCogs),
+        coverPercent: s.complimentaryCogs > 0 ? round2(((s.guestRevenue - s.guestCogs) / s.complimentaryCogs) * 100) : (s.guestRevenue > 0 ? 100 : 0),
         netImpact: round2(s.guestRevenue - s.guestCogs - s.complimentaryCogs),
       })).sort((a, b) => b.netImpact - a.netImpact),
       topItems,

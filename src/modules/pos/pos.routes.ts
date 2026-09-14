@@ -40,13 +40,16 @@ const orderLineSchema = z.object({
   quantity: z.coerce.number().int().min(1).max(50),
   addons: z.array(z.object({ addonId: z.string().cuid(), quantity: z.coerce.number().int().min(1).max(20).default(1) })).default([]),
 });
+const optionalDate = z.preprocess((value) => value === "" || value == null ? undefined : value, z.coerce.date().optional());
 const complimentarySessionSchema = z.object({
   title: z.string().trim().min(1).max(150),
   hostName: z.string().trim().min(1).max(120),
   hostPhone: z.string().trim().max(40).optional(),
   eventDate: z.coerce.date().optional(),
+  startsAt: optionalDate,
+  endsAt: optionalDate,
   notes: z.string().trim().max(500).optional(),
-});
+}).refine((value) => !value.endsAt || !value.startsAt || value.endsAt > value.startsAt, { path: ["endsAt"], message: "End time must be after start time" });
 const orderSchema = z.object({
   tableId: z.string().cuid().optional(),
   locationId: z.string().cuid().optional(),
@@ -58,9 +61,14 @@ const orderSchema = z.object({
   complimentarySessionId: z.string().cuid().optional(),
   complimentaryOrderRole: z.enum(["HOST_COMP", "GUEST_SPEND"]).optional(),
   complimentaryReason: z.string().trim().max(255).optional(),
+  complimentaryRecipientName: z.string().trim().max(120).optional(),
   items: z.array(orderLineSchema).min(1),
 });
 const addItemsSchema = z.object({ items: z.array(orderLineSchema).min(1) });
+const settleSchema = z.object({
+  creditReason: z.string().trim().min(3).max(255).optional(),
+  creditExpectedAt: optionalDate,
+});
 
 // Editing one existing line: any facet omitted keeps its current value.
 const editItemSchema = z.object({
@@ -231,7 +239,7 @@ posRouter.get("/complimentary-sessions", async (req, res) => {
   const sessions = await prisma.complimentarySession.findMany({
     where: { tenantId: tid, ...(activeOnly ? { status: "OPEN" } : {}) },
     include: { _count: { select: { orders: true } } },
-    orderBy: [{ status: "asc" }, { eventDate: "desc" }],
+    orderBy: [{ status: "asc" }, { startsAt: "desc" }, { eventDate: "desc" }],
     take: 100,
   });
   res.status(200).json({ sessions });
@@ -241,8 +249,9 @@ posRouter.post("/complimentary-sessions", async (req, res, next) => {
   const parsed = complimentarySessionSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid complimentary session", details: parsed.error.flatten() }); return; }
   try {
+    const startsAt = parsed.data.startsAt ?? parsed.data.eventDate ?? new Date();
     const session = await prisma.complimentarySession.create({
-      data: { tenantId: tenantIdFor(req), createdBy: req.userId, ...parsed.data },
+      data: { ...parsed.data, tenantId: tenantIdFor(req), createdBy: req.userId, eventDate: parsed.data.eventDate ?? startsAt, startsAt },
       include: { _count: { select: { orders: true } } },
     });
     res.status(201).json({ session });
@@ -556,6 +565,7 @@ posRouter.post("/orders", async (req, res) => {
           complimentarySessionId,
           complimentaryOrderRole: parsed.data.saleType === "COMPLIMENTARY" ? "HOST_COMP" : parsed.data.complimentarySessionId ? (parsed.data.complimentaryOrderRole ?? "GUEST_SPEND") : undefined,
           complimentaryReason: parsed.data.complimentaryReason,
+          complimentaryRecipientName: parsed.data.complimentaryRecipientName,
           createdBy: req.userId,
           notes: parsed.data.notes,
           discount: parsed.data.saleType === "COMPLIMENTARY" ? 0 : parsed.data.discount,
@@ -1143,6 +1153,8 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
  * COMPLETED / PAID. */
 posRouter.post("/orders/:id/settle", async (req, res) => {
   const id = req.params.id as string;
+  const parsed = settleSchema.safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: "Invalid settlement details", details: parsed.error.flatten() }); return; }
   const tid = tenantIdFor(req);
   const [order, tax] = await Promise.all([
     prisma.posOrder.findFirst({ where: { id, tenantId: tid }, include: orderInclude }),
@@ -1157,8 +1169,20 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
     res.status(400).json({ error: "Attach a customer before completing this order on credit" });
     return;
   }
+  if (shortfall > 0.01 && (!parsed.data.creditReason || !parsed.data.creditExpectedAt)) {
+    res.status(400).json({ error: "Give a credit reason and expected payment date before completing on credit" });
+    return;
+  }
   const updated = await prisma.$transaction(async (tx) => {
-    await tx.posOrder.update({ where: { id: order.id }, data: { status: "COMPLETED", paymentStatus: paymentStatusFor(paid, total) } });
+    await tx.posOrder.update({
+      where: { id: order.id },
+      data: {
+        status: "COMPLETED",
+        paymentStatus: paymentStatusFor(paid, total),
+        creditReason: shortfall > 0.01 ? parsed.data.creditReason : null,
+        creditExpectedAt: shortfall > 0.01 ? parsed.data.creditExpectedAt : null,
+      },
+    });
     if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
     await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId, status: "COMPLETED", paid, total, by: req.userId });
     return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
