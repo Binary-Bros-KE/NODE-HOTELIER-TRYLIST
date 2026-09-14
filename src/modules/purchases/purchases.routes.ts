@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma.js";
 import { nextPurchaseNo, nextGoodsReceiptNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
+import { stockQuantityToCostUnits } from "../../lib/stockValuation.js";
 
 // Mirrors the PurchaseStatus enum in schema.prisma — kept as a local literal
 // list to match how every other module validates enums (never importing the
@@ -94,13 +95,13 @@ function lineTaxAmount(lineTotal: number, taxRate: number, taxTreatment: "STANDA
   return round2(lineTotal - lineTotal / (1 + taxRate / 100));
 }
 
-function computeTotals<T extends { quantity: number; unitCost: number; discountPerUnit?: number; taxRate?: number; taxTreatment?: "STANDARD" | "ZERO_RATED" | "EXEMPT" }>(items: T[]) {
+function computeTotals<T extends { quantity: number; unitCost: number; packSize?: Prisma.Decimal | number | null; discountPerUnit?: number; taxRate?: number; taxTreatment?: "STANDARD" | "ZERO_RATED" | "EXEMPT" }>(items: T[]) {
   const lines = items.map((i) => {
     const discountPerUnit = i.discountPerUnit ?? 0;
     const taxRate = i.taxRate ?? 0;
     const taxTreatment = i.taxTreatment ?? "STANDARD";
     const netUnitCost = Math.max(0, i.unitCost - discountPerUnit);
-    const lineTotal = round2(i.quantity * netUnitCost);
+    const lineTotal = round2(stockQuantityToCostUnits(i.quantity, i.packSize) * netUnitCost);
     const taxAmount = lineTaxAmount(lineTotal, taxRate, taxTreatment);
     return { ...i, discountPerUnit, taxRate, taxTreatment, taxAmount, lineTotal };
   });
@@ -135,10 +136,11 @@ async function assertSupplier(tid: string, supplierId: string) {
   if (!supplier.isActive) throw new HttpError(400, "That supplier is inactive");
 }
 
-async function assertProducts(tid: string, items: { productId: string }[]) {
+async function productsForLines(tid: string, items: { productId: string }[]) {
   const ids = [...new Set(items.map((i) => i.productId))];
-  const found = await prisma.product.count({ where: { id: { in: ids }, tenantId: tid } });
-  if (found !== ids.length) throw new HttpError(400, "One or more items reference a product that was not found");
+  const products = await prisma.product.findMany({ where: { id: { in: ids }, tenantId: tid }, select: { id: true, packSize: true } });
+  if (products.length !== ids.length) throw new HttpError(400, "One or more items reference a product that was not found");
+  return new Map(products.map((product) => [product.id, product]));
 }
 
 async function assertLocation(tid: string, locationId: string) {
@@ -205,9 +207,9 @@ purchasesRouter.post("/", async (req, res, next) => {
   const { supplierId, items, orderDate, ...rest } = data.data;
   try {
     await assertSupplier(tid, supplierId);
-    await assertProducts(tid, items);
+    const productsById = await productsForLines(tid, items);
     if (rest.locationId) await assertLocation(tid, rest.locationId);
-    const { lines, subtotal, taxAmount, total } = computeTotals(items);
+    const { lines, subtotal, taxAmount, total } = computeTotals(items.map((item) => ({ ...item, packSize: productsById.get(item.productId)?.packSize ?? null })));
     const purchaseNo = await nextPurchaseNo(tid);
     const purchase = await prisma.$transaction(async (tx) => {
       const created = await tx.purchase.create({
@@ -255,25 +257,28 @@ purchasesRouter.patch("/:id", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid purchase", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
-    const existing = await prisma.purchase.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: true } });
+    const existing = await prisma.purchase.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: { include: { product: { select: { packSize: true } } } } } });
     if (!existing) { res.status(404).json({ error: "Purchase not found" }); return; }
     if (existing.status !== "DRAFT") { res.status(409).json({ error: `A ${existing.status.toLowerCase()} purchase can no longer be edited` }); return; }
 
     const { supplierId, items, orderDate, ...rest } = data.data;
     if (supplierId) await assertSupplier(tid, supplierId);
-    if (items) await assertProducts(tid, items);
+    const productsById = items ? await productsForLines(tid, items) : null;
     if (rest.locationId) await assertLocation(tid, rest.locationId);
 
-    const effectiveItems = (items ?? existing.items.map((i) => ({
-      productId: i.productId,
-      quantity: Number(i.quantity),
-      unitCost: Number(i.unitCost),
-      sellingPrice: i.sellingPrice == null ? undefined : Number(i.sellingPrice),
-      discountPerUnit: Number(i.discountPerUnit),
-      taxRate: Number(i.taxRate),
-      taxTreatment: i.taxTreatment,
-      note: i.note ?? undefined,
-    })));
+    const effectiveItems = items
+      ? items.map((item) => ({ ...item, packSize: productsById?.get(item.productId)?.packSize ?? null }))
+      : existing.items.map((i) => ({
+        productId: i.productId,
+        quantity: Number(i.quantity),
+        unitCost: Number(i.unitCost),
+        sellingPrice: i.sellingPrice == null ? undefined : Number(i.sellingPrice),
+        discountPerUnit: Number(i.discountPerUnit),
+        taxRate: Number(i.taxRate),
+        taxTreatment: i.taxTreatment,
+        note: i.note ?? undefined,
+        packSize: i.product.packSize,
+      }));
     const { lines, subtotal, taxAmount, total } = computeTotals(effectiveItems);
 
     const purchase = await prisma.$transaction(async (tx) => {
@@ -397,7 +402,7 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid goods receipt", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
-    const purchase = await prisma.purchase.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: { include: { product: { select: { id: true, name: true } } } } } });
+    const purchase = await prisma.purchase.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: { include: { product: { select: { id: true, name: true, packSize: true } } } } } });
     if (!purchase) { res.status(404).json({ error: "Purchase not found" }); return; }
     if (purchase.status !== "ORDERED" && purchase.status !== "PARTIALLY_RECEIVED") {
       res.status(409).json({ error: `A ${purchase.status.toLowerCase().replace("_", " ")} purchase can't receive goods` });
@@ -447,7 +452,7 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
         const item = itemsById.get(receiptItem.purchaseItemId)!;
         const qty = Number(receiptItem.quantity);
         const cost = Number(receiptItem.unitCost);
-        owed += qty * cost;
+        owed += stockQuantityToCostUnits(qty, item.product.packSize) * cost;
         try {
           await recordStockMovement(tx, {
             tenantId: tid, productId: item.productId, locationId: location.id, type: "PURCHASE",

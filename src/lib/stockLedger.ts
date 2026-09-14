@@ -1,4 +1,5 @@
 import type { Prisma, StockMovementType } from "@prisma/client";
+import { stockValue } from "./stockValuation.js";
 
 // The single choke point for changing a product's stock. Every buy, sale,
 // transfer, adjustment, loss — anything — goes through here so that:
@@ -22,8 +23,9 @@ type RecordStockMovementInput = {
   type: StockMovementType;
   /** Signed change: positive = stock in, negative = stock out. */
   quantity: number;
-  /** Per-unit cost for the cash `value`. Falls back to the product's
-   *  valuation `unitCost` when omitted. */
+  /** Per commercial unit cost for the cash `value`. For pack-tracked stock,
+   *  quantity is converted through product.packSize before costing. Falls
+   *  back to the product's valuation `unitCost` when omitted. */
   unitCost?: number | null;
   note?: string | null;
   sourceType?: string | null;
@@ -69,11 +71,16 @@ export async function recordStockMovement(tx: Prisma.TransactionClient, input: R
   const balanceBefore = balanceAfter - quantity;
 
   let unitCost = input.unitCost ?? null;
+  let packSize: Prisma.Decimal | number | null = null;
   if (unitCost == null) {
-    const product = await tx.product.findUnique({ where: { id: productId }, select: { unitCost: true } });
+    const product = await tx.product.findUnique({ where: { id: productId }, select: { unitCost: true, packSize: true } });
     unitCost = product?.unitCost != null ? Number(product.unitCost) : null;
+    packSize = product?.packSize ?? null;
+  } else {
+    const product = await tx.product.findUnique({ where: { id: productId }, select: { packSize: true } });
+    packSize = product?.packSize ?? null;
   }
-  const value = unitCost != null ? Math.abs(quantity) * unitCost : null;
+  const value = stockValue(Math.abs(quantity), unitCost, packSize);
 
   return tx.inventoryMovement.create({
     data: {

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
+import { stockValue } from "../../lib/stockValuation.js";
 import { taxSettingsFor } from "../pos/pos.routes.js";
 
 export const reportsRouter = Router();
@@ -84,13 +85,13 @@ type Moneyish = Prisma.Decimal | number | null;
  * caveat instead of quietly inflating Net Revenue. */
 type CostableItem = {
   quantity: number;
-  product: { unitCost: Moneyish } | null;
-  variant: { stockQtyPerUnit: Moneyish; stockProduct: { unitCost: Moneyish } | null } | null;
+  product: { unitCost: Moneyish; packSize: Moneyish } | null;
+  variant: { stockQtyPerUnit: Moneyish; stockProduct: { unitCost: Moneyish; packSize: Moneyish } | null } | null;
   service: { id: string } | null;
   menuItem: {
     stockQtyPerUnit: Moneyish;
-    product: { unitCost: Moneyish } | null;
-    recipe: { ingredients: { quantity: Moneyish; product: { unitCost: Moneyish } }[] } | null;
+    product: { unitCost: Moneyish; packSize: Moneyish } | null;
+    recipe: { ingredients: { quantity: Moneyish; product: { unitCost: Moneyish; packSize: Moneyish } }[] } | null;
   } | null;
 };
 
@@ -98,16 +99,16 @@ function resolveItemCost(item: CostableItem): number | null {
   if (item.product) return item.product.unitCost != null ? Number(item.product.unitCost) * item.quantity : null;
   if (item.variant?.stockProduct) {
     const perUnit = Number(item.variant.stockQtyPerUnit ?? 1);
-    return item.variant.stockProduct.unitCost != null ? Number(item.variant.stockProduct.unitCost) * perUnit * item.quantity : null;
+    return stockValue(perUnit * item.quantity, item.variant.stockProduct.unitCost, item.variant.stockProduct.packSize);
   }
   if (item.menuItem?.recipe?.ingredients.length) {
     if (item.menuItem.recipe.ingredients.some((ing) => ing.product.unitCost == null)) return null;
-    const perUnit = item.menuItem.recipe.ingredients.reduce((s, ing) => s + Number(ing.quantity) * Number(ing.product.unitCost), 0);
+    const perUnit = item.menuItem.recipe.ingredients.reduce((s, ing) => s + (stockValue(ing.quantity, ing.product.unitCost, ing.product.packSize) ?? 0), 0);
     return perUnit * item.quantity;
   }
   if (item.menuItem?.product) {
     const perUnit = Number(item.menuItem.stockQtyPerUnit ?? 1);
-    return item.menuItem.product.unitCost != null ? Number(item.menuItem.product.unitCost) * perUnit * item.quantity : null;
+    return stockValue(perUnit * item.quantity, item.menuItem.product.unitCost, item.menuItem.product.packSize);
   }
   if (item.service) return 0;
   return null;
@@ -123,16 +124,16 @@ const salesQuerySchema = z.object({
 
 const orderItemInclude = {
   addons: { select: { quantity: true, unitPrice: true } },
-  product: { select: { id: true, name: true, unit: true, unitCost: true } },
+  product: { select: { id: true, name: true, unit: true, unitCost: true, packSize: true } },
   service: { select: { id: true, name: true } },
-  variant: { select: { id: true, name: true, stockQtyPerUnit: true, stockProduct: { select: { unitCost: true } } } },
+  variant: { select: { id: true, name: true, stockQtyPerUnit: true, stockProduct: { select: { unitCost: true, packSize: true } } } },
   menuItem: {
     select: {
       id: true,
       name: true,
       stockQtyPerUnit: true,
-      product: { select: { unitCost: true } },
-      recipe: { select: { ingredients: { select: { quantity: true, product: { select: { unitCost: true } } } } } },
+      product: { select: { unitCost: true, packSize: true } },
+      recipe: { select: { ingredients: { select: { quantity: true, product: { select: { unitCost: true, packSize: true } } } } } },
     },
   },
 } as const;
@@ -175,7 +176,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       prisma.expense.findMany({ where: { tenantId: tid, status: "ACTIVE", expenseDate: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) }, include: { category: { select: { name: true } } } }),
       prisma.goodsReceiptItem.findMany({
         where: { goodsReceipt: { tenantId: tid, receivedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) } },
-        select: { quantity: true, unitCost: true, goodsReceipt: { select: { purchase: { select: { supplierId: true, supplier: { select: { name: true } } } } } } },
+        select: { quantity: true, unitCost: true, product: { select: { packSize: true } }, goodsReceipt: { select: { purchase: { select: { supplierId: true, supplier: { select: { name: true } } } } } } },
       }),
       prisma.purchase.findMany({ where: { tenantId: tid, status: "CANCELLED", updatedAt: { gte: start, lte: end } }, select: { id: true, total: true } }),
       prisma.supplierPayment.findMany({ where: { tenantId: tid, paidAt: { gte: start, lte: end } }, select: { amount: true } }),
@@ -283,7 +284,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       const supplierId = gri.goodsReceipt.purchase.supplierId;
       const bucket = purchasesBySupplierMap.get(supplierId) ?? { name: gri.goodsReceipt.purchase.supplier.name, count: 0, total: 0 };
       bucket.count += 1;
-      bucket.total += Number(gri.quantity) * Number(gri.unitCost);
+      bucket.total += stockValue(gri.quantity, gri.unitCost, gri.product.packSize) ?? 0;
       purchasesBySupplierMap.set(supplierId, bucket);
     }
     const purchasesBySupplier = [...purchasesBySupplierMap.values()].map((b) => ({ ...b, total: round2(b.total) })).sort((a, b) => b.total - a.total);
@@ -446,27 +447,39 @@ reportsRouter.get("/sales", async (req, res, next) => {
 // on the shelf today", not "what moved this week".
 // ============================================================================
 
-type StockRow = { productId: string; name: string; sku: string | null; category: string | null; quantity: number; unitCost: number; reorderLevel: number };
+type StockRow = {
+  productId: string;
+  name: string;
+  sku: string | null;
+  category: string | null;
+  quantity: number;
+  unit: string;
+  unitCost: number;
+  packSize: number | null;
+  packLabel: string | null;
+  packUnit: { id: string; name: string } | null;
+  reorderLevel: number;
+};
 
 function summarizeStock(rows: StockRow[]) {
-  const stockValue = round2(rows.reduce((s, r) => s + r.quantity * r.unitCost, 0));
+  const inventoryValue = round2(rows.reduce((s, r) => s + (stockValue(r.quantity, r.unitCost, r.packSize) ?? 0), 0));
   const byCategoryMap = new Map<string, { units: number; value: number }>();
   for (const r of rows) {
     const key = r.category ?? "Uncategorized";
     const bucket = byCategoryMap.get(key) ?? { units: 0, value: 0 };
     bucket.units += r.quantity;
-    bucket.value += r.quantity * r.unitCost;
+    bucket.value += stockValue(r.quantity, r.unitCost, r.packSize) ?? 0;
     byCategoryMap.set(key, bucket);
   }
   const byCategory = [...byCategoryMap.entries()]
-    .map(([category, v]) => ({ category, units: v.units, value: round2(v.value), percent: stockValue > 0 ? round2((v.value / stockValue) * 100) : 0 }))
+    .map(([category, v]) => ({ category, units: v.units, value: round2(v.value), percent: inventoryValue > 0 ? round2((v.value / inventoryValue) * 100) : 0 }))
     .sort((a, b) => b.value - a.value);
   return {
     totalProducts: rows.length,
     totalUnits: rows.reduce((s, r) => s + r.quantity, 0),
     lowStockCount: rows.filter((r) => r.quantity > 0 && r.quantity <= r.reorderLevel).length,
     outOfStockCount: rows.filter((r) => r.quantity === 0).length,
-    stockValue,
+    stockValue: inventoryValue,
     byCategory,
   };
 }
@@ -514,7 +527,7 @@ reportsRouter.get("/inventory-overview", async (req, res, next) => {
     const trackedProductIds = new Set([...balances.keys()].map((k) => k.split("::")[0]));
     const allProducts = await prisma.product.findMany({
       where: { tenantId: tid, OR: [{ isActive: true }, { id: { in: [...trackedProductIds] } }] },
-      select: { id: true, name: true, sku: true, unitCost: true, reorderLevel: true, isActive: true, category: { select: { name: true } } },
+      select: { id: true, name: true, sku: true, unit: true, unitCost: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } }, reorderLevel: true, isActive: true, category: { select: { name: true } } },
     });
     const productById = new Map(allProducts.map((p) => [p.id, p]));
     const activeProducts = allProducts.filter((p) => p.isActive);
@@ -526,12 +539,16 @@ reportsRouter.get("/inventory-overview", async (req, res, next) => {
         sku: p.sku,
         category: p.category?.name ?? null,
         quantity: balances.get(`${p.id}::${loc.id}`) ?? 0,
+        unit: p.unit,
         unitCost: p.unitCost != null ? Number(p.unitCost) : 0,
+        packSize: p.packSize == null ? null : Number(p.packSize),
+        packLabel: p.packLabel,
+        packUnit: p.packUnit,
         reorderLevel: Number(p.reorderLevel),
       }));
       rows.sort((a, b) => a.name.localeCompare(b.name));
       const summary = summarizeStock(rows);
-      return { locationId: loc.id, name: loc.name, ...summary, products: rows.map(({ reorderLevel, ...r }) => ({ ...r, value: round2(r.quantity * r.unitCost), low: r.quantity > 0 && r.quantity <= reorderLevel, out: r.quantity === 0 })) };
+      return { locationId: loc.id, name: loc.name, ...summary, products: rows.map(({ reorderLevel, ...r }) => ({ ...r, value: round2(stockValue(r.quantity, r.unitCost, r.packSize) ?? 0), low: r.quantity > 0 && r.quantity <= reorderLevel, out: r.quantity === 0 })) };
     });
 
     // Overall: one row per product, quantity summed across every location.
@@ -542,7 +559,19 @@ reportsRouter.get("/inventory-overview", async (req, res, next) => {
     }
     const overallRows: StockRow[] = [...overallByProduct.entries()].map(([productId, quantity]) => {
       const p = productById.get(productId)!;
-      return { productId, name: p.name, sku: p.sku, category: p.category?.name ?? null, quantity, unitCost: p.unitCost != null ? Number(p.unitCost) : 0, reorderLevel: Number(p.reorderLevel) };
+      return {
+        productId,
+        name: p.name,
+        sku: p.sku,
+        category: p.category?.name ?? null,
+        quantity,
+        unit: p.unit,
+        unitCost: p.unitCost != null ? Number(p.unitCost) : 0,
+        packSize: p.packSize == null ? null : Number(p.packSize),
+        packLabel: p.packLabel,
+        packUnit: p.packUnit,
+        reorderLevel: Number(p.reorderLevel),
+      };
     });
 
     res.json({ mode, asOfDate: asOfDate ?? localIsoToday(), overall: summarizeStock(overallRows), locations: perLocation });
@@ -575,7 +604,7 @@ reportsRouter.get("/products-overview", async (req, res, next) => {
       prisma.product.findMany({ where: { tenantId: tid, isActive: true }, select: { id: true, name: true, sku: true, category: { select: { name: true } } } }),
       prisma.posOrder.findMany({
         where: { tenantId: tid, status: "COMPLETED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
-        select: { items: { where: { productId: { not: null } }, select: { productId: true, quantity: true, unitPrice: true, product: { select: { unitCost: true } } } } },
+        select: { items: { where: { productId: { not: null } }, select: { productId: true, quantity: true, unitPrice: true, product: { select: { unitCost: true, packSize: true } } } } },
       }),
       prisma.posOrderItem.groupBy({
         by: ["productId"],

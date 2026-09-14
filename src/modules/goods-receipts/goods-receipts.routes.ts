@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { prisma } from "../../lib/prisma.js";
+import { stockValue } from "../../lib/stockValuation.js";
 
 // Read-only cross-PO history — the actual receiving action lives on the
 // purchase itself (POST /purchases/:id/goods-receipts), since a receipt only
@@ -19,7 +20,7 @@ const receiptInclude = {
   purchase: { select: { id: true, purchaseNo: true, supplier: { select: { id: true, name: true } } } },
   location: { select: { id: true, name: true } },
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
-  items: { include: { product: { select: { id: true, name: true, unit: true } } } },
+  items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true } } } },
 } as const;
 
 goodsReceiptsRouter.get("/", async (req, res, next) => {
@@ -41,7 +42,7 @@ goodsReceiptsRouter.get("/", async (req, res, next) => {
       ] } : {}),
     };
     const receipts = await prisma.goodsReceipt.findMany({ where, include: receiptInclude, orderBy: { receivedAt: "desc" } });
-    const value = (r: (typeof receipts)[number]) => r.items.reduce((sum, i) => sum + Number(i.quantity) * Number(i.unitCost), 0);
+    const value = (r: (typeof receipts)[number]) => r.items.reduce((sum, i) => sum + (stockValue(i.quantity, i.unitCost, i.product.packSize) ?? 0), 0);
     const summary = { total: receipts.length, totalValue: receipts.reduce((sum, r) => sum + value(r), 0) };
     res.json({ receipts: receipts.map((r) => ({ ...r, value: value(r) })), summary });
   } catch (error) {

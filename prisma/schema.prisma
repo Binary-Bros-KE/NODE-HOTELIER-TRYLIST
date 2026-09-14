@@ -1467,8 +1467,9 @@ model ProductStock {
 // The stock ledger: one immutable row per change to a product's balance at
 // one location. `quantity` is signed (+ in, - out); `balanceBefore` +
 // `quantity` = `balanceAfter` for that (product, location). `value` is the
-// cash worth of the movement (|quantity| * unitCost, unitCost defaulting to
-// the product's valuation cost). Written only via recordStockMovement().
+// cash worth of the movement. Pack-tracked products convert stock units back
+// to whole-pack equivalents before applying unitCost. Written only via
+// recordStockMovement().
 model InventoryMovement {
   id            String            @id @default(cuid())
   tenantId      String

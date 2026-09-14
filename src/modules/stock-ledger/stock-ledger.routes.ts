@@ -36,7 +36,7 @@ const querySchema = z.object({
 });
 
 const ledgerInclude = {
-  product: { select: { id: true, name: true, sku: true, unit: true } },
+  product: { select: { id: true, name: true, sku: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } },
   location: { select: { id: true, name: true } },
   employee: { select: { id: true, firstName: true, lastName: true } },
 } as const;

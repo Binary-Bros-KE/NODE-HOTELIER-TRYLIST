@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma.js";
 import { nextPurchaseNo, nextRequisitionNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { hasPermission, requirePermission } from "../../middleware/tenantContext.js";
+import { stockQuantityToCostUnits } from "../../lib/stockValuation.js";
 
 // Purchase requisitions — someone raises a request to buy items (product +
 // quantity only — they never see or set cost), someone else reviews it
@@ -75,7 +76,7 @@ const convertSchema = z.object({
 const requisitionInclude = {
   suggestedSupplier: { select: { id: true, name: true } },
   purchase: { select: { id: true, purchaseNo: true, status: true } },
-  items: { include: { product: { select: { id: true, name: true, unit: true } } }, orderBy: { createdAt: "asc" } },
+  items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } } }, orderBy: { createdAt: "asc" } },
   reviewedByEmployee: { select: { id: true, firstName: true, lastName: true } },
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
   updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
@@ -83,16 +84,17 @@ const requisitionInclude = {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-function withLineTotals<T extends { quantity: number; estimatedUnitCost: number }>(items: T[]) {
-  const lines = items.map((i) => ({ ...i, lineTotal: round2(i.quantity * i.estimatedUnitCost) }));
+function withLineTotals<T extends { quantity: number; estimatedUnitCost: number; packSize?: Prisma.Decimal | number | null }>(items: T[]) {
+  const lines = items.map((i) => ({ ...i, lineTotal: round2(stockQuantityToCostUnits(i.quantity, i.packSize) * i.estimatedUnitCost) }));
   const estimatedTotal = round2(lines.reduce((sum, l) => sum + l.lineTotal, 0));
   return { lines, estimatedTotal };
 }
 
-async function assertProducts(tid: string, items: { productId: string }[]) {
+async function productsForLines(tid: string, items: { productId: string }[]) {
   const ids = [...new Set(items.map((i) => i.productId))];
-  const found = await prisma.product.count({ where: { id: { in: ids }, tenantId: tid } });
-  if (found !== ids.length) throw new HttpError(400, "One or more items reference a product that was not found");
+  const products = await prisma.product.findMany({ where: { id: { in: ids }, tenantId: tid }, select: { id: true, packSize: true } });
+  if (products.length !== ids.length) throw new HttpError(400, "One or more items reference a product that was not found");
+  return new Map(products.map((product) => [product.id, product]));
 }
 
 async function assertSupplier(tid: string, supplierId: string) {
@@ -183,9 +185,9 @@ purchaseRequisitionsRouter.post("/", requirePermission("REQUISITION_CREATE"), as
   const tid = tenantId(req);
   const { items, requisitionDate, suggestedSupplierId, ...rest } = data.data;
   try {
-    await assertProducts(tid, items);
+    const productsById = await productsForLines(tid, items);
     if (suggestedSupplierId) await assertSupplier(tid, suggestedSupplierId);
-    const { lines, estimatedTotal } = withLineTotals(items);
+    const { lines, estimatedTotal } = withLineTotals(items.map((item) => ({ ...item, packSize: productsById.get(item.productId)?.packSize ?? null })));
     const requisitionNo = await nextRequisitionNo(tid);
     const requisition = await prisma.purchaseRequisition.create({
       data: {
@@ -218,7 +220,7 @@ purchaseRequisitionsRouter.patch("/:id", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid requisition", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
-    const existing = await prisma.purchaseRequisition.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: true } });
+    const existing = await prisma.purchaseRequisition.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { items: { include: { product: { select: { packSize: true } } } } } });
     if (!existing) { res.status(404).json({ error: "Requisition not found" }); return; }
     if (existing.status === "DRAFT" || existing.status === "REJECTED") {
       const allowed = await hasPermission(tid, req.userId, "REQUISITION_CREATE");
@@ -230,10 +232,18 @@ purchaseRequisitionsRouter.patch("/:id", async (req, res, next) => {
       return;
     }
     const { items, requisitionDate, suggestedSupplierId, ...rest } = data.data;
-    if (items) await assertProducts(tid, items);
+    const productsById = items ? await productsForLines(tid, items) : null;
     if (suggestedSupplierId) await assertSupplier(tid, suggestedSupplierId);
 
-    const effectiveItems = items ?? existing.items.map((i) => ({ productId: i.productId, quantity: Number(i.quantity), estimatedUnitCost: Number(i.estimatedUnitCost), note: i.note ?? undefined }));
+    const effectiveItems = items
+      ? items.map((item) => ({ ...item, packSize: productsById?.get(item.productId)?.packSize ?? null }))
+      : existing.items.map((i) => ({
+        productId: i.productId,
+        quantity: Number(i.quantity),
+        estimatedUnitCost: Number(i.estimatedUnitCost),
+        note: i.note ?? undefined,
+        packSize: i.product.packSize,
+      }));
     const { lines, estimatedTotal } = withLineTotals(effectiveItems);
 
     const requisition = await prisma.$transaction(async (tx) => {
@@ -315,7 +325,7 @@ purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_A
   const id = req.params.id as string;
   const { supplierId, taxRate, expectedDate, reference, notes } = data.data;
   try {
-    const existing = await prisma.purchaseRequisition.findFirst({ where: { id, tenantId: tid }, include: { items: true } });
+    const existing = await prisma.purchaseRequisition.findFirst({ where: { id, tenantId: tid }, include: { items: { include: { product: { select: { packSize: true } } } } } });
     if (!existing) { res.status(404).json({ error: "Requisition not found" }); return; }
     if (existing.status !== "APPROVED") { res.status(409).json({ error: "Only an approved requisition can be converted to a purchase" }); return; }
     await assertSupplier(tid, supplierId);
@@ -324,7 +334,7 @@ purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_A
       productId: i.productId,
       quantity: Number(i.quantity),
       unitCost: Number(i.estimatedUnitCost),
-      lineTotal: round2(Number(i.quantity) * Number(i.estimatedUnitCost)),
+      lineTotal: round2(stockQuantityToCostUnits(i.quantity, i.product.packSize) * Number(i.estimatedUnitCost)),
       note: i.note ?? undefined,
     }));
     const subtotal = round2(lines.reduce((sum, l) => sum + l.lineTotal, 0));

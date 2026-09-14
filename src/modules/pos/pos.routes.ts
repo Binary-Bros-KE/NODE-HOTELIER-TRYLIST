@@ -23,6 +23,10 @@ const settingsSchema = z.object({
   lowStockAlerts: z.boolean(),
 });
 
+type SaleProductSnapshot = Prisma.ProductGetPayload<{
+  select: { id: true; name: true; sellingPrice: true; taxRate: true; taxMode: true; taxTreatment: true; packSize: true };
+}>;
+
 // reservationId is optional "remember this bar tab is for Room 12" — it
 // stamps the checked-in stay onto the order so settlement can default to
 // charging the folio, but it does NOT charge the folio now (a tab isn't
@@ -1319,7 +1323,13 @@ posRouter.get("/product-items", async (req, res) => {
     include: { category: true, packUnit: { select: { id: true, name: true } }, stocks: { where: { locationId: effectiveLocationId }, select: { quantity: true } } },
     orderBy: { name: "asc" },
   });
-  res.status(200).json({ items: items.map((item) => ({ ...item, availableQuantity: item.stocks[0]?.quantity ?? 0 })) });
+  res.status(200).json({
+    items: items.map((item) => {
+      const stockQuantity = Number(item.stocks[0]?.quantity ?? 0);
+      const packSize = Number(item.packSize) || 0;
+      return { ...item, availableQuantity: packSize > 0 ? Math.floor(stockQuantity / packSize) : stockQuantity };
+    }),
+  });
 });
 
 /** Lists the services the cashier can add to a sale at their location.
@@ -1380,14 +1390,20 @@ posRouter.post("/retail-orders", async (req, res) => {
     const order = await prisma.$transaction(async (tx) => {
       let itemsCreate: Prisma.PosOrderItemCreateWithoutOrderInput[];
       const productNames = new Map<string, string>();
+      const productsById = new Map<string, SaleProductSnapshot>();
 
       if (channel === "PRODUCTS") {
         if (!effectiveLocationId) throw Object.assign(new Error("Choose which location this sale is for"), { status: 400 });
         const productIds = parsed.data.items.map((item) => item.productId);
-        const products = await tx.product.findMany({ where: { id: { in: productIds }, tenantId: tid, isActive: true, sellingPrice: { not: null } } });
+        const products = await tx.product.findMany({
+          where: { id: { in: productIds }, tenantId: tid, isActive: true, sellingPrice: { not: null } },
+          select: { id: true, name: true, sellingPrice: true, taxRate: true, taxMode: true, taxTreatment: true, packSize: true },
+        });
         if (products.length !== new Set(productIds).size) throw Object.assign(new Error("Every item must be an active, sellable product from this property"), { status: 400 });
-        for (const p of products) productNames.set(p.id, p.name);
-        const productsById = new Map(products.map((p) => [p.id, p]));
+        for (const p of products) {
+          productNames.set(p.id, p.name);
+          productsById.set(p.id, p);
+        }
         itemsCreate = parsed.data.items.map((item) => {
           const product = productsById.get(item.productId)!;
           return {
@@ -1427,10 +1443,12 @@ posRouter.post("/retail-orders", async (req, res) => {
 
       if (channel === "PRODUCTS") {
         for (const item of parsed.data.items) {
+          const product = productsById.get(item.productId)!;
+          const stockQuantity = item.quantity * (Number(product.packSize) || 1);
           try {
             await recordStockMovement(tx, {
               tenantId: tid, productId: item.productId, locationId: effectiveLocationId!, type: "SALE",
-              quantity: -item.quantity, note: `Sold — POS order #${created.orderNumber}`,
+              quantity: -stockQuantity, note: `Sold — POS order #${created.orderNumber}`,
               sourceType: "POS_ORDER", sourceRefId: created.id, performedBy: req.userId ?? null,
               label: productNames.get(item.productId) ?? "stock",
             });
