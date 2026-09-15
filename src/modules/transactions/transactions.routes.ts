@@ -13,7 +13,7 @@ const optionalText = (max: number) => z.preprocess(blankToUndefined, z.string().
 
 const listSchema = z.object({
   direction: z.enum(["IN", "OUT"]).optional(),
-  source: z.enum(["FOLIO_DEPOSIT", "FOLIO_SETTLEMENT", "POS_SALE", "EXPENSE", "ASSET_PURCHASE", "SUPPLIER_PAYMENT"]).optional(),
+  source: z.enum(["FOLIO_DEPOSIT", "FOLIO_SETTLEMENT", "POS_SALE", "EXPENSE", "ASSET_PURCHASE", "SUPPLIER_PAYMENT", "SALARY_PAYMENT"]).optional(),
   paymentMethodId: z.string().trim().min(1).optional(),
   locationId: z.string().trim().min(1).optional(),
   search: optionalText(120),

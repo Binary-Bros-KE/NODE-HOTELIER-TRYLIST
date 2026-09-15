@@ -271,6 +271,17 @@ enum EmployeePaymentMethod {
   CARD
 }
 
+enum EmployeeSalaryStatus {
+  DRAFT
+  COMPLETE
+  VOIDED
+}
+
+enum EmployeeSalaryItemType {
+  ALLOWANCE
+  DEDUCTION
+}
+
 enum BusinessType {
   RESTAURANT
   CAFE
@@ -391,6 +402,7 @@ model Tenant {
   shiftOverrides        EmployeeShiftOverride[]
   attendanceRecords     AttendanceRecord[]
   shiftSessions         ShiftSession[]
+  employeeSalaries      EmployeeSalary[]
 }
 
 enum CustomerType {
@@ -924,6 +936,7 @@ enum TransactionSource {
   EXPENSE
   ASSET_PURCHASE
   SUPPLIER_PAYMENT
+  SALARY_PAYMENT
 }
 
 // A single, unified ledger of every payment actually made across the
@@ -2256,6 +2269,9 @@ model Employee {
   shiftSessions            ShiftSession[]
   approvedShiftStarts      ShiftSession[]         @relation("ShiftStartApprovedBy")
   approvedShiftEnds        ShiftSession[]         @relation("ShiftEndApprovedBy")
+  salaries                 EmployeeSalary[]       @relation("EmployeeSalaryEmployee")
+  createdSalaries          EmployeeSalary[]       @relation("EmployeeSalaryCreatedBy")
+  voidedSalaries           EmployeeSalary[]       @relation("EmployeeSalaryVoidedBy")
 
   // Compensation
   salaryType        SalaryType            @default(MONTHLY)
@@ -2312,6 +2328,51 @@ model ShiftSession {
   @@index([tenantId, employeeId, status])
   @@index([tenantId, status, requestedStartAt])
   @@index([tenantId, approvedStartAt])
+}
+
+model EmployeeSalary {
+  id                String               @id @default(cuid())
+  tenantId          String
+  tenant            Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  payslipNo         String
+  employeeId        String
+  employee          Employee             @relation("EmployeeSalaryEmployee", fields: [employeeId], references: [id], onDelete: Restrict)
+  payPeriod         DateTime             @db.Date
+  basicSalary       Decimal              @default(0) @db.Decimal(12, 2)
+  grossPay          Decimal              @default(0) @db.Decimal(12, 2)
+  totalAllowances   Decimal              @default(0) @db.Decimal(12, 2)
+  totalDeductions   Decimal              @default(0) @db.Decimal(12, 2)
+  netPay            Decimal              @default(0) @db.Decimal(12, 2)
+  paymentMethod     EmployeePaymentMethod?
+  reference         String?
+  notes             String?
+  status            EmployeeSalaryStatus @default(DRAFT)
+  paidAt            DateTime?
+  createdBy         String?
+  createdByEmployee Employee?            @relation("EmployeeSalaryCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  voidedBy          String?
+  voidedByEmployee  Employee?            @relation("EmployeeSalaryVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
+  voidReason        String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  items             EmployeeSalaryItem[]
+
+  @@unique([tenantId, payslipNo])
+  @@unique([tenantId, employeeId, payPeriod])
+  @@index([tenantId, payPeriod])
+  @@index([tenantId, status])
+}
+
+model EmployeeSalaryItem {
+  id        String                 @id @default(cuid())
+  salaryId  String
+  salary    EmployeeSalary         @relation(fields: [salaryId], references: [id], onDelete: Cascade)
+  type      EmployeeSalaryItemType
+  label     String
+  amount    Decimal                @db.Decimal(12, 2)
+  createdAt DateTime               @default(now())
+
+  @@index([salaryId])
 }
 
 // A named work-hours window (e.g. "Day Shift" 06:00-14:00, "Night Shift"

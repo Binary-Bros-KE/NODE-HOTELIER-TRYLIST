@@ -67,3 +67,7 @@ export async function nextStockTransferNo(tenantId: string): Promise<string> {
 export async function nextStockReceiptNo(tenantId: string): Promise<string> {
   return nextSequenceNo(tenantId, "stockreceipt", "GRN", 6);
 }
+
+export async function nextPayslipNo(tenantId: string): Promise<string> {
+  return nextSequenceNo(tenantId, "payslip", "PAY", 6);
+}

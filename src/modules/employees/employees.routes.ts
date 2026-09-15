@@ -13,7 +13,7 @@ const genders = ["MALE", "FEMALE", "OTHER"] as const;
 const employmentTypes = ["FULL_TIME", "PART_TIME", "CASUAL", "CONTRACT", "INTERN"] as const;
 const statuses = ["ACTIVE", "ON_LEAVE", "SUSPENDED", "TERMINATED"] as const;
 const salaryTypes = ["MONTHLY", "DAILY", "HOURLY"] as const;
-const paymentMethods = ["BANK_TRANSFER", "MPESA", "CASH", "CHEQUE"] as const;
+const paymentMethods = ["BANK_TRANSFER", "MPESA", "CASH", "CHEQUE", "CARD"] as const;
 
 // Empty strings from optional form fields should be treated as "not provided",
 // not as validation failures (e.g. an untouched email/date input).

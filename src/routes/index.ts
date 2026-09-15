@@ -40,6 +40,7 @@ import { authRouter } from "../modules/auth/auth.routes.js";
 import { serviceCenterRouter } from "../modules/service-center/service-center.routes.js";
 import { shiftsRouter } from "../modules/shifts/shifts.routes.js";
 import { attendanceRouter } from "../modules/attendance/attendance.routes.js";
+import { employeeSalariesRouter } from "../modules/employee-salaries/employee-salaries.routes.js";
 import { enforceShiftAccess } from "../middleware/enforceShiftAccess.js";
 
 export const router = Router();
@@ -93,3 +94,4 @@ router.use("/roles", rolesRouter);
 router.use("/service-center", serviceCenterRouter);
 router.use("/shifts", shiftsRouter);
 router.use("/attendance", attendanceRouter);
+router.use("/employee-salaries", employeeSalariesRouter);
