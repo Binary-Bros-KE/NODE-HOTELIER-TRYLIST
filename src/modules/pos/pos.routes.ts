@@ -357,6 +357,13 @@ export function withFinancials<T extends FinancialOrder>(order: T, tax: Awaited<
   return { ...order, financials, total: financials.total, paid };
 }
 
+function hasPendingReturnRequests(order: { returnRequests?: { status: string }[]; items?: { returnRequests?: { status: string }[] }[] }) {
+  return Boolean(
+    order.returnRequests?.some((request) => request.status === "PENDING")
+    || order.items?.some((item) => item.returnRequests?.some((request) => request.status === "PENDING")),
+  );
+}
+
 /** Resolves createdBy (the employee who rang the order up — "served by" on
  * the receipt) to a name. Plain id, no Prisma relation (see the field's own
  * comment), so it's one extra lookup rather than an include. Used only where
@@ -1358,6 +1365,10 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
     res.status(409).json({ error: "Complimentary orders do not take payments" });
     return;
   }
+  if (hasPendingReturnRequests(order)) {
+    res.status(409).json({ error: "Approve or reject the pending return before taking payment" });
+    return;
+  }
   const payable = order.status === "SERVED" || (order.status === "COMPLETED" && order.paymentStatus !== "PAID");
   if (!payable) { res.status(409).json({ error: order.status === "COMPLETED" ? "This order is already fully paid" : "The order must be served before it can be paid" }); return; }
   const { total } = computeOrderFinancials(order, tax);
@@ -1435,6 +1446,10 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
   ]);
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   if (order.status !== "SERVED") { res.status(409).json({ error: "Only a served order can be completed" }); return; }
+  if (hasPendingReturnRequests(order)) {
+    res.status(409).json({ error: "Approve or reject the pending return before completing this order" });
+    return;
+  }
   const { total } = computeOrderFinancials(order, tax);
   const paid = order.payments.reduce((s, p) => s + Number(p.amount), 0);
   const shortfall = money2(total - paid);
