@@ -497,8 +497,10 @@ posRouter.post("/orders", async (req, res) => {
   const tid = tenantIdFor(req);
   const tax = await taxSettingsFor(tid);
   let resolvedLines: ResolvedLine[];
+  let menuItemsById: Awaited<ReturnType<typeof resolveMenuLines>>["menuItemsById"];
+  let addonsById: Awaited<ReturnType<typeof resolveMenuLines>>["addonsById"];
   try {
-    ({ lines: resolvedLines } = await resolveMenuLines(tid, parsed.data.items, tax));
+    ({ lines: resolvedLines, menuItemsById, addonsById } = await resolveMenuLines(tid, parsed.data.items, tax));
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     throw error;
@@ -527,6 +529,21 @@ posRouter.post("/orders", async (req, res) => {
   const serveMode = location?.serveMode ?? "KITCHEN";
   const instantServe = serveMode === "DIRECT";
   const startsAtCounter = serveMode === "COUNTER";
+  const orderStockItems = resolvedLinesForStock(resolvedLines, menuItemsById, addonsById);
+  const orderStockRequirements = computeStockRequirements(orderStockItems);
+  const orderStockLocationId = orderStockRequirements.size > 0 ? await resolveStockLocationId(tid, effectiveLocationId) : null;
+  if (orderStockRequirements.size > 0 && !orderStockLocationId) {
+    res.status(400).json({ error: "No location is configured to hold stock for this order" });
+    return;
+  }
+  if (!instantServe && orderStockLocationId) {
+    try {
+      await prisma.$transaction((tx) => assertStockAvailable(tx, tid, orderStockRequirements, orderStockLocationId));
+    } catch (error) {
+      if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+      throw error;
+    }
+  }
 
   let customerId: string | undefined;
   let billToReservationId: string | undefined;
@@ -581,9 +598,7 @@ posRouter.post("/orders", async (req, res) => {
         await tx.table.updateMany({ where: { id: parsed.data.tableId }, data: { status: "OCCUPIED" } });
       }
       if (instantServe) {
-        const stockLocationId = await resolveStockLocationId(tid, effectiveLocationId);
-        if (!stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this order"), { status: 400 });
-        await deductStockForOrder(tx, tid, computeStockRequirements(created.items), stockLocationId, created.orderNumber, req);
+        if (orderStockLocationId) await deductStockForOrder(tx, tid, orderStockRequirements, orderStockLocationId, created.orderNumber, req);
       }
       return created;
     });
@@ -844,6 +859,23 @@ type OrderItemForStock = {
   addons?: { quantity: number; addon: { stockProductId: string | null; stockQtyPerUnit: QtyLike; stockProduct: StockRef | null } }[];
 };
 
+function resolvedLinesForStock(
+  lines: ResolvedLine[],
+  menuItemsById: Map<string, Prisma.MenuItemGetPayload<{ include: typeof menuLineInclude }>>,
+  addonsById: Map<string, Prisma.AddonGetPayload<{ select: { id: true; price: true; stockProductId: true; stockQtyPerUnit: true; stockProduct: { select: { id: true; name: true } } } }>>,
+): OrderItemForStock[] {
+  return lines.map((line) => {
+    const mi = menuItemsById.get(line.menuItemId)!;
+    const variant = line.variantId ? mi.variants.find((v) => v.id === line.variantId) ?? null : null;
+    return {
+      quantity: line.quantity,
+      menuItem: mi,
+      variant,
+      addons: line.addons.map((a) => ({ quantity: a.quantity, addon: addonsById.get(a.addonId)! })),
+    };
+  });
+}
+
 /** Totals up how much of each product a set of order items actually needs.
  * Priority per line for the item itself: a variant's own product+serving
  * (Tot/Double/Bottle) → the menu item's recipe ingredients → the menu item's
@@ -913,6 +945,23 @@ async function deductStockForOrder(
  * counter's approval step, so it's gated to whoever holds
  * POS_APPROVE_COUNTER that shift — not tied to a fixed account, since who's
  * on counter duty changes day to day. */
+async function assertStockAvailable(
+  tx: Prisma.TransactionClient,
+  tid: string,
+  requirements: Map<string, { quantity: number; name: string }>,
+  locationId: string,
+) {
+  for (const [productId, requirement] of requirements) {
+    const row = await tx.productStock.findUnique({
+      where: { tenantId_productId_locationId: { tenantId: tid, productId, locationId } },
+      select: { quantity: true },
+    });
+    if (Number(row?.quantity ?? 0) < requirement.quantity) {
+      throw Object.assign(new Error(`Not enough ${requirement.name} at this location — transfer more stock in`), { status: 409 });
+    }
+  }
+}
+
 posRouter.patch("/orders/:id/serve", async (req, res) => {
   const tid = tenantIdFor(req);
   const activeOrder = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid, status: "READY" }, include: orderInclude });
@@ -947,6 +996,27 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
   }
 
   res.status(200).json({ order: withFinancials(await prisma.posOrder.findUniqueOrThrow({ where: { id: activeOrder.id }, include: orderInclude }), tax) });
+});
+
+posRouter.delete("/orders/:id/revert", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { payments: true } });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!["OPEN", "PREPARING", "READY"].includes(order.status) || order.servedAt) {
+    res.status(409).json({ error: "Only orders that have not been served can be reverted" });
+    return;
+  }
+  if (order.payments.length > 0) {
+    res.status(409).json({ error: "This order already has payments recorded and cannot be reverted" });
+    return;
+  }
+  const canRevert = order.createdBy === req.userId || await canSeeAllOrders(tid, req.userId);
+  if (!canRevert) { res.status(403).json({ error: "You can only revert your own undeducted orders" }); return; }
+  await prisma.$transaction(async (tx) => {
+    await tx.posOrder.delete({ where: { id: order.id } });
+    if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
+  });
+  res.status(204).send();
 });
 
 const cancelRequestSchema = z.object({ reason: z.string().trim().min(3, "Give a reason").max(500) });
@@ -1557,4 +1627,3 @@ posRouter.post("/retail-orders", async (req, res) => {
     throw error;
   }
 });
-
