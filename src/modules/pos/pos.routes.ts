@@ -1480,7 +1480,7 @@ posRouter.get("/product-items", async (req, res) => {
   if (!effectiveLocationId) { res.status(200).json({ items: [] }); return; }
 
   const items = await prisma.product.findMany({
-    where: { tenantId: tid, isActive: true, sellingPrice: { not: null } },
+    where: { tenantId: tid, isActive: true, sellsDirectly: true },
     include: { category: true, packUnit: { select: { id: true, name: true } }, stocks: { where: { locationId: effectiveLocationId }, select: { quantity: true } } },
     orderBy: { name: "asc" },
   });
@@ -1557,7 +1557,7 @@ posRouter.post("/retail-orders", async (req, res) => {
         if (!effectiveLocationId) throw Object.assign(new Error("Choose which location this sale is for"), { status: 400 });
         const productIds = parsed.data.items.map((item) => item.productId);
         const products = await tx.product.findMany({
-          where: { id: { in: productIds }, tenantId: tid, isActive: true, sellingPrice: { not: null } },
+          where: { id: { in: productIds }, tenantId: tid, isActive: true, sellsDirectly: true },
           select: { id: true, name: true, sellingPrice: true, taxRate: true, taxMode: true, taxTreatment: true, packSize: true },
         });
         if (products.length !== new Set(productIds).size) throw Object.assign(new Error("Every item must be an active, sellable product from this property"), { status: 400 });

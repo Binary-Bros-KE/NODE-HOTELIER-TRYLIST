@@ -26,7 +26,7 @@ const nullableText = (max: number) => z.preprocess(blankToNull, z.string().trim(
 const nullableId = z.preprocess(blankToNull, z.string().trim().nullable());
 const nullableNumber = (min = 0) => z.preprocess(blankToNull, z.coerce.number().min(min).nullable());
 
-const createSchema = z.object({
+const productObjectSchema = z.object({
   categoryId: optionalId,
   name: z.string().trim().min(1).max(150),
   sku: optionalText(60),
@@ -57,10 +57,11 @@ const createSchema = z.object({
   reorderLevel: z.coerce.number().min(0).default(0),
   maxStockLevel: optionalNumber(0),
   unitCost: optionalNumber(0),
-  // Null means this product is never sold directly (e.g. a recipe
-  // ingredient only) — the Products POS only lists ones with a price set.
-  // nullableNumber (not optionalNumber) so blanking the field on an edit
-  // actually clears it instead of silently leaving the old price in place.
+  // The explicit "also sold as a whole unit via Products POS" flag — see the
+  // schema comment on Product.sellsDirectly. sellingPrice is required when
+  // this is true (enforced below); nullableNumber (not optionalNumber) so
+  // blanking the field on an edit actually clears it.
+  sellsDirectly: z.boolean().default(false),
   sellingPrice: nullableNumber(0).optional(),
   taxRate: nullableNumber(0).optional(),
   taxMode: z.enum(["INCLUSIVE", "EXCLUSIVE"]).optional(),
@@ -68,7 +69,18 @@ const createSchema = z.object({
   preferredSupplier: optionalText(120),
   isActive: z.boolean().default(true),
 });
-const updateSchema = partialNoDefaults(createSchema.omit({ openingStock: true, locationId: true }));
+// sellsDirectly<->sellingPrice cross-checks, shared by create and update: the
+// price is required whenever the flag is on, and (create only, where every
+// field is always present) turning the flag off clears any stale price.
+function requireSellingPriceWhenDirect<T extends { sellsDirectly?: boolean; sellingPrice?: number | null }>(data: T, ctx: z.RefinementCtx) {
+  if (data.sellsDirectly && data.sellingPrice == null) {
+    ctx.addIssue({ code: "custom", message: "Selling price is required when sold directly via Products POS", path: ["sellingPrice"] });
+  }
+}
+const createSchema = productObjectSchema
+  .superRefine(requireSellingPriceWhenDirect)
+  .transform((data) => (data.sellsDirectly ? data : { ...data, sellingPrice: null }));
+const updateSchema = partialNoDefaults(productObjectSchema.omit({ openingStock: true, locationId: true })).superRefine(requireSellingPriceWhenDirect);
 
 // A hand-entered movement at one location, for when stock changes outside
 // the Purchases/Goods-Receipt flow: an opening balance for a product that
@@ -128,6 +140,7 @@ const productFields = {
   reorderLevel: true,
   maxStockLevel: true,
   unitCost: true,
+  sellsDirectly: true,
   sellingPrice: true,
   taxRate: true,
   taxMode: true,

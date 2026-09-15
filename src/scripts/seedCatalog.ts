@@ -95,7 +95,7 @@ const catBarStock = await upsertCategory("STORE", "Bar Stock");
 async function upsertProduct(data: { name: string; categoryId: string; unit: string; sellingPrice?: number; unitCost?: number }) {
   const existing = await prisma.product.findFirst({ where: { tenantId: tid, name: data.name } });
   if (existing) return existing;
-  return prisma.product.create({ data: { tenantId: tid, categoryId: data.categoryId, name: data.name, unit: data.unit, sellingPrice: data.sellingPrice, unitCost: data.unitCost } });
+  return prisma.product.create({ data: { tenantId: tid, categoryId: data.categoryId, name: data.name, unit: data.unit, sellsDirectly: data.sellingPrice != null, sellingPrice: data.sellingPrice, unitCost: data.unitCost } });
 }
 
 // Sets opening stock exactly once — a re-run never resets stock that's
