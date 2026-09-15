@@ -73,6 +73,13 @@ const returnRequestSchema = z.object({
   quantity: z.coerce.number().int().min(1).max(50),
   reason: z.string().trim().min(3).max(255),
 });
+const orderReturnRequestSchema = z.object({
+  reason: z.string().trim().min(3).max(255),
+  items: z.array(z.object({
+    orderItemId: z.string().cuid(),
+    quantity: z.coerce.number().int().min(1).max(50),
+  })).min(1),
+});
 const returnDecisionSchema = z.object({
   note: z.string().trim().max(300).optional(),
 });
@@ -1186,33 +1193,88 @@ posRouter.get("/return-requests", requirePermission("POS_APPROVE_CANCELLATION"),
   res.status(200).json({ requests: requests.map((request) => ({ ...request, order: withFinancials(request.order, tax) })) });
 });
 
+async function createReturnRequestsForOrder(args: {
+  tenantId: string;
+  orderId: string;
+  items: { orderItemId: string; quantity: number }[];
+  reason: string;
+  userId?: string;
+}) {
+  const order = await prisma.posOrder.findFirst({ where: { id: args.orderId, tenantId: args.tenantId }, include: orderInclude });
+  if (!order) throw Object.assign(new Error("Order not found"), { status: 404 });
+  if (!order.servedAt || !["SERVED", "COMPLETED"].includes(order.status)) throw Object.assign(new Error("Only served orders can have returns requested"), { status: 409 });
+  if (Date.now() - order.servedAt.getTime() > RETURN_WINDOW_MS) throw Object.assign(new Error("Returns are only allowed within 1 hour of an order being served"), { status: 409 });
+
+  const requestedByItem = new Map<string, number>();
+  for (const item of args.items) requestedByItem.set(item.orderItemId, (requestedByItem.get(item.orderItemId) ?? 0) + item.quantity);
+  const orderItems = order.items.filter((row) => requestedByItem.has(row.id));
+  if (orderItems.length !== requestedByItem.size) throw Object.assign(new Error("One or more return lines were not found on this order"), { status: 404 });
+  if (orderItems.some((row) => !row.menuItemId || !row.menuItem)) throw Object.assign(new Error("One or more return lines cannot be returned"), { status: 404 });
+
+  const pending = await prisma.posOrderReturnRequest.groupBy({
+    by: ["orderItemId"],
+    where: { tenantId: args.tenantId, orderId: order.id, status: "PENDING" },
+    _sum: { quantity: true },
+  });
+  const pendingByItem = new Map(pending.map((row) => [row.orderItemId, row._sum.quantity ?? 0]));
+  const totalUnits = order.items.reduce((sum, row) => sum + row.quantity, 0);
+  const totalAlreadyPending = order.items.reduce((sum, row) => sum + (pendingByItem.get(row.id) ?? 0), 0);
+  const totalRequested = [...requestedByItem.values()].reduce((sum, qty) => sum + qty, 0);
+  if (totalRequested + totalAlreadyPending >= totalUnits) throw Object.assign(new Error("Partial returns must leave at least one item on the order. Use full return instead."), { status: 400 });
+
+  for (const row of orderItems) {
+    const requested = requestedByItem.get(row.id) ?? 0;
+    const alreadyPending = pendingByItem.get(row.id) ?? 0;
+    if (requested + alreadyPending > row.quantity) throw Object.assign(new Error(`Return quantity is too high for ${row.menuItem?.name ?? "one item"}`), { status: 400 });
+  }
+
+  return prisma.$transaction(orderItems.map((row) => prisma.posOrderReturnRequest.create({
+    data: {
+      tenantId: args.tenantId,
+      orderId: order.id,
+      orderItemId: row.id,
+      quantity: requestedByItem.get(row.id)!,
+      reason: args.reason,
+      requestedBy: args.userId ?? null,
+    },
+    include: { orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } } } } },
+  })));
+}
+
+posRouter.post("/orders/:id/return-request", async (req, res) => {
+  const parsed = orderReturnRequestSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid return request", details: parsed.error.flatten() }); return; }
+  try {
+    const requests = await createReturnRequestsForOrder({
+      tenantId: tenantIdFor(req),
+      orderId: req.params.id,
+      items: parsed.data.items,
+      reason: parsed.data.reason,
+      userId: req.userId,
+    });
+    res.status(201).json({ requests });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    throw error;
+  }
+});
+
 posRouter.post("/orders/:id/items/:itemId/return-request", async (req, res) => {
   const parsed = returnRequestSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid return request", details: parsed.error.flatten() }); return; }
-  const tid = tenantIdFor(req);
-  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
-  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
-  if (!order.servedAt || !["SERVED", "COMPLETED"].includes(order.status)) { res.status(409).json({ error: "Only served orders can have returns requested" }); return; }
-  if (Date.now() - order.servedAt.getTime() > RETURN_WINDOW_MS) {
-    res.status(409).json({ error: "Returns are only allowed within 1 hour of an order being served" });
-    return;
+  try {
+    const [request] = await createReturnRequestsForOrder({
+      tenantId: tenantIdFor(req),
+      orderId: req.params.id,
+      items: [{ orderItemId: req.params.itemId, quantity: parsed.data.quantity }],
+      reason: parsed.data.reason,
+      userId: req.userId,
+    });
+    res.status(201).json({ request });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    throw error;
   }
-  const item = order.items.find((row) => row.id === req.params.itemId);
-  if (!item?.menuItemId || !item.menuItem) { res.status(404).json({ error: "Returnable order line not found" }); return; }
-  const pending = await prisma.posOrderReturnRequest.aggregate({
-    where: { tenantId: tid, orderItemId: item.id, status: "PENDING" },
-    _sum: { quantity: true },
-  });
-  const alreadyPending = pending._sum.quantity ?? 0;
-  if (parsed.data.quantity + alreadyPending >= item.quantity) {
-    res.status(400).json({ error: "Partial returns must leave at least one item on the order. Use full return instead." });
-    return;
-  }
-  const request = await prisma.posOrderReturnRequest.create({
-    data: { tenantId: tid, orderId: order.id, orderItemId: item.id, quantity: parsed.data.quantity, reason: parsed.data.reason, requestedBy: req.userId ?? null },
-    include: { orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } } } } },
-  });
-  res.status(201).json({ request });
 });
 
 posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CANCELLATION"), async (req, res) => {
@@ -1236,7 +1298,12 @@ posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CA
   if (!request) { res.status(404).json({ error: "Return request not found" }); return; }
   if (request.status !== "PENDING") { res.status(409).json({ error: "This return request has already been decided" }); return; }
   if (!request.order.servedAt) { res.status(409).json({ error: "This order has not been served" }); return; }
-  if (request.quantity >= request.orderItem.quantity) {
+  const pendingOnOrder = await prisma.posOrderReturnRequest.aggregate({
+    where: { tenantId: tid, orderId: request.orderId, status: "PENDING" },
+    _sum: { quantity: true },
+  });
+  const orderUnits = request.order.items.reduce((sum, item) => sum + item.quantity, 0);
+  if ((pendingOnOrder._sum.quantity ?? 0) >= orderUnits) {
     res.status(400).json({ error: "Partial returns must leave at least one item on the order. Use full return instead." });
     return;
   }
