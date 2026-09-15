@@ -7,6 +7,7 @@ const ALLOWED_WITHOUT_ACTIVE_SHIFT = [
   /^\/tenant\/license$/,
   /^\/shifts\/current$/,
   /^\/shifts\/start-request$/,
+  /^\/shifts\/history$/,
   /^\/shifts\/approvals$/,
   /^\/shifts\/[^/]+\/start-approval$/,
 ];

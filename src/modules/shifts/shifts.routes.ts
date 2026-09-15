@@ -52,19 +52,32 @@ async function assertCanApprove(tid: string, approverId: string | undefined, tar
 async function shiftSummary(tid: string, employeeId: string, from: Date, to: Date) {
   const [transactions, orders, pending] = await Promise.all([
     prisma.transaction.findMany({
-      where: { tenantId: tid, employeeId, source: "POS_SALE", direction: "IN", createdAt: { gte: from, lte: to } },
+      where: { tenantId: tid, employeeId, createdAt: { gte: from, lte: to } },
       include: { paymentMethod: { select: { id: true, name: true } } },
       orderBy: { createdAt: "asc" },
     }),
     prisma.posOrder.findMany({
       where: { tenantId: tid, createdBy: employeeId, createdAt: { gte: from, lte: to } },
-      select: { id: true, orderNumber: true, status: true, paymentStatus: true, createdAt: true, updatedAt: true, payments: { include: { paymentMethod: { select: { name: true } } } }, items: { select: { quantity: true, unitPrice: true } } },
+      select: {
+        id: true,
+        orderNumber: true,
+        status: true,
+        paymentStatus: true,
+        saleType: true,
+        complimentaryOrderRole: true,
+        complimentaryRecipientName: true,
+        createdAt: true,
+        updatedAt: true,
+        payments: { include: { paymentMethod: { select: { name: true } } } },
+        items: { select: { quantity: true, unitPrice: true } },
+      },
       orderBy: { createdAt: "asc" },
     }),
     prisma.posOrder.count({ where: { tenantId: tid, createdBy: employeeId, status: { in: [...ACTIVE_ORDER_STATUSES] } } }),
   ]);
   const byPaymentMethod = new Map<string, { paymentMethodId: string | null; name: string; total: number; count: number }>();
-  for (const t of transactions) {
+  const posSaleTransactions = transactions.filter((t) => t.source === "POS_SALE" && t.direction === "IN" && t.status === "COMPLETE");
+  for (const t of posSaleTransactions) {
     const key = t.paymentMethodId ?? "unknown";
     const bucket = byPaymentMethod.get(key) ?? { paymentMethodId: t.paymentMethodId, name: t.paymentMethod?.name ?? "Unknown", total: 0, count: 0 };
     bucket.total += Number(t.amount);
@@ -76,21 +89,38 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
     orderNumber: o.orderNumber,
     status: o.status,
     paymentStatus: o.paymentStatus,
+    saleType: o.saleType,
+    complimentaryOrderRole: o.complimentaryOrderRole,
+    complimentaryRecipientName: o.complimentaryRecipientName,
     createdAt: o.createdAt,
     total: o.items.reduce((s, i) => s + Number(i.unitPrice) * i.quantity, 0),
     paid: o.payments.reduce((s, p) => s + Number(p.amount), 0),
   }));
   const totalSales = sales.reduce((s, o) => s + o.total, 0);
-  const totalPaid = transactions.reduce((s, t) => s + Number(t.amount), 0);
+  const totalPaid = posSaleTransactions.reduce((s, t) => s + Number(t.amount), 0);
+  const complimentarySales = sales.filter((o) => o.saleType === "COMPLIMENTARY");
   return {
     from,
     to,
     hours: Math.max(0, (to.getTime() - from.getTime()) / 36e5),
     totalSales,
     totalPaid,
-    creditSales: sales.reduce((s, o) => s + Math.max(0, o.total - o.paid), 0),
+    complimentaryTotal: complimentarySales.reduce((s, o) => s + o.total, 0),
+    complimentaryCount: complimentarySales.length,
+    creditSales: sales.reduce((s, o) => s + (o.saleType === "COMPLIMENTARY" ? 0 : Math.max(0, o.total - o.paid)), 0),
     pendingOrders: pending,
     byPaymentMethod: [...byPaymentMethod.values()],
+    transactions: transactions.map((t) => ({
+      id: t.id,
+      transactionNo: t.transactionNo,
+      direction: t.direction,
+      source: t.source,
+      amount: Number(t.amount),
+      paymentMethod: t.paymentMethod?.name ?? null,
+      reference: t.reference,
+      description: t.description,
+      createdAt: t.createdAt,
+    })),
     sales,
   };
 }
@@ -140,6 +170,53 @@ shiftsRouter.get("/approvals", async (req, res, next) => {
     const enriched = await Promise.all(sessions.map(async (s) => ({
       ...s,
       summary: s.approvedStartAt ? await shiftSummary(tid, s.employeeId, s.approvedStartAt, s.requestedEndAt ?? new Date()) : null,
+    })));
+    res.json({ sessions: enriched });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    next(error);
+  }
+});
+
+shiftsRouter.get("/active-supervised", async (req, res, next) => {
+  const tid = tenantId(req);
+  try {
+    const actor = await currentEmployee(tid, req.userId);
+    const sessions = await prisma.shiftSession.findMany({
+      where: {
+        tenantId: tid,
+        status: "ACTIVE",
+        employeeId: { not: actor.id },
+        ...(isSuperAdmin(actor) || actor.isSupervisor ? {} : { employee: { supervisorId: actor.id } }),
+      },
+      include: shiftInclude,
+      orderBy: { approvedStartAt: "asc" },
+    });
+    const enriched = await Promise.all(sessions.map(async (s) => ({
+      ...s,
+      summary: s.approvedStartAt ? await shiftSummary(tid, s.employeeId, s.approvedStartAt, new Date()) : null,
+    })));
+    res.json({ sessions: enriched });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    next(error);
+  }
+});
+
+shiftsRouter.get("/history", async (req, res, next) => {
+  const tid = tenantId(req);
+  try {
+    const employee = await currentEmployee(tid, req.userId);
+    if (isSuperAdmin(employee)) { res.json({ sessions: [] }); return; }
+    const sessions = await prisma.shiftSession.findMany({
+      where: { tenantId: tid, employeeId: employee.id, status: "ENDED", approvedStartAt: { not: null }, approvedEndAt: { not: null } },
+      include: shiftInclude,
+      orderBy: { approvedStartAt: "desc" },
+      take: 32,
+    });
+    const enriched = await Promise.all(sessions.map(async (s) => ({
+      ...s,
+      summary: s.approvedStartAt && s.approvedEndAt ? await shiftSummary(tid, s.employeeId, s.approvedStartAt, s.approvedEndAt) : null,
     })));
     res.json({ sessions: enriched });
   } catch (error) {
@@ -205,7 +282,7 @@ shiftsRouter.post("/end-request", async (req, res, next) => {
   try {
     const employee = await currentEmployee(tid, req.userId);
     const pendingOrders = await prisma.posOrder.count({ where: { tenantId: tid, createdBy: employee.id, status: { in: [...ACTIVE_ORDER_STATUSES] } } });
-    if (pendingOrders > 0) { res.status(409).json({ error: `You have ${pendingOrders} pending sale${pendingOrders === 1 ? "" : "s"}. Complete and pay them, or complete them on credit, before ending shift.` }); return; }
+    if (pendingOrders > 0) { res.status(409).json({ error: `${pendingOrders} active sale${pendingOrders === 1 ? "" : "s"} must be completed first.` }); return; }
     const session = await prisma.shiftSession.findFirst({ where: { tenantId: tid, employeeId: employee.id, status: "ACTIVE" }, include: shiftInclude, orderBy: { approvedStartAt: "desc" } });
     if (!session?.approvedStartAt) { res.status(404).json({ error: "No active shift found" }); return; }
     const now = new Date();
