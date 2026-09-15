@@ -14,7 +14,10 @@ const tenantId = (req: { tenantId?: string }) => {
   return req.tenantId;
 };
 
-const ACTIVE_ORDER_STATUSES = ["OPEN", "PREPARING", "READY", "SERVED", "PENDING_CANCELLATION"] as const;
+// Must match the POS "Active Orders" meaning. Pending cancellations are
+// already out of the waiter's hands and live in the Cancelled/Awaiting
+// approval queue, so they should not block end-shift handover.
+const ACTIVE_ORDER_STATUSES = ["OPEN", "PREPARING", "READY", "SERVED"] as const;
 const shiftInclude = {
   employee: { select: { id: true, firstName: true, lastName: true, jobTitle: true, supervisorId: true, isSupervisor: true } },
   startApprover: { select: { id: true, firstName: true, lastName: true } },
