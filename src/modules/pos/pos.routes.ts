@@ -743,6 +743,10 @@ posRouter.patch("/orders/:id/items/:itemId", async (req, res) => {
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   if (order.channel !== "FOOD") { res.status(409).json({ error: "Only food/bar order lines can be edited here" }); return; }
   if (["COMPLETED", "CANCELLED"].includes(order.status)) { res.status(409).json({ error: "This order is finalized — it can't be changed" }); return; }
+  if (order.servedAt || order.status === "SERVED") {
+    res.status(409).json({ error: "Served order lines are locked. Add a new round, or request a return for served items." });
+    return;
+  }
   const existing = order.items.find((row) => row.id === req.params.itemId);
   if (!existing) { res.status(404).json({ error: "That line isn't on this order" }); return; }
   if (!existing.menuItemId) { res.status(409).json({ error: "Only menu-item lines can be edited" }); return; }
@@ -814,6 +818,10 @@ posRouter.delete("/orders/:id/items/:itemId", async (req, res) => {
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   if (order.channel !== "FOOD") { res.status(409).json({ error: "Only food/bar order lines can be edited here" }); return; }
   if (["COMPLETED", "CANCELLED"].includes(order.status)) { res.status(409).json({ error: "This order is finalized — it can't be changed" }); return; }
+  if (order.servedAt || order.status === "SERVED") {
+    res.status(409).json({ error: "Served order lines are locked. Request a return instead." });
+    return;
+  }
   const existing = order.items.find((row) => row.id === req.params.itemId);
   if (!existing) { res.status(404).json({ error: "That line isn't on this order" }); return; }
   if (order.items.length <= 1) { res.status(409).json({ error: "Cancel the order instead of removing its only line" }); return; }
