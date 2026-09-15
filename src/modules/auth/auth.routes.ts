@@ -3,8 +3,6 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { verifySecret } from "../../lib/hash.js";
-import { hasPermission } from "../../middleware/tenantContext.js";
-import { resolveShiftFor, isWithinShift } from "../../lib/shifts.js";
 
 export const authRouter = Router();
 
@@ -33,7 +31,7 @@ function bearerToken(req: { header(name: string): string | undefined }): string 
 }
 
 function publicEmployee(employee: {
-  id: string; firstName: string; lastName: string; employeeCode: string; jobTitle: string;
+  id: string; firstName: string; lastName: string; employeeCode: string; jobTitle: string; isSupervisor: boolean;
   department: { id: string; name: string } | null;
   role: { id: string; name: string; allowedSections: string[]; permissions: string[] } | null;
   locations: { id: string; name: string }[];
@@ -45,6 +43,7 @@ function publicEmployee(employee: {
     lastName: employee.lastName,
     employeeCode: employee.employeeCode,
     jobTitle: employee.jobTitle,
+    isSupervisor: employee.isSupervisor,
     department: employee.department?.name ?? null,
     role: employee.role,
     locations: employee.locations,
@@ -63,14 +62,6 @@ authRouter.post("/login", async (req, res, next) => {
     if (!employee || employee.status !== "ACTIVE" || !verifySecret(data.data.pin, employee.pin)) {
       res.status(401).json({ error: "Incorrect employee code or PIN" });
       return;
-    }
-    const exempt = await hasPermission(tenantId(req), employee.id, "SHIFT_EXEMPT");
-    if (!exempt) {
-      const shift = await resolveShiftFor(tenantId(req), employee.id);
-      if (shift && !isWithinShift(shift)) {
-        res.status(403).json({ error: `Outside your shift hours (${shift.name}, ${shift.startTime}–${shift.endTime}). You can sign in once your shift starts.`, code: "OUTSIDE_SHIFT" });
-        return;
-      }
     }
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
@@ -97,8 +88,6 @@ authRouter.post("/logout", async (req, res) => {
 
 const setLocationSchema = z.object({ locationId: z.string().trim().min(1).nullable() });
 
-/** The signed-in employee switches (or clears) their default POS location.
- * Must be one they're assigned to — or null. Returns the refreshed user. */
 authRouter.patch("/me/location", async (req, res, next) => {
   const token = bearerToken(req);
   if (!token) { res.status(401).json({ error: "Not authenticated" }); return; }
@@ -113,7 +102,6 @@ authRouter.patch("/me/location", async (req, res, next) => {
       if (assigned.length > 0) {
         if (!assigned.some((l) => l.id === locationId)) { res.status(400).json({ error: "You can only pick a location you're assigned to" }); return; }
       } else {
-        // Unrestricted employee — any active location in the property is fine.
         const ok = await prisma.location.findFirst({ where: { id: locationId, tenantId: session.tenantId, isActive: true }, select: { id: true } });
         if (!ok) { res.status(400).json({ error: "Choose an active location from this property" }); return; }
       }

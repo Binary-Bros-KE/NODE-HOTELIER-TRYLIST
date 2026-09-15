@@ -229,6 +229,15 @@ enum Permission {
   REQUISITION_APPROVE
 }
 
+enum ShiftSessionStatus {
+  REQUESTED_START
+  ACTIVE
+  REQUESTED_END
+  ENDED
+  REJECTED_START
+  REJECTED_END
+}
+
 enum EmploymentType {
   FULL_TIME
   PART_TIME
@@ -381,6 +390,7 @@ model Tenant {
   shiftRotations        EmployeeShiftRotation[]
   shiftOverrides        EmployeeShiftOverride[]
   attendanceRecords     AttendanceRecord[]
+  shiftSessions         ShiftSession[]
 }
 
 enum CustomerType {
@@ -2192,6 +2202,7 @@ model Employee {
   supervisorId             String?
   supervisor               Employee?             @relation("EmployeeSupervisor", fields: [supervisorId], references: [id], onDelete: SetNull)
   reports                  Employee[]            @relation("EmployeeSupervisor")
+  isSupervisor             Boolean               @default(false)
   roleId                   String?
   role                     Role?                 @relation(fields: [roleId], references: [id], onDelete: SetNull)
   // Selling/working locations this employee is pinned to. Empty = no
@@ -2242,6 +2253,9 @@ model Employee {
   shiftRotation            EmployeeShiftRotation?
   shiftOverrides           EmployeeShiftOverride[]
   attendanceRecords        AttendanceRecord[]
+  shiftSessions            ShiftSession[]
+  approvedShiftStarts      ShiftSession[]         @relation("ShiftStartApprovedBy")
+  approvedShiftEnds        ShiftSession[]         @relation("ShiftEndApprovedBy")
 
   // Compensation
   salaryType        SalaryType            @default(MONTHLY)
@@ -2272,6 +2286,32 @@ model Employee {
   @@index([tenantId, status])
   @@index([supervisorId])
   @@index([roleId])
+}
+
+model ShiftSession {
+  id                 String             @id @default(cuid())
+  tenantId           String
+  tenant             Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  employeeId         String
+  employee           Employee           @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  status             ShiftSessionStatus @default(REQUESTED_START)
+  requestedStartAt   DateTime           @default(now())
+  approvedStartAt    DateTime?
+  startApprovedBy    String?
+  startApprover      Employee?          @relation("ShiftStartApprovedBy", fields: [startApprovedBy], references: [id], onDelete: SetNull)
+  requestedEndAt     DateTime?
+  approvedEndAt      DateTime?
+  endApprovedBy      String?
+  endApprover        Employee?          @relation("ShiftEndApprovedBy", fields: [endApprovedBy], references: [id], onDelete: SetNull)
+  startNote          String?
+  endNote            String?
+  rejectionReason    String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@index([tenantId, employeeId, status])
+  @@index([tenantId, status, requestedStartAt])
+  @@index([tenantId, approvedStartAt])
 }
 
 // A named work-hours window (e.g. "Day Shift" 06:00-14:00, "Night Shift"

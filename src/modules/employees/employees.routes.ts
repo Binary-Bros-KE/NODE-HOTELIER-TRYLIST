@@ -40,6 +40,7 @@ const createSchema = z.object({
   status: z.enum(statuses).default("ACTIVE"),
   dateHired: z.coerce.date(),
   supervisorId: optionalId,
+  isSupervisor: z.boolean().default(false),
   roleId: z.string().trim().min(1, "Choose a role"),
   // Locations this employee is pinned to. Empty = works anywhere.
   locationIds: z.array(z.string().trim().min(1)).default([]),
@@ -92,6 +93,7 @@ const publicFields = {
   dateHired: true,
   supervisorId: true,
   supervisor: { select: { id: true, firstName: true, lastName: true } },
+  isSupervisor: true,
   roleId: true,
   role: { select: { id: true, name: true, allowedSections: true } },
   locations: { select: { id: true, name: true } },

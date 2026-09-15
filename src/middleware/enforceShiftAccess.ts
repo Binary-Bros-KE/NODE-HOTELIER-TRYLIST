@@ -1,26 +1,38 @@
 import type { NextFunction, Request, Response } from "express";
-import { hasPermission } from "./tenantContext.js";
-import { resolveShiftFor, isWithinShift } from "../lib/shifts.js";
+import { prisma } from "../lib/prisma.js";
+
+const ALLOWED_WITHOUT_ACTIVE_SHIFT = [
+  /^\/health$/,
+  /^\/shifts\/current$/,
+  /^\/shifts\/start-request$/,
+  /^\/shifts\/approvals$/,
+  /^\/shifts\/[^/]+\/start-approval$/,
+];
 
 /**
- * Blocks a request outside the acting employee's current shift window —
- * checked on every tenant request (not just at login), so an already-open
- * session stops working the moment a shift ends. SHIFT_EXEMPT (or Super
- * Admin, who bypasses every permission) skips this entirely; an employee
- * with no rotation configured is unrestricted. Mounted after the /auth
- * routes so login/me/logout are never blocked by it — login has its own
- * explicit check before a session is even issued.
+ * Blocks tenant work unless the acting employee has an approved ACTIVE
+ * ShiftSession. Mounted after /auth, and the shift request/approval endpoints
+ * stay reachable so staff can ask to start work from the dashboard. Super
+ * Admin bypasses this; every other role needs an active shift.
  */
 export function enforceShiftAccess(req: Request, res: Response, next: NextFunction): void {
   if (!req.tenantId || !req.userId) { next(); return; }
   const { tenantId, userId } = req;
-  hasPermission(tenantId, userId, "SHIFT_EXEMPT")
-    .then(async (exempt) => {
-      if (exempt) { next(); return; }
-      const shift = await resolveShiftFor(tenantId, userId);
-      if (!shift || isWithinShift(shift)) { next(); return; }
+
+  prisma.employee.findFirst({
+    where: { id: userId, tenantId, status: "ACTIVE" },
+    select: { role: { select: { name: true } } },
+  })
+    .then(async (employee) => {
+      if (employee?.role?.name === "Super Admin") { next(); return; }
+      if (ALLOWED_WITHOUT_ACTIVE_SHIFT.some((pattern) => pattern.test(req.path))) { next(); return; }
+      const active = await prisma.shiftSession.findFirst({
+        where: { tenantId, employeeId: userId, status: "ACTIVE", approvedStartAt: { not: null } },
+        select: { id: true },
+      });
+      if (active) { next(); return; }
       res.status(403).json({
-        error: `Outside your shift hours (${shift.name}, ${shift.startTime}–${shift.endTime}). Access is restricted to your scheduled shift.`,
+        error: "Request shift start from the dashboard and wait for supervisor approval before using the system.",
         code: "OUTSIDE_SHIFT",
       });
     })
