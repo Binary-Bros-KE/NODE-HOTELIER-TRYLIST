@@ -1344,7 +1344,13 @@ posRouter.get("/menu-items", async (req, res) => {
     let availabilityUnitLabel: string | null = null;
     if (product) {
       availableQuantity = availabilityFor(Number(product.stocks[0]?.quantity ?? 0), stockQtyPerUnit != null ? Number(stockQtyPerUnit) : null);
-      availabilityUnitLabel = product.packUnit?.name ?? product.unit;
+      // packLabel is the noun for one PACK ("Bottle") — what availableQuantity
+      // actually counts once stockQtyPerUnit divides pack-unit stock (ml) back
+      // down to whole packs. The raw pack UNIT name ("Millilitres") describes
+      // how the stock is held, not what's being counted, and reads as if there
+      // were only a couple of millilitres left — only fall back to it (then
+      // product.unit) for a product with no packLabel at all.
+      availabilityUnitLabel = product.packLabel ?? product.packUnit?.name ?? product.unit;
     } else if (recipe && recipe.ingredients.length > 0) {
       const perIngredient = recipe.ingredients.map((ing) => availabilityFor(Number(ing.product.stocks[0]?.quantity ?? 0), Number(ing.quantity)));
       availableQuantity = perIngredient.every((n) => n !== null) ? Math.min(...(perIngredient as number[])) : null;
