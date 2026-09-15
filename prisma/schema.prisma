@@ -136,6 +136,12 @@ enum PosPaymentStatus {
   PAID
 }
 
+enum PosReturnRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum CustomerCreditType {
   CREDIT // an order was completed short — balance went up
   REPAYMENT // the customer paid toward their balance — it went down
@@ -345,6 +351,7 @@ model Tenant {
   productStocks         ProductStock[]
   inventoryMovements    InventoryMovement[]
   posOrders             PosOrder[]
+  posOrderReturnRequests PosOrderReturnRequest[]
   complimentarySessions ComplimentarySession[]
   addons                Addon[]
   menuItems             MenuItem[]
@@ -1902,6 +1909,7 @@ model PosOrder {
   items              PosOrderItem[]
   payments           Payment[]
   creditEntries      CustomerCreditEntry[]
+  returnRequests     PosOrderReturnRequest[]
 
   @@unique([tenantId, orderNumber])
   @@index([tenantId, status, createdAt])
@@ -2064,9 +2072,32 @@ model PosOrderItem {
   product      Product?            @relation(fields: [productId], references: [id], onDelete: Restrict)
   service      Service?            @relation(fields: [serviceId], references: [id], onDelete: Restrict)
   addons       PosOrderItemAddon[]
+  returnRequests PosOrderReturnRequest[]
 
   @@index([orderId])
   @@index([variantId])
+}
+
+model PosOrderReturnRequest {
+  id            String                 @id @default(cuid())
+  tenantId      String
+  orderId       String
+  orderItemId   String
+  quantity      Int
+  reason        String
+  status        PosReturnRequestStatus @default(PENDING)
+  requestedBy   String?
+  requestedAt   DateTime               @default(now())
+  decidedBy     String?
+  decidedAt     DateTime?
+  decisionNote  String?
+  tenant        Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order         PosOrder               @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderItem     PosOrderItem           @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status, requestedAt])
+  @@index([orderId])
+  @@index([orderItemId])
 }
 
 // A single add-on (Cheddar, Bacon, Extra Espresso). A flat, tenant-wide

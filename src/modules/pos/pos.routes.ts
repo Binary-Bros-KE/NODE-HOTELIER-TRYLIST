@@ -69,6 +69,13 @@ const settleSchema = z.object({
   creditReason: z.string().trim().min(3).max(255).optional(),
   creditExpectedAt: optionalDate,
 });
+const returnRequestSchema = z.object({
+  quantity: z.coerce.number().int().min(1).max(50),
+  reason: z.string().trim().min(3).max(255),
+});
+const returnDecisionSchema = z.object({
+  note: z.string().trim().max(300).optional(),
+});
 
 // Editing one existing line: any facet omitted keeps its current value.
 const editItemSchema = z.object({
@@ -224,6 +231,7 @@ export const orderInclude = {
     product: { select: { id: true, name: true, unit: true } },
     service: { select: { id: true, name: true, unit: { select: { name: true } } } },
     addons: { include: { addon: { include: { stockProduct: { select: { id: true, name: true } } } } } },
+    returnRequests: { orderBy: { requestedAt: "desc" } },
   } },
   payments: { include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } } },
   table: true,
@@ -231,6 +239,12 @@ export const orderInclude = {
   complimentarySession: true,
   customer: { select: { id: true, firstName: true, lastName: true, phone: true, balance: true } },
   reservation: { select: { id: true, reservationNo: true, customerId: true, customer: { select: { firstName: true, lastName: true } }, room: { select: { number: true } } } },
+  returnRequests: {
+    include: {
+      orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } } } },
+    },
+    orderBy: { requestedAt: "desc" },
+  },
 } as const;
 
 posRouter.get("/complimentary-sessions", async (req, res) => {
@@ -1150,6 +1164,120 @@ posRouter.post("/orders/:id/cancel/reject", requirePermission("POS_APPROVE_CANCE
  * is actually ready to settle). Splits are fine either way — several partial
  * payments, or a mix of cash and a room charge, are both allowed. Completes
  * and frees the table once fully covered. */
+posRouter.get("/return-requests", requirePermission("POS_APPROVE_CANCELLATION"), async (req, res) => {
+  const query = z.object({
+    status: z.enum(["PENDING", "APPROVED", "REJECTED"]).optional(),
+    limit: z.coerce.number().int().min(1).max(500).optional(),
+  }).safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Invalid return request filters" }); return; }
+  const tid = tenantIdFor(req);
+  const [requests, tax] = await Promise.all([
+    prisma.posOrderReturnRequest.findMany({
+      where: { tenantId: tid, ...(query.data.status ? { status: query.data.status } : {}) },
+      include: {
+        order: { include: orderInclude },
+        orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } } } },
+      },
+      orderBy: { requestedAt: "desc" },
+      ...(query.data.limit ? { take: query.data.limit } : {}),
+    }),
+    taxSettingsFor(tid),
+  ]);
+  res.status(200).json({ requests: requests.map((request) => ({ ...request, order: withFinancials(request.order, tax) })) });
+});
+
+posRouter.post("/orders/:id/items/:itemId/return-request", async (req, res) => {
+  const parsed = returnRequestSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid return request", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!order.servedAt || !["SERVED", "COMPLETED"].includes(order.status)) { res.status(409).json({ error: "Only served orders can have returns requested" }); return; }
+  if (Date.now() - order.servedAt.getTime() > RETURN_WINDOW_MS) {
+    res.status(409).json({ error: "Returns are only allowed within 1 hour of an order being served" });
+    return;
+  }
+  const item = order.items.find((row) => row.id === req.params.itemId);
+  if (!item?.menuItemId || !item.menuItem) { res.status(404).json({ error: "Returnable order line not found" }); return; }
+  const pending = await prisma.posOrderReturnRequest.aggregate({
+    where: { tenantId: tid, orderItemId: item.id, status: "PENDING" },
+    _sum: { quantity: true },
+  });
+  const alreadyPending = pending._sum.quantity ?? 0;
+  if (parsed.data.quantity + alreadyPending >= item.quantity) {
+    res.status(400).json({ error: "Partial returns must leave at least one item on the order. Use full return instead." });
+    return;
+  }
+  const request = await prisma.posOrderReturnRequest.create({
+    data: { tenantId: tid, orderId: order.id, orderItemId: item.id, quantity: parsed.data.quantity, reason: parsed.data.reason, requestedBy: req.userId ?? null },
+    include: { orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } } } } },
+  });
+  res.status(201).json({ request });
+});
+
+posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CANCELLATION"), async (req, res) => {
+  const parsed = returnDecisionSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid return approval", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  const id = req.params.id as string;
+  const request = await prisma.posOrderReturnRequest.findFirst({
+    where: { id, tenantId: tid },
+    include: {
+      order: { include: orderInclude },
+      orderItem: {
+        include: {
+          menuItem: { include: { product: true, recipe: { include: { ingredients: { include: { product: true } } } } } },
+          variant: { select: { id: true, name: true, stockProductId: true, stockQtyPerUnit: true, stockProduct: { select: { id: true, name: true } } } },
+          addons: { include: { addon: { include: { stockProduct: { select: { id: true, name: true } } } } } },
+        },
+      },
+    },
+  });
+  if (!request) { res.status(404).json({ error: "Return request not found" }); return; }
+  if (request.status !== "PENDING") { res.status(409).json({ error: "This return request has already been decided" }); return; }
+  if (!request.order.servedAt) { res.status(409).json({ error: "This order has not been served" }); return; }
+  if (request.quantity >= request.orderItem.quantity) {
+    res.status(400).json({ error: "Partial returns must leave at least one item on the order. Use full return instead." });
+    return;
+  }
+  try {
+    const tax = await taxSettingsFor(tid);
+    const updated = await prisma.$transaction(async (tx) => {
+      const stockLocationId = await resolveStockLocationId(tid, request.order.locationId);
+      if (stockLocationId && request.orderItem.menuItem) {
+        const returned = computeStockRequirements([{ quantity: request.quantity, menuItem: request.orderItem.menuItem, variant: request.orderItem.variant, addons: request.orderItem.addons }]);
+        await applyStockDelta(tx, tid, stockLocationId, returned, new Map(), request.order.orderNumber, req);
+      }
+      await tx.posOrderItem.update({ where: { id: request.orderItemId }, data: { quantity: { decrement: request.quantity } } });
+      await tx.posOrderReturnRequest.update({ where: { id: request.id }, data: { status: "APPROVED", decidedBy: req.userId ?? null, decidedAt: new Date(), decisionNote: parsed.data.note ?? null } });
+      const order = await tx.posOrder.findUniqueOrThrow({ where: { id: request.orderId }, include: orderInclude });
+      const withTotals = withFinancials(order, tax);
+      await tx.posOrder.update({ where: { id: order.id }, data: { paymentStatus: paymentStatusFor(withTotals.paid, withTotals.total) } });
+      const creditCustomerId = order.customerId ?? order.reservation?.customerId ?? null;
+      if (creditCustomerId) {
+        await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: creditCustomerId, status: order.status, paid: withTotals.paid, total: withTotals.total, by: req.userId });
+      }
+      return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+    });
+    res.status(200).json({ order: withFinancials(updated, tax) });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    throw error;
+  }
+});
+
+posRouter.post("/return-requests/:id/reject", requirePermission("POS_APPROVE_CANCELLATION"), async (req, res) => {
+  const parsed = returnDecisionSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid return rejection", details: parsed.error.flatten() }); return; }
+  const id = req.params.id as string;
+  const updated = await prisma.posOrderReturnRequest.updateMany({
+    where: { id, tenantId: tenantIdFor(req), status: "PENDING" },
+    data: { status: "REJECTED", decidedBy: req.userId ?? null, decidedAt: new Date(), decisionNote: parsed.data.note ?? null },
+  });
+  if (!updated.count) { res.status(404).json({ error: "Pending return request not found" }); return; }
+  res.status(200).json({ request: await prisma.posOrderReturnRequest.findUniqueOrThrow({ where: { id } }) });
+});
+
 posRouter.post("/orders/:id/payments", async (req, res) => {
   const parsed = paymentSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid payment", details: parsed.error.flatten() }); return; }
