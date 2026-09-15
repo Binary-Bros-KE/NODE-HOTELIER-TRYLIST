@@ -3,6 +3,8 @@ import { prisma } from "../lib/prisma.js";
 
 const ALLOWED_WITHOUT_ACTIVE_SHIFT = [
   /^\/health$/,
+  /^\/business-profile$/,
+  /^\/tenant\/license$/,
   /^\/shifts\/current$/,
   /^\/shifts\/start-request$/,
   /^\/shifts\/approvals$/,
