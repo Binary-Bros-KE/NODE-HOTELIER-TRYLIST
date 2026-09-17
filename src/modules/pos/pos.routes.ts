@@ -1528,6 +1528,24 @@ posRouter.post("/orders/:id/share", async (req, res) => {
   res.status(200).json({ token, url: `${base}/r/${token}` });
 });
 
+/** Queues a print request for this order at its own location — for a device
+ * with no printer of its own (most waiters' phones). Any other device at
+ * that location already configured with a working thermal-printer
+ * connection polls GET /pos/print-jobs/pending in the background and prints
+ * it over its own Bluetooth/USB/bridge connection. See PrintJob's own
+ * schema comment for the full design. */
+posRouter.post("/orders/:id/print-jobs", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, locationId: true } });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!order.locationId) { res.status(400).json({ error: "This order has no location on it, so there's no printer to route it to" }); return; }
+  const job = await prisma.printJob.create({
+    data: { tenantId: tid, locationId: order.locationId, orderId: order.id, requestedBy: req.userId ?? null },
+    select: { id: true, status: true, createdAt: true },
+  });
+  res.status(201).json({ job });
+});
+
 /** The full active add-on catalog for the checkout add-on picker, each with
  * its menu category so the client can filter. Managed via /api/addons. */
 posRouter.get("/addons", async (req, res) => res.json({
@@ -1844,4 +1862,65 @@ posRouter.post("/retail-orders", async (req, res) => {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     throw error;
   }
+});
+
+// ============================================================================
+// Print job relay — see the PrintJob schema comment for the design. A device
+// polls /pending for its own working location, atomically /claim's one
+// before printing it (so two polling hosts never both print the same job),
+// then reports back /complete or /fail.
+// ============================================================================
+
+posRouter.get("/print-jobs/pending", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const query = z.object({ locationId: z.string().cuid() }).safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "A locationId is required" }); return; }
+  const jobs = await prisma.printJob.findMany({
+    where: { tenantId: tid, locationId: query.data.locationId, status: "PENDING" },
+    select: { id: true, orderId: true, createdAt: true },
+    orderBy: { createdAt: "asc" },
+    take: 20,
+  });
+  res.status(200).json({ jobs });
+});
+
+posRouter.post("/print-jobs/:id/claim", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const claimed = await prisma.printJob.updateMany({
+    where: { id: req.params.id, tenantId: tid, status: "PENDING" },
+    data: { status: "CLAIMED", claimedBy: req.userId ?? null, claimedAt: new Date() },
+  });
+  if (!claimed.count) { res.status(409).json({ error: "Already claimed by another device, or not found" }); return; }
+  const job = await prisma.printJob.findUniqueOrThrow({ where: { id: req.params.id }, select: { id: true, orderId: true, status: true } });
+  res.status(200).json({ job });
+});
+
+posRouter.post("/print-jobs/:id/complete", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const updated = await prisma.printJob.updateMany({
+    where: { id: req.params.id, tenantId: tid, status: "CLAIMED" },
+    data: { status: "DONE", completedAt: new Date() },
+  });
+  if (!updated.count) { res.status(404).json({ error: "Print job not found or not claimed" }); return; }
+  res.status(204).send();
+});
+
+posRouter.post("/print-jobs/:id/fail", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const data = z.object({ error: z.string().trim().max(300).optional() }).safeParse(req.body);
+  const updated = await prisma.printJob.updateMany({
+    where: { id: req.params.id, tenantId: tid, status: "CLAIMED" },
+    data: { status: "FAILED", completedAt: new Date(), error: data.success ? (data.data.error ?? null) : null },
+  });
+  if (!updated.count) { res.status(404).json({ error: "Print job not found or not claimed" }); return; }
+  res.status(204).send();
+});
+
+/** So a waiter's screen can show "Printing…" -> "Printed"/"Failed" instead
+ * of a fire-and-forget toast, without needing its own polling endpoint. */
+posRouter.get("/print-jobs/:id", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const job = await prisma.printJob.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, status: true, error: true } });
+  if (!job) { res.status(404).json({ error: "Print job not found" }); return; }
+  res.status(200).json({ job });
 });

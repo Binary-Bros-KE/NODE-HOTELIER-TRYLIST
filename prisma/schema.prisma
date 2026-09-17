@@ -410,6 +410,7 @@ model Tenant {
   attendanceRecords     AttendanceRecord[]
   shiftSessions         ShiftSession[]
   employeeSalaries      EmployeeSalary[]
+  printJobs             PrintJob[]
 }
 
 enum CustomerType {
@@ -1734,6 +1735,7 @@ model Location {
   stockReceipts         StockReceipt[]
   stockTransfersFrom    StockTransfer[]     @relation("StockTransferFrom")
   stockTransfersTo      StockTransfer[]     @relation("StockTransferTo")
+  printJobs             PrintJob[]
 
   @@unique([tenantId, name])
 }
@@ -1910,6 +1912,7 @@ model PosOrder {
   payments           Payment[]
   creditEntries      CustomerCreditEntry[]
   returnRequests     PosOrderReturnRequest[]
+  printJobs          PrintJob[]
 
   @@unique([tenantId, orderNumber])
   @@index([tenantId, status, createdAt])
@@ -2040,6 +2043,43 @@ model Payment {
 
   @@index([tenantId, orderId])
   @@index([tenantId, paymentMethodId])
+}
+
+enum PrintJobStatus {
+  PENDING
+  CLAIMED
+  DONE
+  FAILED
+}
+
+// A receipt-print request routed to whichever device is actually connected
+// to the location's thermal printer (Bluetooth thermal printers only ever
+// hold one connection, so a waiter's own phone usually isn't it). Any other
+// device already configured with a working printer connection for this
+// location polls GET /pos/print-jobs/pending in the background and executes
+// it over ITS OWN connection — the server never touches the printer
+// directly, it just hands the job to whoever's holding the wire.
+// PENDING -> CLAIMED (atomically, so two polling hosts can't both print it)
+// -> DONE or FAILED.
+model PrintJob {
+  id          String         @id @default(cuid())
+  tenantId    String
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  locationId  String
+  location    Location       @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  orderId     String
+  order       PosOrder       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status      PrintJobStatus @default(PENDING)
+  // Plain id, no relation — same convention as PosOrder.createdBy.
+  requestedBy String?
+  claimedBy   String?
+  claimedAt   DateTime?
+  completedAt DateTime?
+  error       String?
+  createdAt   DateTime       @default(now())
+
+  @@index([tenantId, locationId, status])
+  @@index([orderId])
 }
 
 // One of menuItemId/productId/serviceId is set, matching the parent order's
