@@ -2335,6 +2335,12 @@ model Employee {
   @@index([roleId])
 }
 
+// A hand-written partial unique index (migration
+// 20260917190000_shift_session_one_open_per_employee, not expressible in
+// this DSL) also enforces, at the database level, that an employee can
+// have at most one row with status in (REQUESTED_START, ACTIVE,
+// REQUESTED_END) at a time — closes a double-submit race that an
+// application-level check-then-create can't fully rule out.
 model ShiftSession {
   id                 String             @id @default(cuid())
   tenantId           String

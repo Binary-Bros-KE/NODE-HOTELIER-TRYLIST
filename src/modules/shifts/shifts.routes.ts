@@ -251,6 +251,14 @@ shiftsRouter.post("/start-request", async (req, res, next) => {
     });
     res.status(201).json({ session });
   } catch (error) {
+    // Belt-and-suspenders for the findFirst-then-create race above (a slow
+    // connection double-tapping this before either request's create
+    // commits) — the partial unique index on ShiftSession rejects the
+    // second INSERT outright; report it the same as the check above would.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      res.status(409).json({ error: "You already have an open shift request or active shift" });
+      return;
+    }
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     next(error);
   }
