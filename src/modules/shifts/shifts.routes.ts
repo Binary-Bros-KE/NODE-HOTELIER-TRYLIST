@@ -29,6 +29,11 @@ const approvalSchema = z.object({
   action: z.enum(["APPROVE", "REJECT"]),
   note: z.string().trim().max(300).optional(),
 });
+// End-shift review is where a cash handover actually happens — start
+// requests never touch money, so this input is end-approval only.
+const endApprovalSchema = approvalSchema.extend({
+  cashVariance: z.coerce.number().min(-1_000_000).max(1_000_000).optional(),
+});
 
 const localDate = (date: Date) => new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
 
@@ -341,7 +346,7 @@ shiftsRouter.post("/end-request", async (req, res, next) => {
 
 shiftsRouter.post("/:id/end-approval", async (req, res, next) => {
   const tid = tenantId(req);
-  const data = approvalSchema.safeParse(req.body);
+  const data = endApprovalSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid approval", details: data.error.flatten() }); return; }
   try {
     const session = await prisma.shiftSession.findFirst({ where: { id: req.params.id, tenantId: tid, status: "REQUESTED_END" }, include: shiftInclude });
@@ -349,12 +354,13 @@ shiftsRouter.post("/:id/end-approval", async (req, res, next) => {
     const approver = await assertCanApprove(tid, req.userId, session);
     const summary = await shiftSummary(tid, session.employeeId, session.approvedStartAt, session.requestedEndAt);
     if (summary.pendingOrders > 0) { res.status(409).json({ error: "This employee still has pending sales" }); return; }
+    const cashVariance = data.data.cashVariance ?? null;
     const updated = await prisma.$transaction(async (tx) => {
       const row = await tx.shiftSession.update({
         where: { id: session.id },
         data: data.data.action === "APPROVE"
-          ? { status: "ENDED", approvedEndAt: new Date(), endApprovedBy: approver.id, rejectionReason: null }
-          : { status: "REJECTED_END", rejectionReason: data.data.note ?? null },
+          ? { status: "ENDED", approvedEndAt: new Date(), endApprovedBy: approver.id, rejectionReason: null, cashVariance }
+          : { status: "REJECTED_END", rejectionReason: data.data.note ?? null, cashVariance },
         include: shiftInclude,
       });
       if (data.data.action === "APPROVE") {
@@ -373,13 +379,20 @@ shiftsRouter.post("/:id/end-approval", async (req, res, next) => {
   }
 });
 
+const shiftStatusEnum = z.enum(["REQUESTED_START", "ACTIVE", "REQUESTED_END", "ENDED", "REJECTED_START", "REJECTED_END"]);
 const sessionsQuerySchema = z.object({
   year: z.coerce.number().int().min(2000).max(2100).optional(),
   month: z.coerce.number().int().min(1).max(12).optional(),
   employeeId: z.string().trim().optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
-  status: z.enum(["REQUESTED_START", "ACTIVE", "REQUESTED_END", "ENDED", "REJECTED_START", "REJECTED_END"]).optional(),
+  // Accepts one value (?status=ENDED), several as repeated keys
+  // (?status=ENDED&status=REJECTED_END), or a comma-separated list — the
+  // dashboard's "recent shifts" list needs ended AND rejected together.
+  status: z.preprocess(
+    (value) => (typeof value === "string" && value.includes(",") ? value.split(",") : value),
+    z.union([shiftStatusEnum, z.array(shiftStatusEnum)]),
+  ).optional(),
   take: z.coerce.number().int().min(1).max(200).optional(),
 });
 
@@ -398,7 +411,7 @@ shiftsRouter.get("/sessions", async (req, res, next) => {
         tenantId: tid,
         ...employeeFilter,
         ...supervisorFilter,
-        ...(query.data.status ? { status: query.data.status } : {}),
+        ...(query.data.status ? { status: Array.isArray(query.data.status) ? { in: query.data.status } : query.data.status } : {}),
         ...(from || to ? { requestedStartAt: { ...(from ? { gte: from } : {}), ...(to ? { lt: to } : {}) } } : {}),
       },
       include: shiftInclude,
@@ -442,22 +455,36 @@ shiftsRouter.get("/employees/:employeeId/report", async (req, res, next) => {
     const actor = await currentEmployee(tid, req.userId);
     const employee = await prisma.employee.findFirst({ where: { id: req.params.employeeId, tenantId: tid }, select: { id: true, firstName: true, lastName: true, jobTitle: true, supervisorId: true } });
     if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
-    if (!isSuperAdmin(actor) && employee.supervisorId !== actor.id && employee.id !== actor.id) { res.status(403).json({ error: "You cannot view this employee report" }); return; }
+    const canView = isSuperAdmin(actor) || actor.role?.name === "Accountant" || employee.supervisorId === actor.id || employee.id === actor.id;
+    if (!canView) { res.status(403).json({ error: "You cannot view this employee report" }); return; }
+    // Rejected shifts belong in this report too — an accountant reviewing a
+    // month needs to see what got rejected and why, not just what cleared.
+    // requestedStartAt (always set) anchors the date range instead of
+    // approvedStartAt/approvedEndAt, which a rejected session may lack.
     const sessions = await prisma.shiftSession.findMany({
-      where: { tenantId: tid, employeeId: employee.id, status: "ENDED", approvedStartAt: { gte: query.data.from }, approvedEndAt: { lte: query.data.to } },
-      orderBy: { approvedStartAt: "asc" },
+      where: {
+        tenantId: tid,
+        employeeId: employee.id,
+        status: { in: ["ENDED", "REJECTED_START", "REJECTED_END"] },
+        requestedStartAt: { gte: query.data.from, lte: query.data.to },
+      },
+      include: shiftInclude,
+      orderBy: { requestedStartAt: "asc" },
     });
-    const summaries = await Promise.all(sessions.map((s) => shiftSummary(tid, employee.id, s.approvedStartAt!, s.approvedEndAt!)));
+    const summaries = await Promise.all(sessions.map((s) => (
+      s.approvedStartAt ? shiftSummary(tid, employee.id, s.approvedStartAt, s.approvedEndAt ?? s.requestedEndAt ?? new Date()) : null
+    )));
     res.json({
       employee,
       from: query.data.from,
       to: query.data.to,
       totals: {
-        shifts: sessions.length,
-        hours: summaries.reduce((sum, s) => sum + s.hours, 0),
-        sales: summaries.reduce((sum, s) => sum + s.totalSales, 0),
-        paid: summaries.reduce((sum, s) => sum + s.totalPaid, 0),
-        creditSales: summaries.reduce((sum, s) => sum + s.creditSales, 0),
+        shifts: sessions.filter((s) => s.status === "ENDED").length,
+        rejected: sessions.filter((s) => s.status !== "ENDED").length,
+        hours: summaries.reduce((sum, s) => sum + (s?.hours ?? 0), 0),
+        sales: summaries.reduce((sum, s) => sum + (s?.totalSales ?? 0), 0),
+        paid: summaries.reduce((sum, s) => sum + (s?.totalPaid ?? 0), 0),
+        creditSales: summaries.reduce((sum, s) => sum + (s?.creditSales ?? 0), 0),
       },
       sessions: sessions.map((session, index) => ({ ...session, summary: summaries[index] })),
     });

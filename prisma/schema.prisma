@@ -2411,6 +2411,10 @@ model ShiftSession {
   startNote          String?
   endNote            String?
   rejectionReason    String?
+  // Cash-up variance the accountant records against this employee's cash
+  // handover, at end-shift review time: positive = over, negative = short.
+  // Null means it was never counted (no discrepancy noted either way).
+  cashVariance       Decimal?           @db.Decimal(12, 2)
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
