@@ -94,6 +94,7 @@ const itemFields = {
   locations: { select: { id: true, name: true } },
   createdAt: true,
   updatedAt: true,
+  variants: { select: { price: true } },
   _count: { select: { orderItems: true, variants: true } },
 } as const;
 

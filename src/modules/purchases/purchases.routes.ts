@@ -47,7 +47,13 @@ const lineSchema = z.object({
   taxRate: z.coerce.number().min(0).max(100).default(0),
   taxMode: z.enum(["INCLUSIVE", "EXCLUSIVE"]).default("INCLUSIVE"),
   taxTreatment: z.enum(["STANDARD", "ZERO_RATED", "EXEMPT"]).default("STANDARD"),
-  menuPriceUpdates: z.array(z.object({ menuItemId: z.string().trim().min(1), sellingPrice: z.coerce.number().min(0) })).default([]),
+  menuPriceUpdates: z.array(z.object({
+    menuItemId: z.string().trim().min(1),
+    // Set when this update targets one variant's price instead of the
+    // parent item's — items with variants never use their base price on POS.
+    variantId: z.string().trim().min(1).optional(),
+    sellingPrice: z.coerce.number().min(0),
+  })).default([]),
   note: optionalText(255),
 });
 
@@ -79,7 +85,7 @@ const purchaseInclude = {
   supplier: { select: { id: true, name: true } },
   location: { select: { id: true, name: true } },
   requisition: { select: { id: true, requisitionNo: true } },
-  items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } }, menuPriceUpdates: { include: { menuItem: { select: { id: true, name: true, price: true } } } } }, orderBy: { createdAt: "asc" } },
+  items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } }, menuPriceUpdates: { include: { menuItem: { select: { id: true, name: true, price: true } }, variant: { select: { id: true, name: true, price: true } } } } }, orderBy: { createdAt: "asc" } },
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
   updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
   goodsReceipts: {
@@ -164,11 +170,18 @@ async function assertLocation(tid: string, locationId: string) {
   return location;
 }
 
-async function assertMenuPriceUpdates(tid: string, items: { menuPriceUpdates?: { menuItemId: string }[] }[]) {
-  const ids = [...new Set(items.flatMap((item) => item.menuPriceUpdates?.map((update) => update.menuItemId) ?? []))];
-  if (!ids.length) return;
-  const count = await prisma.menuItem.count({ where: { id: { in: ids }, tenantId: tid } });
-  if (count !== ids.length) throw new HttpError(400, "One or more menu price updates reference a menu item that was not found");
+async function assertMenuPriceUpdates(tid: string, items: { menuPriceUpdates?: { menuItemId: string; variantId?: string }[] }[]) {
+  const updates = items.flatMap((item) => item.menuPriceUpdates ?? []);
+  const menuItemIds = [...new Set(updates.map((update) => update.menuItemId))];
+  if (menuItemIds.length) {
+    const count = await prisma.menuItem.count({ where: { id: { in: menuItemIds }, tenantId: tid } });
+    if (count !== menuItemIds.length) throw new HttpError(400, "One or more menu price updates reference a menu item that was not found");
+  }
+  const variantIds = [...new Set(updates.map((update) => update.variantId).filter((id): id is string => !!id))];
+  if (variantIds.length) {
+    const count = await prisma.menuItemVariant.count({ where: { id: { in: variantIds }, tenantId: tid } });
+    if (count !== variantIds.length) throw new HttpError(400, "One or more menu price updates reference a variant that was not found");
+  }
 }
 
 async function resolvePaymentMethod(tid: string, paymentMethodId: string, reference: string | undefined) {
@@ -585,7 +598,11 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
       })));
       for (const { item } of receivedPurchaseItems.values()) {
         for (const update of item.menuPriceUpdates) {
-          await tx.menuItem.updateMany({ where: { id: update.menuItemId, tenantId: tid }, data: { price: update.sellingPrice } });
+          if (update.variantId) {
+            await tx.menuItemVariant.updateMany({ where: { id: update.variantId, tenantId: tid }, data: { price: update.sellingPrice } });
+          } else {
+            await tx.menuItem.updateMany({ where: { id: update.menuItemId, tenantId: tid }, data: { price: update.sellingPrice } });
+          }
         }
       }
 

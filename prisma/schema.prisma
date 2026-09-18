@@ -1345,16 +1345,23 @@ model PurchaseItem {
 }
 
 model PurchaseItemMenuPriceUpdate {
-  id             String       @id @default(cuid())
+  id             String           @id @default(cuid())
   purchaseItemId String
-  purchaseItem   PurchaseItem @relation(fields: [purchaseItemId], references: [id], onDelete: Cascade)
+  purchaseItem   PurchaseItem     @relation(fields: [purchaseItemId], references: [id], onDelete: Cascade)
   menuItemId     String
-  menuItem       MenuItem     @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
-  sellingPrice   Decimal      @db.Decimal(12, 2)
-  createdAt      DateTime     @default(now())
+  menuItem       MenuItem         @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  // Set when this update targets one specific variant's price instead of the
+  // parent item's — the item's base price is unused once it has variants, so
+  // a price bump from a goods receipt must land on the variant that actually
+  // draws from the purchased product.
+  variantId      String?
+  variant        MenuItemVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  sellingPrice   Decimal          @db.Decimal(12, 2)
+  createdAt      DateTime         @default(now())
 
-  @@unique([purchaseItemId, menuItemId])
+  @@unique([purchaseItemId, menuItemId, variantId])
   @@index([menuItemId])
+  @@index([variantId])
 }
 
 // One delivery event against a PO. A PO can be received in several batches
@@ -1846,6 +1853,7 @@ model MenuItemVariant {
   tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   menuItem        MenuItem       @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
   orderItems      PosOrderItem[]
+  purchasePriceUpdates PurchaseItemMenuPriceUpdate[]
 
   @@unique([tenantId, menuItemId, name])
   @@unique([tenantId, sku])
