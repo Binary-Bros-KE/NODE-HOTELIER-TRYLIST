@@ -158,7 +158,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
         where: { tenantId: tid, status: "COMPLETED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
-        include: { items: { include: orderItemInclude }, location: { select: { id: true, name: true } }, customer: { select: { id: true, firstName: true, lastName: true } }, complimentarySession: true },
+        include: { items: { include: orderItemInclude }, location: { select: { id: true, name: true } }, customer: { select: { id: true, firstName: true, lastName: true } }, complimentarySession: true, payments: { select: { amount: true } } },
       }),
       prisma.posOrder.findMany({
         where: { tenantId: tid, status: "CANCELLED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
@@ -220,6 +220,9 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const compSessions = new Map<string, { id: string; title: string; hostName: string | null; startsAt: Date | null; endsAt: Date | null; complimentaryValue: number; complimentaryCogs: number; guestRevenue: number; guestCogs: number; orders: number }>();
     let complimentaryValue = 0;
     let complimentaryCogs = 0;
+    let creditGiven = 0;
+    let creditCount = 0;
+    let complimentaryCount = 0;
 
     for (const order of completedOrders) {
       const fin = computeOrderFinancials(order, tax);
@@ -227,6 +230,16 @@ reportsRouter.get("/sales", async (req, res, next) => {
       taxCollected += fin.taxAmount;
       discountsGiven += Number(order.discount);
       if (order.channel === "FOOD") menuOrdersCompleted += 1;
+
+      // A completed order can be settled short of its total (the rest parked
+      // as customer credit at /settle) — that gap never produces a
+      // Transaction row, so it's invisible to the cash-basis breakdown below
+      // unless counted here explicitly.
+      if (order.saleType !== "COMPLIMENTARY") {
+        const paidSoFar = order.payments.reduce((s, p) => s + Number(p.amount), 0);
+        const shortfall = round2(fin.total - paidSoFar);
+        if (shortfall > 0.01) { creditGiven += shortfall; creditCount += 1; }
+      }
 
       for (const line of fin.taxLines) {
         const bucket = taxBuckets.get(line.key) ?? { ...line, net: 0, tax: 0, gross: 0 };
@@ -250,6 +263,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       if (order.saleType === "COMPLIMENTARY") {
         complimentaryValue += fin.complimentaryValue;
         complimentaryCogs += orderCogs;
+        complimentaryCount += 1;
       }
       if (order.complimentarySessionId) {
         const session = compSessions.get(order.complimentarySessionId) ?? {
@@ -294,6 +308,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     discountsGiven = round2(discountsGiven);
     complimentaryValue = round2(complimentaryValue);
     complimentaryCogs = round2(complimentaryCogs);
+    creditGiven = round2(creditGiven);
 
     const topItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).slice(0, 10).map((i) => ({ ...i, revenue: round2(i.revenue) }));
     const taxBreakdown = [...taxBuckets.values()].map((b) => ({ ...b, net: round2(b.net), tax: round2(b.tax), gross: round2(b.gross) })).sort((a, b) => b.gross - a.gross);
@@ -361,8 +376,19 @@ reportsRouter.get("/sales", async (req, res, next) => {
       bucket.count += 1; bucket.total += Number(t.amount);
       byMethodMap.set(key, bucket);
     }
-    const byPaymentMethod = [...byMethodMap.values()]
-      .map((b) => ({ ...b, total: round2(b.total), percentOfTotal: transactionsInTotal ? round2((b.total / transactionsInTotal) * 100) : 0 }))
+    // Credit and complimentary sales never produce a Transaction row (nothing
+    // was collected), so without adding them explicitly here they'd be
+    // invisible in this breakdown — someone reading it would see cash
+    // totals that don't add up to what was actually sold. They're appended
+    // as their own rows (only when non-zero, same as any other unused
+    // method) and every row's percentOfTotal is against the combined
+    // cash + credit + complimentary total, not just cash-in.
+    const soldBasisTotal = round2(transactionsInTotal + creditGiven + complimentaryValue);
+    const rawMethodRows: { name: string; count: number; total: number }[] = [...byMethodMap.values()];
+    if (creditGiven > 0.01) rawMethodRows.push({ name: "Credit", count: creditCount, total: creditGiven });
+    if (complimentaryValue > 0.01) rawMethodRows.push({ name: "Complimentary", count: complimentaryCount, total: complimentaryValue });
+    const byPaymentMethod = rawMethodRows
+      .map((b) => ({ ...b, total: round2(b.total), percentOfTotal: soldBasisTotal ? round2((b.total / soldBasisTotal) * 100) : 0 }))
       .sort((a, b) => b.total - a.total);
 
     const employeeName = new Map(employeesForBranch.map((e) => [e.id, `${e.firstName} ${e.lastName}`.trim()]));
@@ -449,6 +475,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         posSalesCash, folioDepositsCash, folioSettlementsCash, serviceCenterCash, totalRevenue,
         taxCollected, discountsGiven,
         complimentaryValue, complimentaryCogs,
+        creditGiven, creditCount,
         completedSalesValue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
         serviceCenterExcludedByLocationFilter: !!locationId,
       },

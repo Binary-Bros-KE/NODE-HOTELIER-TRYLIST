@@ -110,17 +110,26 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
   const totalSales = sales.reduce((s, o) => s + o.total, 0);
   const totalPaid = posSaleTransactions.reduce((s, t) => s + Number(t.amount), 0);
   const complimentarySales = sales.filter((o) => o.saleType === "COMPLIMENTARY");
+  const complimentaryTotal = complimentarySales.reduce((s, o) => s + o.total, 0);
+  const creditOrders = sales.filter((o) => o.saleType !== "COMPLIMENTARY" && o.total - o.paid > 0.01);
+  const creditSales = creditOrders.reduce((s, o) => s + (o.total - o.paid), 0);
+  // Credit and complimentary sales never post a Transaction (nothing was
+  // collected), so they'd otherwise be invisible here — appended as their
+  // own rows only when non-zero, same as any other unused payment method.
+  const byPaymentMethodRows = [...byPaymentMethod.values()];
+  if (creditSales > 0.01) byPaymentMethodRows.push({ paymentMethodId: null, name: "Credit", total: creditSales, count: creditOrders.length });
+  if (complimentaryTotal > 0.01) byPaymentMethodRows.push({ paymentMethodId: null, name: "Complimentary", total: complimentaryTotal, count: complimentarySales.length });
   return {
     from,
     to,
     hours: Math.max(0, (to.getTime() - from.getTime()) / 36e5),
     totalSales,
     totalPaid,
-    complimentaryTotal: complimentarySales.reduce((s, o) => s + o.total, 0),
+    complimentaryTotal,
     complimentaryCount: complimentarySales.length,
-    creditSales: sales.reduce((s, o) => s + (o.saleType === "COMPLIMENTARY" ? 0 : Math.max(0, o.total - o.paid)), 0),
+    creditSales,
     pendingOrders: pending,
-    byPaymentMethod: [...byPaymentMethod.values()],
+    byPaymentMethod: byPaymentMethodRows,
     transactions: transactions.map((t) => ({
       id: t.id,
       transactionNo: t.transactionNo,
