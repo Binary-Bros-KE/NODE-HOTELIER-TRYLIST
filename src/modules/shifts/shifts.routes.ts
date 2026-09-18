@@ -48,8 +48,16 @@ function isSuperAdmin(employee: { role: { name: string } | null }) {
 
 async function assertCanApprove(tid: string, approverId: string | undefined, target: { employeeId: string; employee: { supervisorId: string | null; isSupervisor: boolean } }) {
   const approver = await currentEmployee(tid, approverId);
-  if (isSuperAdmin(approver) || approver.isSupervisor || target.employee.supervisorId === approver.id || (target.employeeId === approver.id && approver.isSupervisor)) return approver;
+  if (isSuperAdmin(approver) || target.employee.supervisorId === approver.id || (target.employeeId === approver.id && approver.isSupervisor)) return approver;
   throw Object.assign(new Error("Only this employee's supervisor can approve this shift"), { status: 403 });
+}
+
+// Looser than assertCanApprove: read-only access to a shift's detail also
+// covers the employee looking at their own past shift, not just supervisors.
+async function assertCanView(tid: string, actorId: string | undefined, target: { employeeId: string; employee: { supervisorId: string | null; isSupervisor: boolean } }) {
+  const actor = await currentEmployee(tid, actorId);
+  if (isSuperAdmin(actor) || target.employee.supervisorId === actor.id || target.employeeId === actor.id) return actor;
+  throw Object.assign(new Error("You cannot view this employee's shift"), { status: 403 });
 }
 
 async function shiftSummary(tid: string, employeeId: string, from: Date, to: Date) {
@@ -165,7 +173,7 @@ shiftsRouter.get("/approvals", async (req, res, next) => {
       where: {
         tenantId: tid,
         status: { in: ["REQUESTED_START", "REQUESTED_END"] },
-        ...(isSuperAdmin(actor) || actor.isSupervisor ? {} : { employee: { supervisorId: actor.id } }),
+        ...(isSuperAdmin(actor) ? {} : { employee: { supervisorId: actor.id } }),
       },
       include: shiftInclude,
       orderBy: { updatedAt: "asc" },
@@ -190,7 +198,7 @@ shiftsRouter.get("/active-supervised", async (req, res, next) => {
         tenantId: tid,
         status: "ACTIVE",
         employeeId: { not: actor.id },
-        ...(isSuperAdmin(actor) || actor.isSupervisor ? {} : { employee: { supervisorId: actor.id } }),
+        ...(isSuperAdmin(actor) ? {} : { employee: { supervisorId: actor.id } }),
       },
       include: shiftInclude,
       orderBy: { approvedStartAt: "asc" },
@@ -362,6 +370,8 @@ const sessionsQuerySchema = z.object({
   employeeId: z.string().trim().optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
+  status: z.enum(["REQUESTED_START", "ACTIVE", "REQUESTED_END", "ENDED", "REJECTED_START", "REJECTED_END"]).optional(),
+  take: z.coerce.number().int().min(1).max(200).optional(),
 });
 
 shiftsRouter.get("/sessions", async (req, res, next) => {
@@ -373,18 +383,40 @@ shiftsRouter.get("/sessions", async (req, res, next) => {
     const from = query.data.from ?? (query.data.year && query.data.month ? new Date(Date.UTC(query.data.year, query.data.month - 1, 1)) : undefined);
     const to = query.data.to ?? (query.data.year && query.data.month ? new Date(Date.UTC(query.data.month === 12 ? query.data.year + 1 : query.data.year, query.data.month === 12 ? 0 : query.data.month, 1)) : undefined);
     const employeeFilter = query.data.employeeId ? { employeeId: query.data.employeeId } : {};
-    const supervisorFilter = isSuperAdmin(actor) || actor.isSupervisor ? {} : { employee: { supervisorId: actor.id } };
+    const supervisorFilter = isSuperAdmin(actor) ? {} : { employee: { supervisorId: actor.id } };
     const sessions = await prisma.shiftSession.findMany({
       where: {
         tenantId: tid,
         ...employeeFilter,
         ...supervisorFilter,
+        ...(query.data.status ? { status: query.data.status } : {}),
         ...(from || to ? { requestedStartAt: { ...(from ? { gte: from } : {}), ...(to ? { lt: to } : {}) } } : {}),
       },
       include: shiftInclude,
       orderBy: { requestedStartAt: "desc" },
+      ...(query.data.take ? { take: query.data.take } : {}),
     });
     res.json({ sessions });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    next(error);
+  }
+});
+
+/** On-demand summary for one shift — used by "click a shift to see what
+ * this employee did" in the dashboard's recent/active-staff lists, where
+ * eagerly computing every session's summary (like /approvals and
+ * /active-supervised do for their naturally small lists) would be wasteful
+ * for a longer history list. */
+shiftsRouter.get("/:id/summary", async (req, res, next) => {
+  const tid = tenantId(req);
+  try {
+    const session = await prisma.shiftSession.findFirst({ where: { id: req.params.id, tenantId: tid }, include: shiftInclude });
+    if (!session) { res.status(404).json({ error: "Shift not found" }); return; }
+    await assertCanView(tid, req.userId, session);
+    if (!session.approvedStartAt) { res.json({ session, summary: null }); return; }
+    const summary = await shiftSummary(tid, session.employeeId, session.approvedStartAt, session.approvedEndAt ?? session.requestedEndAt ?? new Date());
+    res.json({ session, summary });
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     next(error);
@@ -401,7 +433,7 @@ shiftsRouter.get("/employees/:employeeId/report", async (req, res, next) => {
     const actor = await currentEmployee(tid, req.userId);
     const employee = await prisma.employee.findFirst({ where: { id: req.params.employeeId, tenantId: tid }, select: { id: true, firstName: true, lastName: true, jobTitle: true, supervisorId: true } });
     if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
-    if (!isSuperAdmin(actor) && !actor.isSupervisor && employee.supervisorId !== actor.id && employee.id !== actor.id) { res.status(403).json({ error: "You cannot view this employee report" }); return; }
+    if (!isSuperAdmin(actor) && employee.supervisorId !== actor.id && employee.id !== actor.id) { res.status(403).json({ error: "You cannot view this employee report" }); return; }
     const sessions = await prisma.shiftSession.findMany({
       where: { tenantId: tid, employeeId: employee.id, status: "ENDED", approvedStartAt: { gte: query.data.from }, approvedEndAt: { lte: query.data.to } },
       orderBy: { approvedStartAt: "asc" },
