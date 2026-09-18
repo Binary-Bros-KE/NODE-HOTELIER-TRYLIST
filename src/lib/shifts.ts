@@ -15,7 +15,7 @@ export type ResolvedShift = {
   graceMinutesAfter: number;
 };
 
-function nairobiParts(date: Date) {
+export function nairobiParts(date: Date) {
   const shifted = new Date(date.getTime() + NAIROBI_OFFSET_MINUTES * 60_000);
   return {
     year: shifted.getUTCFullYear(),
@@ -26,11 +26,11 @@ function nairobiParts(date: Date) {
   };
 }
 
-function nairobiWallClockToUtc(year: number, month: number, day: number, hour: number, minute: number): Date {
+export function nairobiWallClockToUtc(year: number, month: number, day: number, hour: number, minute: number): Date {
   return new Date(Date.UTC(year, month - 1, day, hour, minute) - NAIROBI_OFFSET_MINUTES * 60_000);
 }
 
-function addDays(date: Date, days: number): Date {
+export function addDays(date: Date, days: number): Date {
   return new Date(date.getTime() + days * DAY_MS);
 }
 

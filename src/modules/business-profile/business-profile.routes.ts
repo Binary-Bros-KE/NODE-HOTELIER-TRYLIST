@@ -33,6 +33,7 @@ const profileSchema = z.object({
   taxRate: optionalRate,
   taxMode: z.enum(taxModes).default("INCLUSIVE"),
   taxTreatment: z.enum(taxTreatments).default("STANDARD"),
+  businessDayStartHour: z.coerce.number().int().min(0).max(23).default(0),
   primaryPhone: optionalText(30),
   alternativePhone: optionalText(30),
   email: optionalEmail,

@@ -2620,6 +2620,14 @@ model BusinessProfile {
   taxMode      TaxMode      @default(INCLUSIVE)
   taxTreatment TaxTreatment @default(STANDARD)
 
+  // Nairobi-local hour (0-23) the "trading day" rolls over on — every
+  // revenue metric (Dashboard cards, Sales/Tax Report) is bucketed against
+  // this, not calendar midnight. A club trading past midnight sets this to
+  // e.g. 9 so a 1am sale still counts toward the night that's still
+  // technically open, instead of bleeding into "today." 0 (default)
+  // reproduces plain midnight-to-midnight for everyone who never touches it.
+  businessDayStartHour Int @default(0)
+
   primaryPhone     String?
   alternativePhone String?
   email            String?

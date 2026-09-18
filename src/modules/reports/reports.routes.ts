@@ -6,6 +6,7 @@ import { requireModule } from "../../middleware/tenantContext.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { stockValue } from "../../lib/stockValuation.js";
 import { taxSettingsFor } from "../pos/pos.routes.js";
+import { businessDateOnly, businessDayKey, businessDayWindowForDateOnly, addDays as addBusinessDays } from "../../lib/businessDay.js";
 
 export const reportsRouter = Router();
 reportsRouter.use(requireModule("REPORTS"));
@@ -41,38 +42,36 @@ function dayBounds(from?: string, to?: string) {
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
-function startOfLocalDay(d: Date) { return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0); }
-function endOfLocalDay(d: Date) { return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999); }
-function addDays(d: Date, n: number) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
-
-// Local calendar day the same way dayBounds() reads occurredAt — used to key
-// the Sales Report's revenue trend without drifting a transaction into the
-// wrong day at UTC boundaries.
-function localDayKey(d: Date) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+async function businessDayStartHourFor(tid: string): Promise<number> {
+  const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessDayStartHour: true } });
+  return profile?.businessDayStartHour ?? 0;
 }
 
-/** day/week(Mon-Sun)/month(calendar)/custom(from-to), all in local time —
- * matches how every other date-ranged report in this file already reads
- * "YYYY-MM-DD" as local midnight, not UTC. */
-function resolveSalesRange(period: "day" | "week" | "month" | "custom", dateStr: string | undefined, fromStr: string | undefined, toStr: string | undefined) {
-  const anchor = dateStr ? new Date(`${dateStr}T00:00:00.000`) : new Date();
+/** day/week(Mon-Sun)/month(calendar)/custom(from-to) — every boundary is a
+ * "business day" per businessDayWindowForDateOnly (Nairobi wall-clock,
+ * rolling over at the tenant's configured startHour instead of plain
+ * midnight), not the server process's own local time. A calendar date names
+ * the business day that STARTS on it — e.g. with startHour=9, "date=Sep 18"
+ * means the trading day running Sep 18 09:00 to Sep 19 09:00. */
+function resolveSalesRange(period: "day" | "week" | "month" | "custom", dateStr: string | undefined, fromStr: string | undefined, toStr: string | undefined, startHour: number) {
+  const anchorDateOnly = dateStr ? new Date(`${dateStr}T00:00:00.000Z`) : businessDateOnly(startHour, new Date());
   if (period === "custom") {
-    const start = startOfLocalDay(new Date(`${fromStr}T00:00:00.000`));
-    const end = endOfLocalDay(new Date(`${toStr ?? fromStr}T00:00:00.000`));
-    return { start, end };
+    const fromOnly = new Date(`${fromStr}T00:00:00.000Z`);
+    const toOnly = new Date(`${toStr ?? fromStr}T00:00:00.000Z`);
+    return { start: businessDayWindowForDateOnly(startHour, fromOnly).start, end: businessDayWindowForDateOnly(startHour, toOnly).end };
   }
   if (period === "week") {
-    const diffToMonday = (anchor.getDay() + 6) % 7; // Sun=0..Sat=6 -> days back to Monday
-    const monday = addDays(anchor, -diffToMonday);
-    return { start: startOfLocalDay(monday), end: endOfLocalDay(addDays(monday, 6)) };
+    const diffToMonday = (anchorDateOnly.getUTCDay() + 6) % 7; // Sun=0..Sat=6 -> days back to Monday
+    const monday = addBusinessDays(anchorDateOnly, -diffToMonday);
+    const sunday = addBusinessDays(monday, 6);
+    return { start: businessDayWindowForDateOnly(startHour, monday).start, end: businessDayWindowForDateOnly(startHour, sunday).end };
   }
   if (period === "month") {
-    const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
-    const last = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
-    return { start: startOfLocalDay(first), end: endOfLocalDay(last) };
+    const first = new Date(Date.UTC(anchorDateOnly.getUTCFullYear(), anchorDateOnly.getUTCMonth(), 1));
+    const last = new Date(Date.UTC(anchorDateOnly.getUTCFullYear(), anchorDateOnly.getUTCMonth() + 1, 0));
+    return { start: businessDayWindowForDateOnly(startHour, first).start, end: businessDayWindowForDateOnly(startHour, last).end };
   }
-  return { start: startOfLocalDay(anchor), end: endOfLocalDay(anchor) };
+  return businessDayWindowForDateOnly(startHour, anchorDateOnly);
 }
 
 type Moneyish = Prisma.Decimal | number | null;
@@ -144,9 +143,11 @@ reportsRouter.get("/sales", async (req, res, next) => {
     if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
     const { period, date, from, to, locationId } = query.data;
     const tid = tenantId(req);
-    const { start, end } = resolveSalesRange(period, date, from, to);
-    const trendStart = startOfLocalDay(addDays(end, -5));
-    const trendEnd = endOfLocalDay(addDays(end, 5));
+    const startHour = await businessDayStartHourFor(tid);
+    const { start, end } = resolveSalesRange(period, date, from, to, startHour);
+    const trendAnchor = businessDateOnly(startHour, end);
+    const trendStart = businessDayWindowForDateOnly(startHour, addBusinessDays(trendAnchor, -5)).start;
+    const trendEnd = businessDayWindowForDateOnly(startHour, addBusinessDays(trendAnchor, 5)).end;
 
     const [
       tax, completedOrders, cancelledOrders, transactionsIn, trendTransactions,
@@ -404,8 +405,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
 
     // ---- Revenue trend: 11 days centered on the range's end date ----
     const trendMap = new Map<string, number>();
-    for (let d = trendStart; d <= trendEnd; d = addDays(d, 1)) trendMap.set(localDayKey(d), 0);
-    for (const t of trendTransactions) trendMap.set(localDayKey(t.createdAt), (trendMap.get(localDayKey(t.createdAt)) ?? 0) + Number(t.amount));
+    for (let d = trendStart; d <= trendEnd; d = addBusinessDays(d, 1)) trendMap.set(businessDayKey(startHour, d), 0);
+    for (const t of trendTransactions) trendMap.set(businessDayKey(startHour, t.createdAt), (trendMap.get(businessDayKey(startHour, t.createdAt)) ?? 0) + Number(t.amount));
     const trend = [...trendMap.entries()].map(([trendDate, value]) => ({ date: trendDate, revenue: round2(value) }));
 
     // ---- Debtors: a live snapshot, not scoped to the selected period —
@@ -495,7 +496,7 @@ reportsRouter.get("/tax", async (req, res, next) => {
     if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
     const { period, date, from, to, locationId } = query.data;
     const tid = tenantId(req);
-    const { start, end } = resolveSalesRange(period, date, from, to);
+    const { start, end } = resolveSalesRange(period, date, from, to, await businessDayStartHourFor(tid));
 
     const [tax, orders] = await Promise.all([
       taxSettingsFor(tid),
