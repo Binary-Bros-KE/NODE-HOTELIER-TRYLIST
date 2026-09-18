@@ -2076,6 +2076,10 @@ model PrintJob {
   claimedAt   DateTime?
   completedAt DateTime?
   error       String?
+  // Set (and re-set) when the requester nudges a job that's taking a while
+  // — surfaced to whichever device is polling /pending so a stuck job is
+  // visible there, not just silently waiting.
+  nudgedAt    DateTime?
   createdAt   DateTime       @default(now())
 
   @@index([tenantId, locationId, status])

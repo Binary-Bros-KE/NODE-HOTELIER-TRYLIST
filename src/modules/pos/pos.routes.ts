@@ -452,6 +452,20 @@ async function canSeeAllOrders(tid: string, userId: string | undefined): Promise
   return viewAll || approveCounter || approveCancellation;
 }
 
+/** Whether this bill is this employee's own — the one check that has NO
+ * manager override, unlike canSeeAllOrders above. Editing an order's items,
+ * attaching a customer, requesting a return/cancellation, taking a payment,
+ * or completing the order are all things you do to your own tab only; a
+ * supervisor with POS_VIEW_ALL_ORDERS can *see* everyone's orders but can't
+ * touch someone else's bill through these actions. The only cross-employee
+ * action left is printing/sharing a receipt, which has no ownership check at
+ * all. An order from before createdBy existed (null) has no owner to
+ * restrict to, so it's left open rather than permanently unmanageable.
+ */
+function ownsOrder(order: { createdBy: string | null }, req: { userId?: string }): boolean {
+  return !order.createdBy || order.createdBy === req.userId;
+}
+
 // A fixed-location employee only ever sees their own location's orders; a
 // floating one (a manager) sees everything by default — unlike ringing up a
 // live sale, browsing order history isn't blocked by an unclear location, so
@@ -647,6 +661,7 @@ posRouter.post("/orders/:id/items", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only add items to your own orders" }); return; }
   if (order.channel !== "FOOD") { res.status(409).json({ error: "Only food/bar orders can have items added after the fact" }); return; }
   if (["COMPLETED", "CANCELLED"].includes(order.status)) { res.status(409).json({ error: "This order is already finalized — start a new one instead" }); return; }
 
@@ -769,6 +784,7 @@ posRouter.patch("/orders/:id/items/:itemId", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only edit your own orders" }); return; }
   if (order.channel !== "FOOD") { res.status(409).json({ error: "Only food/bar order lines can be edited here" }); return; }
   if (["COMPLETED", "CANCELLED"].includes(order.status)) { res.status(409).json({ error: "This order is finalized — it can't be changed" }); return; }
   if (order.servedAt || order.status === "SERVED") {
@@ -844,6 +860,7 @@ posRouter.delete("/orders/:id/items/:itemId", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only edit your own orders" }); return; }
   if (order.channel !== "FOOD") { res.status(409).json({ error: "Only food/bar order lines can be edited here" }); return; }
   if (["COMPLETED", "CANCELLED"].includes(order.status)) { res.status(409).json({ error: "This order is finalized — it can't be changed" }); return; }
   if (order.servedAt || order.status === "SERVED") {
@@ -1077,6 +1094,7 @@ posRouter.patch("/orders/:id/cancel", async (req, res) => {
   const tid = tenantIdFor(req);
   const existing = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid } });
   if (!existing) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!ownsOrder(existing, req)) { res.status(403).json({ error: "You can only cancel your own orders" }); return; }
   if (existing.status === "PENDING_CANCELLATION") { res.status(409).json({ error: "This order is already waiting for a cancellation decision" }); return; }
   if (existing.status === "CANCELLED") { res.status(409).json({ error: "This order is already cancelled" }); return; }
   if (existing.servedAt && Date.now() - existing.servedAt.getTime() > RETURN_WINDOW_MS) {
@@ -1209,6 +1227,7 @@ async function createReturnRequestsForOrder(args: {
 }) {
   const order = await prisma.posOrder.findFirst({ where: { id: args.orderId, tenantId: args.tenantId }, include: orderInclude });
   if (!order) throw Object.assign(new Error("Order not found"), { status: 404 });
+  if (!ownsOrder(order, { userId: args.userId })) throw Object.assign(new Error("You can only request a return on your own orders"), { status: 403 });
   if (!order.servedAt || !["SERVED", "COMPLETED"].includes(order.status)) throw Object.assign(new Error("Only served orders can have returns requested"), { status: 409 });
   if (Date.now() - order.servedAt.getTime() > RETURN_WINDOW_MS) throw Object.assign(new Error("Returns are only allowed within 1 hour of an order being served"), { status: 409 });
 
@@ -1361,6 +1380,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
     taxSettingsFor(tid),
   ]);
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only take payment on your own orders" }); return; }
   if (order.saleType === "COMPLIMENTARY") {
     res.status(409).json({ error: "Complimentary orders do not take payments" });
     return;
@@ -1445,6 +1465,7 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
     taxSettingsFor(tid),
   ]);
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only complete your own orders" }); return; }
   if (order.status !== "SERVED") { res.status(409).json({ error: "Only a served order can be completed" }); return; }
   if (hasPendingReturnRequests(order)) {
     res.status(409).json({ error: "Approve or reject the pending return before completing this order" });
@@ -1488,6 +1509,7 @@ posRouter.post("/orders/:id/customer", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id, tenantId: tid }, include: orderInclude });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only manage your own orders" }); return; }
   if (["CANCELLED", "PENDING_CANCELLATION"].includes(order.status)) { res.status(409).json({ error: "This order can't be changed" }); return; }
   const customer = await prisma.customer.findFirst({ where: { id: parsed.data.customerId, tenantId: tid }, select: { id: true } });
   if (!customer) { res.status(400).json({ error: "Choose a customer from this property" }); return; }
@@ -1877,11 +1899,25 @@ posRouter.get("/print-jobs/pending", async (req, res) => {
   if (!query.success) { res.status(400).json({ error: "A locationId is required" }); return; }
   const jobs = await prisma.printJob.findMany({
     where: { tenantId: tid, locationId: query.data.locationId, status: "PENDING" },
-    select: { id: true, orderId: true, createdAt: true },
+    select: { id: true, orderId: true, createdAt: true, nudgedAt: true },
     orderBy: { createdAt: "asc" },
     take: 20,
   });
   res.status(200).json({ jobs });
+});
+
+/** The requester flags a still-pending job as taking a while — surfaced to
+ * whichever device is polling /pending (the print-job indicator badge) so a
+ * stuck job is visible there instead of silently waiting on a tab that's
+ * closed, asleep, or lost its Bluetooth connection. */
+posRouter.post("/print-jobs/:id/nudge", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const updated = await prisma.printJob.updateMany({
+    where: { id: req.params.id, tenantId: tid, status: { in: ["PENDING", "CLAIMED"] } },
+    data: { nudgedAt: new Date() },
+  });
+  if (!updated.count) { res.status(409).json({ error: "This job has already finished" }); return; }
+  res.status(204).send();
 });
 
 posRouter.post("/print-jobs/:id/claim", async (req, res) => {
@@ -1920,7 +1956,7 @@ posRouter.post("/print-jobs/:id/fail", async (req, res) => {
  * of a fire-and-forget toast, without needing its own polling endpoint. */
 posRouter.get("/print-jobs/:id", async (req, res) => {
   const tid = tenantIdFor(req);
-  const job = await prisma.printJob.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, status: true, error: true } });
+  const job = await prisma.printJob.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, status: true, error: true, nudgedAt: true } });
   if (!job) { res.status(404).json({ error: "Print job not found" }); return; }
   res.status(200).json({ job });
 });
