@@ -688,11 +688,18 @@ posRouter.post("/orders/:id/items", async (req, res) => {
   const lineKey = (variantId: string | null | undefined, addons: { addonId: string }[]) =>
     `${variantId ?? ""}::${addons.map((a) => a.addonId).sort().join("|")}`;
 
+  // Once an order has moved past OPEN, kitchen/bar has already engaged with
+  // it once — adding more from here on is silent to them otherwise. Rather
+  // than merge into an already-prepared line (which would blur "how many are
+  // actually new"), each addition here becomes its own flagged row so the
+  // "Updated orders" queue shows exactly what's new, nothing more.
+  const flagAsUpdate = order.status !== "OPEN";
+
   try {
     const updated = await prisma.$transaction(async (tx) => {
       for (const line of resolvedLines) {
         const key = lineKey(line.variantId, line.addons);
-        const existing = order.items.find((row) => row.menuItemId === line.menuItemId && lineKey(row.variantId, row.addons) === key);
+        const existing = !flagAsUpdate ? order.items.find((row) => row.menuItemId === line.menuItemId && lineKey(row.variantId, row.addons) === key) : undefined;
         if (existing) {
           await tx.posOrderItem.update({ where: { id: existing.id }, data: { quantity: { increment: line.quantity } } });
           continue;
@@ -707,6 +714,7 @@ posRouter.post("/orders/:id/items", async (req, res) => {
             taxRate: line.taxRate,
             taxMode: line.taxMode,
             taxTreatment: line.taxTreatment,
+            addedAfterSend: flagAsUpdate,
             addons: { create: line.addons.map((addon) => ({ addonId: addon.addonId, quantity: addon.quantity, unitPrice: addon.unitPrice })) },
           },
         });
@@ -847,6 +855,12 @@ posRouter.patch("/orders/:id/items/:itemId", async (req, res) => {
           taxRate: resolved.taxRate,
           taxMode: resolved.taxMode,
           taxTreatment: resolved.taxTreatment,
+          // A bumped quantity on a ticket kitchen/bar already started is the
+          // same "silent change" as adding a new line — flag it so it shows
+          // in the "Updated orders" queue too. A same-or-lower quantity, or
+          // an order still OPEN, needs no flag: kitchen hasn't touched it, or
+          // there's nothing extra to prepare.
+          ...(order.status !== "OPEN" && resolved.quantity > existing.quantity ? { addedAfterSend: true } : {}),
           addons: { create: resolved.addons.map((addon) => ({ addonId: addon.addonId, quantity: addon.quantity, unitPrice: addon.unitPrice })) },
         },
       });

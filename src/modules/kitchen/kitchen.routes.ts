@@ -22,6 +22,32 @@ kitchenRouter.get("/orders", async (req, res) => {
   res.json({ orders });
 });
 
+/** Orders with at least one line added (or bumped) after kitchen/bar already
+ * engaged with the ticket once — a round added to a ticket already in
+ * PREPARING/READY, or even one already SERVED, which is otherwise silent to
+ * kitchen/bar since it doesn't touch the order's own status. Independent of
+ * the OPEN/PREPARING queue above: an order can be in both, or in this one
+ * alone once it's moved past PREPARING. */
+kitchenRouter.get("/orders/updated", async (req, res) => {
+  const orders = await prisma.posOrder.findMany({
+    where: { tenantId: tenantId(req), status: { notIn: ["CANCELLED", "COMPLETED"] }, items: { some: { addedAfterSend: true } } },
+    include: orderInclude,
+    orderBy: { updatedAt: "desc" },
+  });
+  res.json({ orders });
+});
+
+/** Acknowledges every flagged line on this order — kitchen/bar has now seen
+ * and prepared the addition. Drops the order out of the queue above; doesn't
+ * touch the order's own status, which continues as normal. */
+kitchenRouter.patch("/orders/:id/ack-updates", async (req, res) => {
+  const tid = tenantId(req);
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  await prisma.posOrderItem.updateMany({ where: { orderId: order.id, addedAfterSend: true }, data: { addedAfterSend: false } });
+  res.json({ order: await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude }) });
+});
+
 /** Claims a new ticket for preparation. */
 kitchenRouter.patch("/orders/:id/start", async (req, res) => {
   const updated = await prisma.posOrder.updateMany({ where: { id: req.params.id, tenantId: tenantId(req), status: "OPEN" }, data: { status: "PREPARING" } });

@@ -2117,6 +2117,12 @@ model PosOrderItem {
   taxRate      Decimal?            @db.Decimal(5, 2)
   taxMode      TaxMode?
   taxTreatment TaxTreatment?
+  // True when this line was added (or its quantity bumped) after the order
+  // had already moved past OPEN — kitchen/bar already engaged with the
+  // ticket once and wouldn't otherwise notice. Cleared once acknowledged
+  // (see /kitchen/orders/:id/ack-updates), which drops the order out of the
+  // "Updated orders" queue.
+  addedAfterSend Boolean           @default(false)
   createdAt    DateTime            @default(now())
   order        PosOrder            @relation(fields: [orderId], references: [id], onDelete: Cascade)
   menuItem     MenuItem?           @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
