@@ -479,6 +479,10 @@ posRouter.get("/orders", async (req, res) => {
     status: z.enum(["OPEN", "PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED", "PENDING_CANCELLATION"]).optional(),
     channel: z.enum(["FOOD", "PRODUCTS", "SERVICES"]).optional(),
     locationId: z.string().cuid().optional(),
+    // Only meaningful for someone with canSeeAllOrders — see below, an
+    // employee restricted to their own orders can't use this to browse
+    // someone else's regardless of what they pass here.
+    employeeId: z.string().cuid().optional(),
     // Cap the rows returned (most recent first) so a long-lived POS screen
     // doesn't drag in thousands of historical orders. Omitted = no cap.
     limit: z.coerce.number().int().min(1).max(500).optional(),
@@ -499,7 +503,9 @@ posRouter.get("/orders", async (req, res) => {
         ...(query.data.status ? { status: query.data.status } : {}),
         ...(query.data.channel ? { channel: query.data.channel } : {}),
         ...(effectiveLocationId ? { locationId: effectiveLocationId } : {}),
-        ...(canSeeAll ? {} : { createdBy: req.userId ?? "__unauthenticated__" }),
+        ...(canSeeAll
+          ? (query.data.employeeId ? { createdBy: query.data.employeeId } : {})
+          : { createdBy: req.userId ?? "__unauthenticated__" }),
         ...(query.data.from || query.data.to ? {
           createdAt: {
             ...(query.data.from ? { gte: query.data.from } : {}),
