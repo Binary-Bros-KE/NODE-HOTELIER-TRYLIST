@@ -9,6 +9,7 @@ import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { nextTransactionNo } from "../../lib/sequence.js";
 import { resolveEffectiveLocation, employeeLocationId } from "../../lib/location.js";
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
+import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger.js";
 
 // POS configuration, stores, and stock all remain scoped to the tenant supplied
 // by the authenticated request context (currently x-tenant-id during scaffolding).
@@ -130,7 +131,7 @@ async function resolveMenuLines(tid: string, lines: OrderLineInput[], taxDefault
     addonIds.length
       ? prisma.addon.findMany({
           where: { id: { in: addonIds }, tenantId: tid, isActive: true },
-          select: { id: true, price: true, stockProductId: true, stockQtyPerUnit: true, stockProduct: { select: { id: true, name: true } } },
+          select: { id: true, name: true, price: true, stockProductId: true, stockQtyPerUnit: true, stockProduct: { select: { id: true, name: true } } },
         })
       : Promise.resolve([]),
   ]);
@@ -657,6 +658,7 @@ posRouter.post("/orders", async (req, res) => {
       }
       if (instantServe) {
         if (orderStockLocationId) await deductStockForOrder(tx, tid, orderStockRequirements, orderStockLocationId, created.orderNumber, req);
+        await recordMenuLedger(tx, { tenantId: tid, type: created.saleType === "COMPLIMENTARY" ? "COMPLIMENTARY" : "SALE", order: created, lines: menuLedgerLinesFromItems(created.items), by: req.userId });
       }
       return created;
     });
@@ -751,6 +753,26 @@ posRouter.post("/orders/:id/items", async (req, res) => {
           };
         });
         await deductStockForOrder(tx, tid, computeStockRequirements(newItems), stockLocationId, order.orderNumber, req);
+        // Only the newly added round is a new sale — the rest was recorded when the order was served.
+        await recordMenuLedger(tx, {
+          tenantId: tid,
+          type: order.saleType === "COMPLIMENTARY" ? "COMPLIMENTARY" : "SALE",
+          order,
+          by: req.userId,
+          lines: resolvedLines.map((line) => {
+            const mi = menuItemsById.get(line.menuItemId)!;
+            const variant = line.variantId ? mi.variants.find((v) => v.id === line.variantId) ?? null : null;
+            const addons = line.addons.map((a) => ({ quantity: a.quantity, unitPrice: a.unitPrice, name: addonsById.get(a.addonId)?.name ?? "Add-on" }));
+            return {
+              menuItemId: line.menuItemId,
+              itemName: mi.name,
+              variantName: variant?.name ?? null,
+              addonsNote: addons.length ? addons.map((a) => `${a.name}${a.quantity > 1 ? ` x${a.quantity}` : ""}`).join(", ") : null,
+              quantity: line.quantity,
+              unitPrice: Number(line.unitPrice) + addons.reduce((s, a) => s + Number(a.unitPrice) * a.quantity, 0),
+            };
+          }),
+        });
       }
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
@@ -1071,6 +1093,7 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
       const claimed = await tx.posOrder.updateMany({ where: { id: activeOrder.id, status: "READY" }, data: { status: "SERVED", servedAt: new Date() } });
       if (claimed.count === 0) throw Object.assign(new Error("This order was already served"), { status: 409 });
       await deductStockForOrder(tx, tid, requirements, stockLocationId, activeOrder.orderNumber, req);
+      await recordMenuLedger(tx, { tenantId: tid, type: activeOrder.saleType === "COMPLIMENTARY" ? "COMPLIMENTARY" : "SALE", order: activeOrder, lines: menuLedgerLinesFromItems(activeOrder.items), by: req.userId });
     });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
@@ -1172,6 +1195,7 @@ posRouter.post("/orders/:id/cancel/approve", requirePermission("POS_APPROVE_CANC
           const req0 = computeStockRequirements(order.items);
           await applyStockDelta(tx, tid, stockLocationId, req0, new Map(), order.orderNumber, req);
         }
+        await recordMenuLedger(tx, { tenantId: tid, type: "RETURN", order, lines: menuLedgerLinesFromItems(order.items), note: order.cancelReason ? `Order cancelled: ${order.cancelReason}` : "Order cancelled", by: req.userId });
       }
       if (order.payments.length > 0) {
         await tx.transaction.updateMany({
@@ -1373,6 +1397,14 @@ posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CA
         const returned = computeStockRequirements([{ quantity: request.quantity, menuItem: request.orderItem.menuItem, variant: request.orderItem.variant, addons: request.orderItem.addons }]);
         await applyStockDelta(tx, tid, stockLocationId, returned, new Map(), request.order.orderNumber, req);
       }
+      await recordMenuLedger(tx, {
+        tenantId: tid,
+        type: "RETURN",
+        order: request.order,
+        lines: menuLedgerLinesFromItems([request.orderItem], () => request.quantity),
+        note: request.reason,
+        by: req.userId,
+      });
       await tx.posOrderItem.update({ where: { id: request.orderItemId }, data: { quantity: { decrement: request.quantity } } });
       await tx.posOrderReturnRequest.update({ where: { id: request.id }, data: { status: "APPROVED", decidedBy: req.userId ?? null, decidedAt: new Date(), decisionNote: parsed.data.note ?? null } });
       const order = await tx.posOrder.findUniqueOrThrow({ where: { id: request.orderId }, include: orderInclude });
