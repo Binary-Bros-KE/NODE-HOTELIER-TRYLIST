@@ -47,6 +47,7 @@ export const ALL_PERMISSIONS = [
   "POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION",
   "SHIFT_MANAGE", "ATTENDANCE_MANAGE", "SHIFT_EXEMPT",
   "REQUISITION_CREATE", "REQUISITION_APPROVE",
+  "SHIFT_REVIEW", "SALARY_MANAGE",
 ] as const;
 
 // Who raises a requisition (product + quantity only) vs. who approves it
@@ -73,7 +74,7 @@ export const SYSTEM_ROLES = [
   { name: "Barman", description: "Runs the counter — sees and serves orders waiters send in, approves returns.", allowedSections: ["OVERVIEW", "SALES"], permissions: [...BARMAN_PERMISSIONS, ...REQUISITION_RAISER_PERMISSIONS] },
   { name: "Housekeeping", description: "Room tasks and cleanliness tracking.", allowedSections: ["OVERVIEW", "HOUSEKEEPING"], permissions: [] },
   { name: "Storekeeper", description: "Inventory, stock, and supplier records.", allowedSections: ["OVERVIEW", "INVENTORY"], permissions: REQUISITION_RAISER_PERMISSIONS },
-  { name: "Accountant", description: "Finance, expenses, and reports.", allowedSections: ["OVERVIEW", "FINANCE", "REPORTS"], permissions: REQUISITION_APPROVER_PERMISSIONS },
+  { name: "Accountant", description: "Finance, expenses, and reports.", allowedSections: ["OVERVIEW", "FINANCE", "REPORTS"], permissions: [...REQUISITION_APPROVER_PERMISSIONS, "SHIFT_REVIEW", "SALARY_MANAGE"] },
 ] as const;
 
 const SYSTEM_PAYMENT_METHODS = [

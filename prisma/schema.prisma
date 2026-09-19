@@ -233,6 +233,12 @@ enum Permission {
   // convert an approved one into a Purchase. Deliberately one permission —
   // whoever can approve is trusted to also place the order.
   REQUISITION_APPROVE
+  // Edit a shift's outcome after the fact: flip cleared <-> rejected, record
+  // a cash discrepancy (amount + notes) and the reason. HR / payroll-minded.
+  SHIFT_REVIEW
+  // Record a deduction/allowance against an employee's monthly salary
+  // (including from a shift discrepancy) and complete salaries.
+  SALARY_MANAGE
 }
 
 enum ShiftSessionStatus {
@@ -2421,6 +2427,13 @@ model ShiftSession {
   // handover, at end-shift review time: positive = over, negative = short.
   // Null means it was never counted (no discrepancy noted either way).
   cashVariance       Decimal?           @db.Decimal(12, 2)
+  // What happened, when there's a discrepancy (or why it's not one).
+  varianceNote       String?
+  // Last edit of the outcome after the fact (SHIFT_REVIEW): who, when, and
+  // why the status/discrepancy was changed. Null = never re-reviewed.
+  reviewedBy         String?
+  reviewedAt         DateTime?
+  reviewReason       String?
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
@@ -2440,6 +2453,10 @@ model EmployeeSalary {
   basicSalary       Decimal              @default(0) @db.Decimal(12, 2)
   grossPay          Decimal              @default(0) @db.Decimal(12, 2)
   totalAllowances   Decimal              @default(0) @db.Decimal(12, 2)
+  // Deductions that exceeded gross pay and were pushed onto next month's
+  // draft instead. totalDeductions is what was actually applied this month
+  // (sum of DEDUCTION items minus this), so netPay never goes negative.
+  carriedOverAmount Decimal              @default(0) @db.Decimal(12, 2)
   totalDeductions   Decimal              @default(0) @db.Decimal(12, 2)
   netPay            Decimal              @default(0) @db.Decimal(12, 2)
   paymentMethod     EmployeePaymentMethod?
@@ -2469,9 +2486,16 @@ model EmployeeSalaryItem {
   type      EmployeeSalaryItemType
   label     String
   amount    Decimal                @db.Decimal(12, 2)
+  // Plain ids (no relation, same convention as PosOrder.createdBy): the
+  // shift whose discrepancy produced this line, or the salary whose excess
+  // deductions this line carries in. Both let the line be found again
+  // (edit-in-place, undo) instead of duplicated.
+  shiftSessionId       String?
+  carriedFromSalaryId  String?
   createdAt DateTime               @default(now())
 
   @@index([salaryId])
+  @@index([shiftSessionId])
 }
 
 // A named work-hours window (e.g. "Day Shift" 06:00-14:00, "Night Shift"

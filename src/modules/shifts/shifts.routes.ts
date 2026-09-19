@@ -33,7 +33,13 @@ const approvalSchema = z.object({
 // requests never touch money, so this input is end-approval only.
 const endApprovalSchema = approvalSchema.extend({
   cashVariance: z.coerce.number().min(-1_000_000).max(1_000_000).optional(),
+  varianceNote: z.string().trim().max(500).optional(),
 });
+// A non-zero variance is a claim that something is wrong — it needs an
+// explanation on the record. Zero/absent means the shift is simply cleared.
+const varianceNeedsNote = (v: { cashVariance?: number; varianceNote?: string }) =>
+  Math.abs(v.cashVariance ?? 0) < 0.005 || Boolean(v.varianceNote);
+const VARIANCE_NOTE_ERROR = "Add a note explaining the discrepancy";
 
 const localDate = (date: Date) => new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
 
@@ -354,13 +360,17 @@ shiftsRouter.post("/:id/end-approval", async (req, res, next) => {
     const approver = await assertCanApprove(tid, req.userId, session);
     const summary = await shiftSummary(tid, session.employeeId, session.approvedStartAt, session.requestedEndAt);
     if (summary.pendingOrders > 0) { res.status(409).json({ error: "This employee still has pending sales" }); return; }
-    const cashVariance = data.data.cashVariance ?? null;
+    if (!varianceNeedsNote(data.data)) { res.status(400).json({ error: VARIANCE_NOTE_ERROR }); return; }
+    const flagged = Math.abs(data.data.cashVariance ?? 0) >= 0.005;
+    // Cleared = nothing wrong: no variance, no note stored.
+    const cashVariance = flagged ? data.data.cashVariance ?? null : null;
+    const varianceNote = flagged ? data.data.varianceNote ?? null : null;
     const updated = await prisma.$transaction(async (tx) => {
       const row = await tx.shiftSession.update({
         where: { id: session.id },
         data: data.data.action === "APPROVE"
-          ? { status: "ENDED", approvedEndAt: new Date(), endApprovedBy: approver.id, rejectionReason: null, cashVariance }
-          : { status: "REJECTED_END", rejectionReason: data.data.note ?? null, cashVariance },
+          ? { status: "ENDED", approvedEndAt: new Date(), endApprovedBy: approver.id, rejectionReason: null, cashVariance, varianceNote }
+          : { status: "REJECTED_END", rejectionReason: data.data.note ?? null, cashVariance, varianceNote },
         include: shiftInclude,
       });
       if (data.data.action === "APPROVE") {
@@ -373,6 +383,59 @@ shiftsRouter.post("/:id/end-approval", async (req, res, next) => {
       return row;
     });
     res.json({ session: updated, summary });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    next(error);
+  }
+});
+
+// Edit the outcome of a shift that was already decided (cleared or
+// rejected): flip the status, and record/replace the cash discrepancy. Needs
+// SHIFT_REVIEW rather than being the employee's supervisor — this is the HR /
+// payroll correction path, not the live handover.
+const reviewSchema = z.object({
+  status: z.enum(["ENDED", "REJECTED_END"]),
+  reason: z.string().trim().min(3, "Give a reason for the change").max(500),
+  cashVariance: z.coerce.number().min(-1_000_000).max(1_000_000).optional(),
+  varianceNote: z.string().trim().max(500).optional(),
+});
+
+shiftsRouter.patch("/:id/review", requirePermission("SHIFT_REVIEW"), async (req, res, next) => {
+  const tid = tenantId(req);
+  const data = reviewSchema.safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: data.error.issues[0]?.message ?? "Invalid review", details: data.error.flatten() }); return; }
+  try {
+    const session = await prisma.shiftSession.findFirst({ where: { id: req.params.id as string, tenantId: tid, status: { in: ["ENDED", "REJECTED_END"] } }, include: shiftInclude });
+    if (!session) { res.status(404).json({ error: "Only a cleared or rejected shift can be reviewed" }); return; }
+    if (!varianceNeedsNote(data.data)) { res.status(400).json({ error: VARIANCE_NOTE_ERROR }); return; }
+    const flagged = Math.abs(data.data.cashVariance ?? 0) >= 0.005;
+    const now = new Date();
+    const cleared = data.data.status === "ENDED";
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.shiftSession.update({
+        where: { id: session.id },
+        data: {
+          status: data.data.status,
+          // A shift that becomes cleared needs an end time to report against.
+          ...(cleared ? { approvedEndAt: session.approvedEndAt ?? session.requestedEndAt ?? now, endApprovedBy: req.userId ?? null, rejectionReason: null } : { rejectionReason: data.data.reason }),
+          cashVariance: flagged ? data.data.cashVariance ?? null : null,
+          varianceNote: flagged ? data.data.varianceNote ?? null : null,
+          reviewedBy: req.userId ?? null,
+          reviewedAt: now,
+          reviewReason: data.data.reason,
+        },
+        include: shiftInclude,
+      });
+      if (cleared && session.approvedStartAt) {
+        await tx.attendanceRecord.upsert({
+          where: { employeeId_date: { employeeId: session.employeeId, date: localDate(session.approvedStartAt) } },
+          create: { tenantId: tid, employeeId: session.employeeId, date: localDate(session.approvedStartAt), status: "PRESENT", notes: "Marked automatically from approved shift.", markedBy: req.userId },
+          update: {},
+        });
+      }
+      return row;
+    });
+    res.json({ session: updated });
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     next(error);

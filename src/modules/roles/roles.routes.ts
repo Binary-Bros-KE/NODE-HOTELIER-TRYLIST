@@ -13,6 +13,7 @@ const permissions = [
   "POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION",
   "SHIFT_MANAGE", "ATTENDANCE_MANAGE", "SHIFT_EXEMPT",
   "REQUISITION_CREATE", "REQUISITION_APPROVE",
+  "SHIFT_REVIEW", "SALARY_MANAGE",
 ] as const;
 
 const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
