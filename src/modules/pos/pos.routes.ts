@@ -1095,8 +1095,10 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
       if (claimed.count === 0) throw Object.assign(new Error("This order was already served"), { status: 409 });
       await deductStockForOrder(tx, tid, requirements, stockLocationId, activeOrder.orderNumber, req);
       await recordMenuLedger(tx, { tenantId: tid, type: activeOrder.saleType === "COMPLIMENTARY" ? "COMPLIMENTARY" : "SALE", order: activeOrder, lines: menuLedgerLinesFromItems(activeOrder.items), by: req.userId });
-      // Served: tidy identical rounds into one line. Lines still flagged as
-      // freshly added stay separate until the bar acknowledges them.
+      // Serving hands over every line, including any round added after the
+      // order was sent — so the "updated" flags are done with. Then tidy
+      // identical rounds into one line.
+      await tx.posOrderItem.updateMany({ where: { orderId: activeOrder.id, addedAfterSend: true }, data: { addedAfterSend: false } });
       await mergeDuplicateOrderLines(tx, activeOrder.id, { includeFlagged: false });
     });
   } catch (error) {
@@ -1106,6 +1108,31 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
   }
 
   res.status(200).json({ order: withFinancials(await prisma.posOrder.findUniqueOrThrow({ where: { id: activeOrder.id }, include: orderInclude }), tax) });
+});
+
+/** The counter/bar (or kitchen, or whoever hands things over) confirms the
+ * lines added after the order was sent have been prepared and handed over —
+ * clears the "updated" flags and folds identical lines together. This is the
+ * POS-side twin of PATCH /kitchen/orders/:id/ack-updates, which needs the
+ * Kitchen module a bar-only tenant doesn't have. At a Counter-mode location
+ * it's gated to POS_APPROVE_COUNTER, same as serving there. */
+posRouter.patch("/orders/:id/ack-updates", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid, status: { notIn: ["COMPLETED", "CANCELLED"] } }, include: { location: { select: { serveMode: true } } } });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (order.location?.serveMode === "COUNTER" && !(await hasPermission(tid, req.userId, "POS_APPROVE_COUNTER"))) {
+    res.status(403).json({ error: "You don't have permission to confirm counter orders" });
+    return;
+  }
+  await prisma.$transaction(async (tx) => {
+    await tx.posOrderItem.updateMany({ where: { orderId: order.id, addedAfterSend: true }, data: { addedAfterSend: false } });
+    await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: false });
+  });
+  const [updated, tax] = await Promise.all([
+    prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude }),
+    taxSettingsFor(tid),
+  ]);
+  res.status(200).json({ order: withFinancials(updated, tax) });
 });
 
 posRouter.delete("/orders/:id/revert", async (req, res) => {
