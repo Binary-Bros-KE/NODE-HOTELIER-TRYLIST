@@ -1155,19 +1155,29 @@ posRouter.patch("/orders/:id/cancel", async (req, res) => {
     res.status(409).json({ error: "Returns are only allowed within 1 hour of an order being served" });
     return;
   }
-  const updated = await prisma.posOrder.update({
-    where: { id: existing.id },
-    data: {
-      status: "PENDING_CANCELLATION",
-      statusBeforeCancel: existing.status,
-      cancelReason: parsed.data.reason,
-      cancelRequestedBy: req.userId ?? null,
-      cancelRequestedAt: new Date(),
-      cancelDecidedBy: null,
-      cancelDecidedAt: null,
-      cancelDecisionNote: null,
-    },
-    include: orderInclude,
+  const now = new Date();
+  const updated = await prisma.$transaction(async (tx) => {
+    // A whole-order return replaces any item-level returns still waiting —
+    // otherwise the approvers would see the same order twice, deciding two
+    // overlapping requests.
+    await tx.posOrderReturnRequest.updateMany({
+      where: { orderId: existing.id, status: "PENDING" },
+      data: { status: "REJECTED", decidedBy: req.userId ?? null, decidedAt: now, decisionNote: "Replaced by a request to return the whole order" },
+    });
+    return tx.posOrder.update({
+      where: { id: existing.id },
+      data: {
+        status: "PENDING_CANCELLATION",
+        statusBeforeCancel: existing.status,
+        cancelReason: parsed.data.reason,
+        cancelRequestedBy: req.userId ?? null,
+        cancelRequestedAt: now,
+        cancelDecidedBy: null,
+        cancelDecidedAt: null,
+        cancelDecisionNote: null,
+      },
+      include: orderInclude,
+    });
   });
   const tax = await taxSettingsFor(tid);
   res.status(200).json({ order: withFinancials(updated, tax) });
@@ -1207,6 +1217,13 @@ posRouter.post("/orders/:id/cancel/approve", requirePermission("POS_APPROVE_CANC
       if (creditCustomerId) {
         await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: creditCustomerId, status: "CANCELLED", paid: 0, total: 0, by: req.userId });
       }
+      // Item-level returns still pending on an order that's now cancelled in
+      // full have nothing left to decide — close them instead of leaving them
+      // stranded in Approvals.
+      await tx.posOrderReturnRequest.updateMany({
+        where: { orderId: order.id, status: "PENDING" },
+        data: { status: "REJECTED", decidedBy: req.userId ?? null, decidedAt: new Date(), decisionNote: "Order was returned in full" },
+      });
       await tx.posOrder.update({ where: { id: order.id }, data: { status: "CANCELLED", cancelDecidedBy: req.userId ?? null, cancelDecidedAt: new Date() } });
       if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
@@ -1379,6 +1396,7 @@ posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CA
   });
   if (!request) { res.status(404).json({ error: "Return request not found" }); return; }
   if (request.status !== "PENDING") { res.status(409).json({ error: "This return request has already been decided" }); return; }
+  if (request.order.status === "PENDING_CANCELLATION") { res.status(409).json({ error: "This order has a full return waiting for a decision — decide that one instead" }); return; }
   if (!request.order.servedAt) { res.status(409).json({ error: "This order has not been served" }); return; }
   const pendingOnOrder = await prisma.posOrderReturnRequest.aggregate({
     where: { tenantId: tid, orderId: request.orderId, status: "PENDING" },
