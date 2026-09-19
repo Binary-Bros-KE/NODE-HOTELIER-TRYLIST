@@ -310,7 +310,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
     complimentaryCogs = round2(complimentaryCogs);
     creditGiven = round2(creditGiven);
 
-    const topItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).slice(0, 10).map((i) => ({ ...i, revenue: round2(i.revenue) }));
+    const soldItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).map((i) => ({ ...i, revenue: round2(i.revenue) }));
+    const topItems = soldItems.slice(0, 10);
     const taxBreakdown = [...taxBuckets.values()].map((b) => ({ ...b, net: round2(b.net), tax: round2(b.tax), gross: round2(b.gross) })).sort((a, b) => b.gross - a.gross);
 
     // ---- Expenses ----
@@ -492,6 +493,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         netImpact: round2(s.guestRevenue - s.guestCogs - s.complimentaryCogs),
       })).sort((a, b) => b.netImpact - a.netImpact),
       topItems,
+      soldItems,
       expensesByCategory,
       purchasesBySupplier,
       trend,
