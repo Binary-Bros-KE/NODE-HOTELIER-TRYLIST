@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
+import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
 
 export const kitchenRouter = Router();
 kitchenRouter.use(requireModule("KITCHEN"));
@@ -44,7 +45,12 @@ kitchenRouter.patch("/orders/:id/ack-updates", async (req, res) => {
   const tid = tenantId(req);
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
-  await prisma.posOrderItem.updateMany({ where: { orderId: order.id, addedAfterSend: true }, data: { addedAfterSend: false } });
+  await prisma.$transaction(async (tx) => {
+    await tx.posOrderItem.updateMany({ where: { orderId: order.id, addedAfterSend: true }, data: { addedAfterSend: false } });
+    // Acknowledged: the bar has seen the additions, so fold identical lines
+    // together (5 x White Cap, not 1 + 1 + 1 + 2) to keep the bill short.
+    await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: false });
+  });
   res.json({ order: await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude }) });
 });
 

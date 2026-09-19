@@ -10,6 +10,7 @@ import { nextTransactionNo } from "../../lib/sequence.js";
 import { resolveEffectiveLocation, employeeLocationId } from "../../lib/location.js";
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
 import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger.js";
+import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
 
 // POS configuration, stores, and stock all remain scoped to the tenant supplied
 // by the authenticated request context (currently x-tenant-id during scaffolding).
@@ -1094,6 +1095,9 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
       if (claimed.count === 0) throw Object.assign(new Error("This order was already served"), { status: 409 });
       await deductStockForOrder(tx, tid, requirements, stockLocationId, activeOrder.orderNumber, req);
       await recordMenuLedger(tx, { tenantId: tid, type: activeOrder.saleType === "COMPLIMENTARY" ? "COMPLIMENTARY" : "SALE", order: activeOrder, lines: menuLedgerLinesFromItems(activeOrder.items), by: req.userId });
+      // Served: tidy identical rounds into one line. Lines still flagged as
+      // freshly added stay separate until the bar acknowledges them.
+      await mergeDuplicateOrderLines(tx, activeOrder.id, { includeFlagged: false });
     });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
@@ -1494,6 +1498,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
         const newStatus = order.status === "SERVED" && paidSoFar >= total - 0.01 ? "COMPLETED" : order.status;
         await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(paidSoFar, total) } });
         if (newStatus === "COMPLETED" && order.status === "SERVED" && order.tableId) await releaseTableIfIdle(tx, order.tableId);
+        if (newStatus === "COMPLETED") await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
         await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId ?? reservation!.customerId ?? null, status: newStatus, paid: paidSoFar, total, by: req.userId });
         return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
       });
@@ -1522,6 +1527,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
         const newStatus = order.status === "SERVED" && paidSoFar >= total - 0.01 ? "COMPLETED" : order.status;
         await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(paidSoFar, total) } });
         if (newStatus === "COMPLETED" && order.status === "SERVED" && order.tableId) await releaseTableIfIdle(tx, order.tableId);
+        if (newStatus === "COMPLETED") await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
         await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: custId, status: newStatus, paid: paidSoFar, total, by: req.userId });
         return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
       });
@@ -1575,6 +1581,7 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
       },
     });
     if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
+    await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
     await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId, status: "COMPLETED", paid, total, by: req.userId });
     return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
   });
