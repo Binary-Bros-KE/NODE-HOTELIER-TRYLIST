@@ -466,6 +466,16 @@ function ownsOrder(order: { createdBy: string | null }, req: { userId?: string }
   return !order.createdBy || order.createdBy === req.userId;
 }
 
+/** Super Admin is the one role that may reverse a bill it didn't ring up, or
+ * one past the waiters' return window — for the genuine mistake nobody else
+ * can fix. Used only by the cancel/return-request paths; it still goes
+ * through normal approval, so stock and payments are unwound the same way. */
+async function isSuperAdminUser(tid: string, userId: string | undefined): Promise<boolean> {
+  if (!userId) return false;
+  const employee = await prisma.employee.findFirst({ where: { id: userId, tenantId: tid, status: "ACTIVE" }, select: { role: { select: { name: true } } } });
+  return employee?.role?.name === "Super Admin";
+}
+
 // A fixed-location employee only ever sees their own location's orders; a
 // floating one (a manager) sees everything by default — unlike ringing up a
 // live sale, browsing order history isn't blocked by an unclear location, so
@@ -1114,10 +1124,11 @@ posRouter.patch("/orders/:id/cancel", async (req, res) => {
   const tid = tenantIdFor(req);
   const existing = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid } });
   if (!existing) { res.status(404).json({ error: "Order not found" }); return; }
-  if (!ownsOrder(existing, req)) { res.status(403).json({ error: "You can only cancel your own orders" }); return; }
+  const superAdmin = await isSuperAdminUser(tid, req.userId);
+  if (!superAdmin && !ownsOrder(existing, req)) { res.status(403).json({ error: "You can only cancel your own orders" }); return; }
   if (existing.status === "PENDING_CANCELLATION") { res.status(409).json({ error: "This order is already waiting for a cancellation decision" }); return; }
   if (existing.status === "CANCELLED") { res.status(409).json({ error: "This order is already cancelled" }); return; }
-  if (existing.servedAt && Date.now() - existing.servedAt.getTime() > RETURN_WINDOW_MS) {
+  if (!superAdmin && existing.servedAt && Date.now() - existing.servedAt.getTime() > RETURN_WINDOW_MS) {
     res.status(409).json({ error: "Returns are only allowed within 1 hour of an order being served" });
     return;
   }
@@ -1247,9 +1258,10 @@ async function createReturnRequestsForOrder(args: {
 }) {
   const order = await prisma.posOrder.findFirst({ where: { id: args.orderId, tenantId: args.tenantId }, include: orderInclude });
   if (!order) throw Object.assign(new Error("Order not found"), { status: 404 });
-  if (!ownsOrder(order, { userId: args.userId })) throw Object.assign(new Error("You can only request a return on your own orders"), { status: 403 });
+  const superAdmin = await isSuperAdminUser(args.tenantId, args.userId);
+  if (!superAdmin && !ownsOrder(order, { userId: args.userId })) throw Object.assign(new Error("You can only request a return on your own orders"), { status: 403 });
   if (!order.servedAt || !["SERVED", "COMPLETED"].includes(order.status)) throw Object.assign(new Error("Only served orders can have returns requested"), { status: 409 });
-  if (Date.now() - order.servedAt.getTime() > RETURN_WINDOW_MS) throw Object.assign(new Error("Returns are only allowed within 1 hour of an order being served"), { status: 409 });
+  if (!superAdmin && Date.now() - order.servedAt.getTime() > RETURN_WINDOW_MS) throw Object.assign(new Error("Returns are only allowed within 1 hour of an order being served"), { status: 409 });
 
   const requestedByItem = new Map<string, number>();
   for (const item of args.items) requestedByItem.set(item.orderItemId, (requestedByItem.get(item.orderItemId) ?? 0) + item.quantity);
