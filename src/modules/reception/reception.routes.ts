@@ -9,6 +9,7 @@ import { resolveActorLocationWithHint } from "../../lib/location.js";
 import { resolveRoomCharge, type RoomCharge } from "../../lib/roomCharge.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { applyCustomerBalance, folioCreditOutstanding } from "../../lib/customerCredit.js";
+import { createRoomTask } from "../../lib/housekeeping.js";
 
 export const receptionRouter = Router();
 receptionRouter.use(requireModule("RESERVATIONS"));
@@ -221,10 +222,10 @@ function folioTotals(folio: { lineItems: { amount: unknown; quantity: number }[]
   return { charges, paid, balance: charges - paid };
 }
 
-async function freeRoom(tx: Prisma.TransactionClient, tenantId: string, roomId: string, customerName: string, reason: string) {
-  await tx.room.update({ where: { id: roomId }, data: { status: "VACANT", cleanliness: "DIRTY" } });
-  const activeTask = await tx.housekeepingTask.findFirst({ where: { roomId, status: { in: ["PENDING", "IN_PROGRESS"] }, type: "CLEANING" } });
-  if (!activeTask) await tx.housekeepingTask.create({ data: { tenantId, roomId, type: "CLEANING", notes: `Automatic turnover after ${customerName} ${reason}` } });
+// Checkout frees the room and opens an unassigned turnover task for the housekeeping supervisor.
+async function freeRoom(tx: Prisma.TransactionClient, tenantId: string, roomId: string, customerName: string, reason: string, reservationId: string, actor?: { id: string; name: string } | null) {
+  await tx.room.update({ where: { id: roomId }, data: { status: "VACANT" } });
+  await createRoomTask(tx, { tenantId, roomId, source: "CHECKOUT", reservationId, notes: `Turnover after ${customerName} ${reason}`, actor });
 }
 
 receptionRouter.get("/reservations", async (req, res) => {
@@ -477,7 +478,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
       await applyCustomerBalance(tx, { tenantId: tid, customerId: current.customerId, folioId: current.folio!.id, delta: onCredit, type: "CREDIT", note: `Stay ${current.reservationNo} checked out on credit`, by: req.userId });
     }
     await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_OUT", updatedBy: req.userId } });
-    await freeRoom(tx, tid, current.roomId, `${current.customer.firstName} ${current.customer.lastName}`, "checked out");
+    await freeRoom(tx, tid, current.roomId, `${current.customer.firstName} ${current.customer.lastName}`, "checked out", current.id);
     await logActivity(tx, tid, current.id, "CHECKED_OUT", onCredit > 0.01 ? `Checked out on credit (${onCredit.toFixed(2)} owing)` : "Checked out", actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
@@ -1029,7 +1030,7 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
           await applyCustomerBalance(tx, { tenantId: tid, customerId: group.customerId, folioId: reservation.folio!.id, delta: credit, type: "CREDIT", note: `Group ${group.groupNo} — stay ${reservation.reservationNo} checked out on credit`, by: req.userId });
         }
         await tx.reservation.update({ where: { id: reservation.id }, data: { status: "CHECKED_OUT", updatedBy: req.userId } });
-        await freeRoom(tx, tid, reservation.roomId, `${reservation.customer.firstName} ${reservation.customer.lastName}`, "checked out with the group");
+        await freeRoom(tx, tid, reservation.roomId, `${reservation.customer.firstName} ${reservation.customer.lastName}`, "checked out with the group", reservation.id);
         await logActivity(tx, tid, reservation.id, "CHECKED_OUT", onCredit ? `Checked out with the group on credit (${credit.toFixed(2)} owing)` : "Checked out with the group", actor);
       }
     }, GROUP_TX);

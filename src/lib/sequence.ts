@@ -44,6 +44,10 @@ export async function nextLostFoundNo(tenantId: string): Promise<string> {
   return nextSequenceNo(tenantId, "lostfound", "LF", 6);
 }
 
+export async function nextHousekeepingTaskNo(tenantId: string): Promise<string> {
+  return nextSequenceNo(tenantId, "housekeeping", "HK", 6);
+}
+
 export async function nextAssetNo(tenantId: string): Promise<string> {
   return nextSequenceNo(tenantId, "asset", "AST", 6);
 }

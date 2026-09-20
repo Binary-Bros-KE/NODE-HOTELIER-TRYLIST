@@ -1,3 +1,4 @@
+import { completeOpenCleaningTasks, createRoomTask, loadActor } from "../../lib/housekeeping.js";
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
@@ -254,14 +255,19 @@ roomsRouter.patch("/rooms/:id", async (req, res, next) => {
   const tid = tenantId(req);
   try {
     if (parsed.data.roomTypeId) await assertActiveRoomType(parsed.data.roomTypeId, tid);
-    const updated = await prisma.room.updateMany({
-      where: { id: req.params.id, tenantId: tid },
-      data: { ...parsed.data, updatedBy: req.userId },
-    });
-    if (!updated.count) {
+    const before = await prisma.room.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { cleanliness: true } });
+    if (!before) {
       res.status(404).json({ error: "Room not found" });
       return;
     }
+    const actor = parsed.data.cleanliness && parsed.data.cleanliness !== before.cleanliness ? await loadActor(tid, req.userId) : null;
+    // Housekeeping tasks and room cleanliness must agree: a manual dirty flip
+    // opens a cleaning task, a manual clean flip closes the open one.
+    await prisma.$transaction(async (tx) => {
+      await tx.room.updateMany({ where: { id: req.params.id, tenantId: tid }, data: { ...parsed.data, updatedBy: req.userId } });
+      if (actor && parsed.data.cleanliness === "DIRTY") await createRoomTask(tx, { tenantId: tid, roomId: req.params.id, source: "ROOM_STATUS", notes: `Marked dirty by ${actor.name}`, actor });
+      if (actor && parsed.data.cleanliness === "CLEAN") await completeOpenCleaningTasks(tx, tid, req.params.id, actor);
+    });
     res.status(200).json({
       room: await prisma.room.findUniqueOrThrow({
         where: { id: req.params.id },
