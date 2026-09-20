@@ -389,6 +389,48 @@ shiftsRouter.post("/:id/end-approval", async (req, res, next) => {
   }
 });
 
+// A supervisor / Super Admin closing someone's shift outright — for staff who
+// forgot (or can't) request their own end. Skips the handover request step
+// but keeps the same rule that active sales must be settled first.
+shiftsRouter.post("/:id/force-end", async (req, res, next) => {
+  const tid = tenantId(req);
+  const data = noteSchema.safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: "Invalid request", details: data.error.flatten() }); return; }
+  try {
+    const session = await prisma.shiftSession.findFirst({ where: { id: req.params.id, tenantId: tid, status: { in: ["ACTIVE", "REQUESTED_END"] } }, include: shiftInclude });
+    if (!session?.approvedStartAt) { res.status(404).json({ error: "No active shift found" }); return; }
+    const approver = await assertCanApprove(tid, req.userId, session);
+    if (session.employeeId === approver.id) { res.status(400).json({ error: "Use End shift on your own shift card" }); return; }
+    const pendingOrders = await prisma.posOrder.count({ where: { tenantId: tid, createdBy: session.employeeId, status: { in: [...ACTIVE_ORDER_STATUSES] } } });
+    if (pendingOrders > 0) { res.status(409).json({ error: `${pendingOrders} active sale${pendingOrders === 1 ? "" : "s"} must be completed first.` }); return; }
+    const now = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.shiftSession.update({
+        where: { id: session.id },
+        data: {
+          status: "ENDED",
+          requestedEndAt: session.requestedEndAt ?? now,
+          approvedEndAt: now,
+          endApprovedBy: approver.id,
+          endNote: data.data.note ?? "Ended by supervisor",
+          rejectionReason: null,
+        },
+        include: shiftInclude,
+      });
+      await tx.attendanceRecord.upsert({
+        where: { employeeId_date: { employeeId: session.employeeId, date: localDate(session.approvedStartAt!) } },
+        create: { tenantId: tid, employeeId: session.employeeId, date: localDate(session.approvedStartAt!), status: "PRESENT", notes: "Marked automatically from approved shift.", markedBy: approver.id },
+        update: { status: "PRESENT", notes: "Marked automatically from approved shift.", markedBy: approver.id },
+      });
+      return row;
+    });
+    res.json({ session: updated, summary: await shiftSummary(tid, session.employeeId, session.approvedStartAt, now) });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    next(error);
+  }
+});
+
 // Edit the outcome of a shift that was already decided (cleared or
 // rejected): flip the status, and record/replace the cash discrepancy. Needs
 // SHIFT_REVIEW rather than being the employee's supervisor — this is the HR /
@@ -457,6 +499,9 @@ const sessionsQuerySchema = z.object({
     z.union([shiftStatusEnum, z.array(shiftStatusEnum)]),
   ).optional(),
   take: z.coerce.number().int().min(1).max(200).optional(),
+  // The dashboard's recent list shows sales/collected per row — opt-in so
+  // long report-style lists don't pay for it.
+  withSummary: z.enum(["true", "false"]).optional(),
 });
 
 shiftsRouter.get("/sessions", async (req, res, next) => {
@@ -481,6 +526,14 @@ shiftsRouter.get("/sessions", async (req, res, next) => {
       orderBy: { requestedStartAt: "desc" },
       ...(query.data.take ? { take: query.data.take } : {}),
     });
+    if (query.data.withSummary === "true") {
+      const enriched = await Promise.all(sessions.map(async (s) => {
+        const end = s.approvedEndAt ?? s.requestedEndAt;
+        return { ...s, summary: s.approvedStartAt && end ? await shiftSummary(tid, s.employeeId, s.approvedStartAt, end) : null };
+      }));
+      res.json({ sessions: enriched });
+      return;
+    }
     res.json({ sessions });
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
