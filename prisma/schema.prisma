@@ -777,6 +777,15 @@ model Reservation {
   folio              Folio?
   additionalGuests   ReservationGuest[]
   activities         ReservationActivity[]
+  // How the room is being sold: normally PAID; COMPLIMENTARY when it's given
+  // to the guest free (its value is still shown on the folio, then written
+  // off by a matching discount line). A discount — a percentage of the room
+  // charges, or a fixed amount off the whole stay — applies to PAID rooms.
+  roomSaleType        RoomSaleType          @default(PAID)
+  complimentaryReason String?
+  discountType        RoomDiscountType?
+  discountValue       Decimal               @default(0) @db.Decimal(12, 2)
+  discountReason      String?
 
   @@unique([tenantId, reservationNo])
   @@index([tenantId, checkIn, checkOut])
@@ -812,6 +821,8 @@ enum ReservationActivityAction {
   CANCELLED
   NO_SHOW
   CHECKED_OUT
+  ROOM_TERMS_CHANGED
+  CREDIT_PAYMENT
 }
 
 // Append-only timeline of who did what to a reservation, and where — a
@@ -846,6 +857,13 @@ model Folio {
   folioNo       String
   reservationId String          @unique
   status        FolioStatus     @default(OPEN)
+  // Set when the stay was checked out with a balance left unpaid: what was
+  // left, why, and when it's expected. The customer's balance carries the
+  // amount (CustomerCreditEntry rows with this folioId), same mechanism as a
+  // POS order completed on credit.
+  creditAmount     Decimal      @default(0) @db.Decimal(12, 2)
+  creditReason     String?
+  creditExpectedAt DateTime?
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
   tenant        Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -856,11 +874,23 @@ model Folio {
   @@unique([tenantId, folioNo])
 }
 
+enum RoomSaleType {
+  PAID
+  COMPLIMENTARY
+}
+
+enum RoomDiscountType {
+  PERCENT
+  AMOUNT
+}
+
 enum FolioLineSource {
   ROOM
   SERVICE
   POS_ORDER
   AD_HOC
+  // Negative line: a room discount or a complimentary room's write-off.
+  DISCOUNT
 }
 
 model FolioLineItem {
@@ -2011,6 +2041,8 @@ model CustomerCreditEntry {
   tenantId     String
   customerId   String
   orderId      String?
+  // The folio (room stay) this credit came from, when it wasn't a POS order.
+  folioId      String?
   type         CustomerCreditType @default(CREDIT)
   amount       Decimal            @db.Decimal(12, 2)
   balanceAfter Decimal            @db.Decimal(12, 2)
@@ -2023,6 +2055,7 @@ model CustomerCreditEntry {
 
   @@index([tenantId, customerId, createdAt])
   @@index([orderId])
+  @@index([folioId])
 }
 
 enum PlanBillingType {

@@ -7,6 +7,7 @@ import { requireModule } from "../../middleware/tenantContext.js";
 import { nextCustomerNo, nextReservationNo, nextFolioNo, nextTransactionNo } from "../../lib/sequence.js";
 import { resolveActorLocationWithHint } from "../../lib/location.js";
 import { partialNoDefaults } from "../../lib/zod.js";
+import { applyCustomerBalance, folioCreditOutstanding } from "../../lib/customerCredit.js";
 
 export const receptionRouter = Router();
 receptionRouter.use(requireModule("RESERVATIONS"));
@@ -28,6 +29,19 @@ const MEAL_PLAN_LABELS: Record<(typeof MEAL_PLANS)[number], string> = {
 const CUSTOMER_TYPES = ["PERSONAL", "BUSINESS"] as const;
 const customerSchema = z.object({ customerType: z.enum(CUSTOMER_TYPES).default("PERSONAL"), firstName: z.string().trim().min(1), lastName: z.string().trim().min(1).optional(), email: z.email().optional(), phone: z.string().trim().min(5).max(30) });
 
+// How a room is sold. PAID is the default; COMPLIMENTARY gives the room free
+// (its value stays on the folio, written off by a matching discount line). A
+// discount is either a percentage of the room charges or a fixed amount off
+// the whole stay.
+const roomTermsFields = {
+  roomSaleType: z.enum(["PAID", "COMPLIMENTARY"]).default("PAID"),
+  complimentaryReason: optionalText(255),
+  discountType: z.preprocess(blankToUndefined, z.enum(["PERCENT", "AMOUNT"]).optional()),
+  discountValue: z.preprocess(blankToUndefined, z.coerce.number().min(0).default(0)),
+  discountReason: optionalText(255),
+};
+const roomTermsSchema = z.object(roomTermsFields).refine((v) => v.discountType !== "PERCENT" || v.discountValue <= 100, { message: "A percentage discount can't exceed 100%", path: ["discountValue"] });
+
 const reservationCreateFields = z.object({
   customerId: z.string().cuid(),
   roomId: z.string().cuid(),
@@ -41,8 +55,11 @@ const reservationCreateFields = z.object({
   notes: optionalText(500),
   // Walk-ins submit CHECKED_IN directly to skip the Pending→Confirmed hop.
   status: z.enum(["PENDING", "CONFIRMED", "CHECKED_IN"]).default("PENDING"),
+  ...roomTermsFields,
 });
-const reservationSchema = reservationCreateFields.refine((v) => v.checkOut > v.checkIn, { message: "Check-out must be after check-in", path: ["checkOut"] });
+const reservationSchema = reservationCreateFields
+  .refine((v) => v.checkOut > v.checkIn, { message: "Check-out must be after check-in", path: ["checkOut"] })
+  .refine((v) => v.discountType !== "PERCENT" || v.discountValue <= 100, { message: "A percentage discount can't exceed 100%", path: ["discountValue"] });
 
 const reservationUpdateSchema = z.object({
   customerId: z.string().cuid().optional(),
@@ -60,6 +77,10 @@ const reservationUpdateSchema = z.object({
 const cancelSchema = z.object({ cancellationReason: z.enum(CANCELLATION_REASONS), cancellationNotes: optionalText(500) });
 const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional() });
 const extendSchema = z.object({ checkOut: z.coerce.date() });
+const optionalDate = z.preprocess(blankToUndefined, z.coerce.date().optional());
+// What a checkout can carry beyond a payment: if a balance is left, why it's
+// being left and when it's expected (checkout on credit).
+const creditFields = { creditReason: optionalText(255), creditExpectedAt: optionalDate };
 const guestSchema = z.object({ name: z.string().trim().min(1).max(120), idNumber: optionalText(40), notes: optionalText(255) });
 const chargeSchema = z.object({
   source: z.enum(["SERVICE", "AD_HOC"]),
@@ -107,6 +128,60 @@ async function logActivity(
   await tx.reservationActivity.create({
     data: { tenantId: tid, reservationId, action, summary: `${label} by ${actor.name}`, performedBy: actor.performedBy, locationId: actor.locationId },
   });
+}
+
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+/** Terms as stored: complimentary ignores any discount, a paid room ignores
+ * the complimentary reason, and a zero discount is no discount. */
+function normalizeTerms(t: { roomSaleType: "PAID" | "COMPLIMENTARY"; complimentaryReason?: string; discountType?: "PERCENT" | "AMOUNT"; discountValue: number; discountReason?: string }) {
+  if (t.roomSaleType === "COMPLIMENTARY") {
+    return { roomSaleType: "COMPLIMENTARY" as const, complimentaryReason: t.complimentaryReason ?? null, discountType: null, discountValue: 0, discountReason: null };
+  }
+  const discounted = Boolean(t.discountType) && t.discountValue > 0;
+  return {
+    roomSaleType: "PAID" as const,
+    complimentaryReason: null,
+    discountType: discounted ? t.discountType! : null,
+    discountValue: discounted ? t.discountValue : 0,
+    discountReason: discounted ? t.discountReason ?? null : null,
+  };
+}
+
+const ROOM_ADJUSTMENT_REFS = ["ROOM_DISCOUNT", "ROOM_COMPLIMENTARY"];
+
+/** Recomputes the single write-off line for a stay's room charges from the
+ * reservation's terms: a complimentary room is written off in full, a
+ * discount takes a percentage (or a fixed amount) off. Idempotent — it
+ * replaces its own previous line, so it can run after check-in, an
+ * extension, or an edit of the terms without stacking. */
+async function syncRoomAdjustment(tx: Prisma.TransactionClient, tid: string, reservationId: string, by: string | undefined) {
+  const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId }, include: { room: true, folio: { include: { lineItems: true } } } });
+  if (!reservation.folio) return;
+  await tx.folioLineItem.deleteMany({ where: { folioId: reservation.folio.id, source: "DISCOUNT", sourceRefId: { in: ROOM_ADJUSTMENT_REFS } } });
+  const roomTotal = round2(reservation.folio.lineItems.filter((l) => l.source === "ROOM").reduce((sum, l) => sum + Number(l.amount) * l.quantity, 0));
+  if (roomTotal <= 0) return;
+  let off = 0;
+  let label = "";
+  let ref = "ROOM_DISCOUNT";
+  if (reservation.roomSaleType === "COMPLIMENTARY") {
+    off = roomTotal;
+    ref = "ROOM_COMPLIMENTARY";
+    label = `Complimentary room ${reservation.room.number}${reservation.complimentaryReason ? ` — ${reservation.complimentaryReason}` : ""}`;
+  } else if (reservation.discountType && Number(reservation.discountValue) > 0) {
+    const value = Number(reservation.discountValue);
+    off = reservation.discountType === "PERCENT" ? round2(roomTotal * Math.min(value, 100) / 100) : Math.min(round2(value), roomTotal);
+    label = `Room discount — ${reservation.discountType === "PERCENT" ? `${value}%` : `KSh ${value.toLocaleString("en-KE")}`}${reservation.discountReason ? ` (${reservation.discountReason})` : ""}`;
+  }
+  if (off <= 0) return;
+  await tx.folioLineItem.create({ data: { tenantId: tid, folioId: reservation.folio.id, source: "DISCOUNT", label, amount: -off, quantity: 1, sourceRefId: ref, createdBy: by } });
+}
+
+/** Adds each settled stay's outstanding credit to its folio, for display. */
+async function withCreditOutstanding<T extends { folio: { id: string; creditAmount: unknown } | null }>(tid: string, reservations: T[]) {
+  const ids = reservations.flatMap((r) => (r.folio && Number(r.folio.creditAmount) > 0 ? [r.folio.id] : []));
+  const outstanding = await folioCreditOutstanding(prisma, tid, ids);
+  return reservations.map((r) => (r.folio ? { ...r, folio: { ...r.folio, creditOutstanding: outstanding.get(r.folio.id) ?? 0 } } : r));
 }
 
 // The room's own nightlyRate is the fallback when a RoomType hasn't
@@ -193,20 +268,22 @@ receptionRouter.get("/reservations", async (req, res) => {
     include: reservationInclude,
     orderBy: [{ updatedAt: "desc" }],
   });
-  res.json({ reservations });
+  res.json({ reservations: await withCreditOutstanding(tenantId(req), reservations) });
 });
 
 receptionRouter.get("/reservations/:id", async (req, res) => {
   const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include: reservationInclude });
   if (!reservation) { res.status(404).json({ error: "Reservation not found" }); return; }
-  res.json({ reservation, totals: folioTotals(reservation.folio) });
+  const [withCredit] = await withCreditOutstanding(tenantId(req), [reservation]);
+  res.json({ reservation: withCredit, totals: folioTotals(reservation.folio) });
 });
 
 receptionRouter.post("/reservations", async (req, res) => {
   const data = reservationSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "reservation", data.error.flatten()); return; }
   const tid = tenantId(req);
-  const { status, ...fields } = data.data;
+  const { status, roomSaleType, complimentaryReason, discountType, discountValue, discountReason, ...fields } = data.data;
+  const terms = normalizeTerms({ roomSaleType, complimentaryReason, discountType, discountValue, discountReason });
   const [customer, room, available, actor] = await Promise.all([
     prisma.customer.findFirst({ where: { id: fields.customerId, tenantId: tid } }),
     prisma.room.findFirst({ where: { id: fields.roomId, tenantId: tid, status: "VACANT", cleanliness: "CLEAN" }, include: { roomType: true } }),
@@ -219,7 +296,7 @@ receptionRouter.post("/reservations", async (req, res) => {
   const reservation = await prisma.$transaction(async (tx) => {
     const reservationNo = await nextReservationNo(tid);
     const created = await tx.reservation.create({
-      data: { tenantId: tid, reservationNo, status, createdBy: req.userId, locationId: actor.locationId, ...fields },
+      data: { tenantId: tid, reservationNo, status, createdBy: req.userId, locationId: actor.locationId, ...fields, ...terms },
     });
     const folioNo = await nextFolioNo(tid);
     await tx.folio.create({ data: { tenantId: tid, folioNo, reservationId: created.id } });
@@ -238,6 +315,7 @@ receptionRouter.post("/reservations", async (req, res) => {
           createdBy: req.userId,
         },
       });
+      await syncRoomAdjustment(tx, tid, created.id, req.userId);
       await logActivity(tx, tid, created.id, "CHECKED_IN", "Checked in", actor);
     }
     return tx.reservation.findUniqueOrThrow({ where: { id: created.id }, include: reservationInclude });
@@ -295,6 +373,7 @@ receptionRouter.patch("/reservations/:id/check-in", async (req, res) => {
           createdBy: req.userId,
         },
       });
+      await syncRoomAdjustment(tx, tid, current.id, req.userId);
     }
     await logActivity(tx, tid, current.id, "CHECKED_IN", "Checked in", actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
@@ -354,6 +433,7 @@ receptionRouter.patch("/reservations/:id/extend", async (req, res) => {
     if (current.folio) {
       const amount = await roomRateFor(tx, current.room.roomTypeId, current.mealPlan, current.room.nightlyRate);
       await tx.folioLineItem.create({ data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: `Extended stay (${extraNights} extra night${extraNights === 1 ? "" : "s"} · ${MEAL_PLAN_LABELS[current.mealPlan]})`, amount, quantity: extraNights, createdBy: req.userId } });
+      await syncRoomAdjustment(tx, tid, current.id, req.userId);
     }
     await logActivity(tx, tid, current.id, "EXTENDED", `Extended by ${extraNights} night${extraNights === 1 ? "" : "s"}`, actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
@@ -362,15 +442,25 @@ receptionRouter.patch("/reservations/:id/extend", async (req, res) => {
 });
 
 receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
-  const data = paymentSchema.partial({ paymentMethodId: true, amount: true }).extend({ amount: z.coerce.number().min(0) }).safeParse(req.body);
+  const data = paymentSchema.partial({ paymentMethodId: true, amount: true }).extend({ amount: z.coerce.number().min(0), ...creditFields }).safeParse(req.body);
   if (!data.success) { invalid(res, "checkout payment", data.error.flatten()); return; }
   const tid = tenantId(req);
-  const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { customer: true, folio: true } });
+  const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { customer: true, folio: { include: { lineItems: true, payments: true } } } });
   if (!current) { res.status(404).json({ error: "Reservation not found" }); return; }
   if (current.status !== "CHECKED_IN") { res.status(409).json({ error: "Only a checked-in stay can be checked out" }); return; }
   if (!current.folio) { res.status(500).json({ error: "This reservation has no folio on record" }); return; }
   if (data.data.amount > 0 && !data.data.paymentMethodId) { res.status(400).json({ error: "Choose a payment method" }); return; }
   if (data.data.paymentMethodId) await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+  // A balance can't just vanish at checkout: it's either paid, or the stay is
+  // completed on credit with a reason and an expected payment date (same rule
+  // as a POS order). The unpaid part then sits on the customer's balance.
+  const balanceBefore = folioTotals(current.folio).balance;
+  if (data.data.amount > balanceBefore + 0.01) { res.status(400).json({ error: `Amount exceeds the balance due of ${round2(balanceBefore).toFixed(2)}` }); return; }
+  const onCredit = round2(balanceBefore - data.data.amount);
+  if (onCredit > 0.01 && ((data.data.creditReason ?? "").length < 3 || !data.data.creditExpectedAt)) {
+    res.status(409).json({ error: `A balance of ${onCredit.toFixed(2)} remains — pay it, or complete on credit with a reason and an expected payment date`, code: "BALANCE_DUE", balance: onCredit });
+    return;
+  }
   const transactionNo = data.data.amount > 0 ? await nextTransactionNo(tid) : null;
   const actor = await resolveActor(tid, req);
   const reservation = await prisma.$transaction(async (tx) => {
@@ -392,10 +482,18 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
         },
       });
     }
-    await tx.folio.update({ where: { id: current.folio!.id }, data: { status: "SETTLED" } });
+    await tx.folio.update({
+      where: { id: current.folio!.id },
+      data: onCredit > 0.01
+        ? { status: "SETTLED", creditAmount: onCredit, creditReason: data.data.creditReason, creditExpectedAt: data.data.creditExpectedAt }
+        : { status: "SETTLED" },
+    });
+    if (onCredit > 0.01) {
+      await applyCustomerBalance(tx, { tenantId: tid, customerId: current.customerId, folioId: current.folio!.id, delta: onCredit, type: "CREDIT", note: `Stay ${current.reservationNo} checked out on credit`, by: req.userId });
+    }
     await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_OUT", updatedBy: req.userId } });
     await freeRoom(tx, tid, current.roomId, `${current.customer.firstName} ${current.customer.lastName}`, "checked out");
-    await logActivity(tx, tid, current.id, "CHECKED_OUT", "Checked out", actor);
+    await logActivity(tx, tid, current.id, "CHECKED_OUT", onCredit > 0.01 ? `Checked out on credit (${onCredit.toFixed(2)} owing)` : "Checked out", actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation, totals: folioTotals(reservation.folio) });
@@ -469,6 +567,7 @@ receptionRouter.delete("/reservations/:id/folio/charges/:lineItemId", async (req
   if (!reservation || !reservation.folio) { res.status(404).json({ error: "Reservation not found" }); return; }
   const lineItem = await prisma.folioLineItem.findFirst({ where: { id: req.params.lineItemId, folioId: reservation.folio.id } });
   if (!lineItem) { res.status(404).json({ error: "Charge not found" }); return; }
+  if (lineItem.source === "ROOM" || lineItem.source === "DISCOUNT") { res.status(409).json({ error: "Room charges and discounts are managed from the room terms, not removed as a charge" }); return; }
   const actor = await resolveActor(tid, req);
   await prisma.$transaction(async (tx) => {
     await tx.folioLineItem.delete({ where: { id: lineItem.id } });
@@ -517,4 +616,68 @@ receptionRouter.get("/reservations/:id/folio", async (req, res) => {
   const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: reservationInclude });
   if (!reservation || !reservation.folio) { res.status(404).json({ error: "Reservation not found" }); return; }
   res.json({ folio: reservation.folio, totals: folioTotals(reservation.folio) });
+});
+
+/** Change how a room is sold — paid (with or without a discount) or
+ * complimentary — before or during the stay. Re-prices the folio's write-off
+ * line; the room charges themselves never change. */
+receptionRouter.patch("/reservations/:id/room-terms", async (req, res) => {
+  const data = roomTermsSchema.safeParse(req.body);
+  if (!data.success) { invalid(res, "room terms", data.error.flatten()); return; }
+  const tid = tenantId(req);
+  const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid } });
+  if (!current) { res.status(404).json({ error: "Reservation not found" }); return; }
+  if (!["PENDING", "CONFIRMED", "CHECKED_IN"].includes(current.status)) { res.status(409).json({ error: "Room terms can only be changed before checkout" }); return; }
+  const terms = normalizeTerms(data.data);
+  const actor = await resolveActor(tid, req);
+  const reservation = await prisma.$transaction(async (tx) => {
+    await tx.reservation.update({ where: { id: current.id }, data: { ...terms, updatedBy: req.userId } });
+    if (current.status === "CHECKED_IN") await syncRoomAdjustment(tx, tid, current.id, req.userId);
+    const summary = terms.roomSaleType === "COMPLIMENTARY" ? "Room marked complimentary" : terms.discountType ? "Room discount applied" : "Room set to paid, no discount";
+    await logActivity(tx, tid, current.id, "ROOM_TERMS_CHANGED", summary, actor);
+    return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
+  });
+  res.json({ reservation, totals: folioTotals(reservation.folio) });
+});
+
+/** Receive payment against credit left when a stay was checked out on credit.
+ * Records the payment on the (already settled) folio and the money in the
+ * ledger, and brings the customer's balance down. */
+receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res) => {
+  const data = paymentSchema.safeParse(req.body);
+  if (!data.success) { invalid(res, "payment", data.error.flatten()); return; }
+  const tid = tenantId(req);
+  const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { folio: true } });
+  if (!reservation || !reservation.folio) { res.status(404).json({ error: "Reservation not found" }); return; }
+  const outstanding = (await folioCreditOutstanding(prisma, tid, [reservation.folio.id])).get(reservation.folio.id) ?? 0;
+  if (outstanding <= 0.01) { res.status(409).json({ error: "This stay has no credit left to pay" }); return; }
+  if (data.data.amount > outstanding + 0.01) { res.status(400).json({ error: `Amount exceeds the credit owing of ${outstanding.toFixed(2)}` }); return; }
+  await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+  const transactionNo = await nextTransactionNo(tid);
+  const actor = await resolveActor(tid, req);
+  const payment = await prisma.$transaction(async (tx) => {
+    const created = await tx.folioPayment.create({
+      data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", ...data.data, createdBy: req.userId },
+      include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
+    });
+    await tx.transaction.create({
+      data: {
+        tenantId: tid,
+        transactionNo,
+        direction: "IN",
+        source: "FOLIO_SETTLEMENT",
+        amount: data.data.amount,
+        paymentMethodId: data.data.paymentMethodId,
+        reference: data.data.reference,
+        customerId: reservation.customerId,
+        employeeId: req.userId,
+        description: `Credit payment — ${reservation.reservationNo}`,
+        sourceRefId: created.id,
+      },
+    });
+    await applyCustomerBalance(tx, { tenantId: tid, customerId: reservation.customerId, folioId: reservation.folio!.id, delta: -data.data.amount, type: "REPAYMENT", note: `Payment against stay ${reservation.reservationNo}`, by: req.userId });
+    await logActivity(tx, tid, reservation.id, "CREDIT_PAYMENT", `Credit payment received — ${data.data.amount}`, actor);
+    return created;
+  });
+  res.status(201).json({ payment });
 });

@@ -48,19 +48,41 @@ const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
  * once, when the credit was given — counting the repayment's cash again on
  * a later day would double it. Returns the ids of those transactions. */
 async function creditRepaymentTxnIds(tid: string, txns: { id: string; source: string; sourceRefId: string | null }[]): Promise<Set<string>> {
-  const pos = txns.filter((t) => t.source === "POS_SALE" && t.sourceRefId);
-  if (pos.length === 0) return new Set();
-  const payments = await prisma.payment.findMany({ where: { tenantId: tid, id: { in: pos.map((t) => t.sourceRefId!) } }, select: { id: true, orderId: true, createdAt: true } });
-  const orderIds = [...new Set(payments.map((p) => p.orderId))];
-  const credits = orderIds.length ? await prisma.customerCreditEntry.findMany({ where: { tenantId: tid, type: "CREDIT", orderId: { in: orderIds } }, select: { orderId: true, createdAt: true } }) : [];
-  const firstCredit = new Map<string, number>();
-  for (const c of credits) if (c.orderId) firstCredit.set(c.orderId, Math.min(firstCredit.get(c.orderId) ?? Infinity, c.createdAt.getTime()));
-  const paymentById = new Map(payments.map((p) => [p.id, p]));
   const repayments = new Set<string>();
-  for (const t of pos) {
-    const payment = paymentById.get(t.sourceRefId!);
-    const credited = payment ? firstCredit.get(payment.orderId) : undefined;
-    if (payment && credited !== undefined && credited < payment.createdAt.getTime()) repayments.add(t.id);
+  const firstCreditBy = (rows: { key: string | null; createdAt: Date }[]) => {
+    const first = new Map<string, number>();
+    for (const c of rows) if (c.key) first.set(c.key, Math.min(first.get(c.key) ?? Infinity, c.createdAt.getTime()));
+    return first;
+  };
+
+  // POS: a payment on an order that had already been completed on credit.
+  const pos = txns.filter((t) => t.source === "POS_SALE" && t.sourceRefId);
+  if (pos.length > 0) {
+    const payments = await prisma.payment.findMany({ where: { tenantId: tid, id: { in: pos.map((t) => t.sourceRefId!) } }, select: { id: true, orderId: true, createdAt: true } });
+    const orderIds = [...new Set(payments.map((p) => p.orderId))];
+    const credits = orderIds.length ? await prisma.customerCreditEntry.findMany({ where: { tenantId: tid, type: "CREDIT", orderId: { in: orderIds } }, select: { orderId: true, createdAt: true } }) : [];
+    const firstCredit = firstCreditBy(credits.map((c) => ({ key: c.orderId, createdAt: c.createdAt })));
+    const paymentById = new Map(payments.map((p) => [p.id, p]));
+    for (const t of pos) {
+      const payment = paymentById.get(t.sourceRefId!);
+      const credited = payment ? firstCredit.get(payment.orderId) : undefined;
+      if (payment && credited !== undefined && credited < payment.createdAt.getTime()) repayments.add(t.id);
+    }
+  }
+
+  // Room stays: a settlement received after the stay was checked out on credit.
+  const stays = txns.filter((t) => t.source === "FOLIO_SETTLEMENT" && t.sourceRefId);
+  if (stays.length > 0) {
+    const payments = await prisma.folioPayment.findMany({ where: { tenantId: tid, id: { in: stays.map((t) => t.sourceRefId!) } }, select: { id: true, folioId: true, createdAt: true } });
+    const folioIds = [...new Set(payments.map((p) => p.folioId))];
+    const credits = folioIds.length ? await prisma.customerCreditEntry.findMany({ where: { tenantId: tid, type: "CREDIT", folioId: { in: folioIds } }, select: { folioId: true, createdAt: true } }) : [];
+    const firstCredit = firstCreditBy(credits.map((c) => ({ key: c.folioId, createdAt: c.createdAt })));
+    const paymentById = new Map(payments.map((p) => [p.id, p]));
+    for (const t of stays) {
+      const payment = paymentById.get(t.sourceRefId!);
+      const credited = payment ? firstCredit.get(payment.folioId) : undefined;
+      if (payment && credited !== undefined && credited < payment.createdAt.getTime()) repayments.add(t.id);
+    }
   }
   return repayments;
 }
@@ -215,11 +237,11 @@ reportsRouter.get("/sales", async (req, res, next) => {
       // moment it was completed — unlike re-deriving "total minus paid" now,
       // it doesn't shrink to zero when the customer later repays.
       prisma.customerCreditEntry.findMany({
-        where: { tenantId: tid, type: "CREDIT", createdAt: { gte: start, lte: end }, order: { status: "COMPLETED", ...(locationId ? { locationId } : {}) } },
-        select: { amount: true, orderId: true },
+        where: { tenantId: tid, type: "CREDIT", createdAt: { gte: start, lte: end }, OR: [{ order: { status: "COMPLETED", ...(locationId ? { locationId } : {}) } }, ...(locationId ? [] : [{ folioId: { not: null } }])] },
+        select: { amount: true, orderId: true, folioId: true },
       }),
       prisma.customerCreditEntry.findMany({
-        where: { tenantId: tid, type: "CREDIT", createdAt: { gte: trendStart, lte: trendEnd }, order: { status: "COMPLETED", ...(locationId ? { locationId } : {}) } },
+        where: { tenantId: tid, type: "CREDIT", createdAt: { gte: trendStart, lte: trendEnd }, OR: [{ order: { status: "COMPLETED", ...(locationId ? { locationId } : {}) } }, ...(locationId ? [] : [{ folioId: { not: null } }])] },
         select: { amount: true, createdAt: true },
       }),
     ]);
@@ -338,7 +360,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     complimentaryCogs = round2(complimentaryCogs);
     // Credit given in the period (see creditEntries above).
     const creditGiven = creditSalesRevenue;
-    const creditCount = new Set(creditEntries.map((e) => e.orderId)).size;
+    const creditCount = new Set(creditEntries.map((e) => e.orderId ?? e.folioId)).size;
 
     const soldItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).map((i) => ({ ...i, revenue: round2(i.revenue) }));
     const topItems = soldItems.slice(0, 10);
