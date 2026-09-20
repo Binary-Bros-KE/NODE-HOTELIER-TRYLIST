@@ -28,6 +28,10 @@ export async function nextFolioNo(tenantId: string): Promise<string> {
   return nextSequenceNo(tenantId, "folio", "FOL", 6);
 }
 
+export async function nextGroupNo(tenantId: string): Promise<string> {
+  return nextSequenceNo(tenantId, "reservationgroup", "GRP", 6);
+}
+
 export async function nextTransactionNo(tenantId: string): Promise<string> {
   return nextSequenceNo(tenantId, "transaction", "TXN", 6);
 }

@@ -4,7 +4,7 @@ import type { Prisma, ReservationActivityAction } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
-import { nextCustomerNo, nextReservationNo, nextFolioNo, nextTransactionNo } from "../../lib/sequence.js";
+import { nextCustomerNo, nextReservationNo, nextFolioNo, nextTransactionNo, nextGroupNo } from "../../lib/sequence.js";
 import { resolveActorLocationWithHint } from "../../lib/location.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { applyCustomerBalance, folioCreditOutstanding } from "../../lib/customerCredit.js";
@@ -655,6 +655,9 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
   await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
   const transactionNo = await nextTransactionNo(tid);
   const actor = await resolveActor(tid, req);
+  // The credit sits on whoever it was charged to — for a stay in a group, the
+  // group's billing customer, not the guest in the room.
+  const creditOwner = (await prisma.customerCreditEntry.findFirst({ where: { tenantId: tid, folioId: reservation.folio.id, type: "CREDIT" }, select: { customerId: true } }))?.customerId ?? reservation.customerId;
   const payment = await prisma.$transaction(async (tx) => {
     const created = await tx.folioPayment.create({
       data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", ...data.data, createdBy: req.userId },
@@ -669,15 +672,431 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
         amount: data.data.amount,
         paymentMethodId: data.data.paymentMethodId,
         reference: data.data.reference,
-        customerId: reservation.customerId,
+        customerId: creditOwner,
         employeeId: req.userId,
         description: `Credit payment — ${reservation.reservationNo}`,
         sourceRefId: created.id,
       },
     });
-    await applyCustomerBalance(tx, { tenantId: tid, customerId: reservation.customerId, folioId: reservation.folio!.id, delta: -data.data.amount, type: "REPAYMENT", note: `Payment against stay ${reservation.reservationNo}`, by: req.userId });
+    await applyCustomerBalance(tx, { tenantId: tid, customerId: creditOwner, folioId: reservation.folio!.id, delta: -data.data.amount, type: "REPAYMENT", note: `Payment against stay ${reservation.reservationNo}`, by: req.userId });
     await logActivity(tx, tid, reservation.id, "CREDIT_PAYMENT", `Credit payment received — ${data.data.amount}`, actor);
     return created;
   });
   res.status(201).json({ payment });
+});
+
+// ============================================================================
+// Groups — a party booked together (a company sending staff, a wedding, a
+// tour). Each room is still its own reservation with its own folio, guests
+// and terms, so any mix works: one person per room, several to a room, or a
+// shared room. The group adds one billing customer and a single checkout /
+// payment for all of its rooms.
+// ============================================================================
+
+const groupRoomSchema = z.object({
+  roomId: z.string().cuid(),
+  // Who the room is registered to; defaults to the group's billing customer.
+  customerId: z.string().cuid().optional(),
+  mealPlan: z.enum(MEAL_PLANS).default("ROOM_ONLY"),
+  adults: z.coerce.number().int().min(1).default(1),
+  children: z.coerce.number().int().min(0).default(0),
+  // Everyone sleeping in the room, by name.
+  guests: z.array(z.object({ name: z.string().trim().min(1).max(120), idNumber: optionalText(40) })).max(30).default([]),
+  notes: optionalText(500),
+  // A room can arrive/leave on different dates from the rest of the party.
+  checkIn: z.coerce.date().optional(),
+  checkOut: z.coerce.date().optional(),
+  // Its own terms; otherwise the group's defaults apply.
+  terms: roomTermsSchema.optional(),
+});
+const groupBookingFields = {
+  checkIn: z.coerce.date(),
+  checkOut: z.coerce.date(),
+  source: z.enum(RESERVATION_SOURCES).default("CORPORATE"),
+  status: z.enum(["PENDING", "CONFIRMED", "CHECKED_IN"]).default("PENDING"),
+  terms: roomTermsSchema.optional(),
+  rooms: z.array(groupRoomSchema).min(1).max(200),
+};
+const groupCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  customerId: z.string().cuid(),
+  notes: optionalText(500),
+  ...groupBookingFields,
+});
+const groupAddRoomsSchema = z.object(groupBookingFields);
+const groupPatchSchema = z.object({ name: z.string().trim().min(1).max(120).optional(), notes: optionalText(500), customerId: z.string().cuid().optional() });
+const groupPaymentsSchema = z.object({ payments: z.array(paymentSchema).max(10).default([]) });
+const groupCheckoutSchema = groupPaymentsSchema.extend({ reservationIds: z.array(z.string().cuid()).optional(), ...creditFields });
+const groupCheckInSchema = z.object({ reservationIds: z.array(z.string().cuid()).optional() });
+
+const GROUP_TX = { timeout: 120_000, maxWait: 15_000 } as const;
+
+type GroupRoomInput = z.infer<typeof groupRoomSchema>;
+
+/** Checks every requested room is bookable for its dates before anything is
+ * written, so a 40-room party either goes in whole or not at all. */
+async function prepareGroupRooms(tid: string, defaults: { checkIn: Date; checkOut: Date; terms?: z.infer<typeof roomTermsSchema> }, rows: GroupRoomInput[], billingCustomerId: string) {
+  const ids = rows.map((r) => r.roomId);
+  if (new Set(ids).size !== ids.length) throw Object.assign(new Error("The same room is listed twice"), { status: 400 });
+  const [rooms, customers] = await Promise.all([
+    prisma.room.findMany({ where: { id: { in: ids }, tenantId: tid }, include: { roomType: true } }),
+    prisma.customer.findMany({ where: { tenantId: tid, id: { in: [...new Set([billingCustomerId, ...rows.flatMap((r) => (r.customerId ? [r.customerId] : []))])] } }, select: { id: true } }),
+  ]);
+  const roomById = new Map(rooms.map((r) => [r.id, r]));
+  const customerIds = new Set(customers.map((c) => c.id));
+  const prepared: { row: GroupRoomInput; room: (typeof rooms)[number]; checkIn: Date; checkOut: Date; customerId: string }[] = [];
+  for (const row of rows) {
+    const room = roomById.get(row.roomId);
+    if (!room) throw Object.assign(new Error("One of the rooms is not from this property"), { status: 400 });
+    if (room.status !== "VACANT" || room.cleanliness !== "CLEAN") throw Object.assign(new Error(`Room ${room.number} isn't clean and vacant`), { status: 409 });
+    const checkIn = row.checkIn ?? defaults.checkIn;
+    const checkOut = row.checkOut ?? defaults.checkOut;
+    if (checkOut <= checkIn) throw Object.assign(new Error(`Room ${room.number}: check-out must be after check-in`), { status: 400 });
+    const customerId = row.customerId ?? billingCustomerId;
+    if (!customerIds.has(customerId)) throw Object.assign(new Error(`Room ${room.number}: guest not found`), { status: 400 });
+    if (!(await roomIsAvailable({ tenantId: tid, roomId: room.id, checkIn, checkOut }))) throw Object.assign(new Error(`Room ${room.number} is already booked for those dates`), { status: 409 });
+    prepared.push({ row, room, checkIn, checkOut, customerId });
+  }
+  return prepared;
+}
+
+/** Writes one group's rooms: reservation + folio (+ room charges if checking in) + guests. */
+async function bookGroupRooms(
+  tx: Prisma.TransactionClient,
+  tid: string,
+  actor: ActorContext,
+  userId: string | undefined,
+  group: { id: string; name: string },
+  prepared: Awaited<ReturnType<typeof prepareGroupRooms>>,
+  args: { status: "PENDING" | "CONFIRMED" | "CHECKED_IN"; source: (typeof RESERVATION_SOURCES)[number]; defaultTerms?: z.infer<typeof roomTermsSchema>; numbers: { reservationNo: string; folioNo: string }[] },
+) {
+  const baseTerms = args.defaultTerms ?? { roomSaleType: "PAID" as const, discountValue: 0 };
+  for (const [index, item] of prepared.entries()) {
+    const { row, room, checkIn, checkOut, customerId } = item;
+    const terms = normalizeTerms(row.terms ?? baseTerms);
+    const created = await tx.reservation.create({
+      data: {
+        tenantId: tid, reservationNo: args.numbers[index].reservationNo, groupId: group.id, customerId, roomId: room.id, source: args.source,
+        checkIn, checkOut, adults: row.adults, children: row.children, mealPlan: row.mealPlan, notes: row.notes,
+        status: args.status, createdBy: userId, locationId: actor.locationId, ...terms,
+      },
+    });
+    const folio = await tx.folio.create({ data: { tenantId: tid, folioNo: args.numbers[index].folioNo, reservationId: created.id } });
+    if (row.guests.length > 0) {
+      await tx.reservationGuest.createMany({ data: row.guests.map((g) => ({ tenantId: tid, reservationId: created.id, name: g.name, idNumber: g.idNumber, addedBy: userId })) });
+    }
+    await logActivity(tx, tid, created.id, "CREATED", `Reservation created for group ${group.name}`, actor);
+    if (args.status === "CHECKED_IN") {
+      await tx.room.update({ where: { id: room.id }, data: { status: "OCCUPIED" } });
+      const amount = await roomRateFor(tx, room.roomTypeId, row.mealPlan, room.nightlyRate);
+      await tx.folioLineItem.create({
+        data: { tenantId: tid, folioId: folio.id, source: "ROOM", label: `Room ${room.number} — ${room.roomType.name} · ${MEAL_PLAN_LABELS[row.mealPlan]}`, amount, quantity: nights(checkIn, checkOut), createdBy: userId },
+      });
+      await syncRoomAdjustment(tx, tid, created.id, userId);
+      await logActivity(tx, tid, created.id, "CHECKED_IN", "Checked in", actor);
+    }
+  }
+}
+
+const groupReservationInclude = {
+  customer: true,
+  room: { include: { roomType: true } },
+  additionalGuests: { orderBy: { addedAt: "asc" as const } },
+  folio: {
+    include: {
+      lineItems: { orderBy: { createdAt: "asc" as const } },
+      payments: { include: { paymentMethod: { select: { id: true, name: true } } }, orderBy: { createdAt: "asc" as const } },
+    },
+  },
+};
+
+async function groupSummary(tid: string, reservations: { status: string; adults: number; children: number; additionalGuests?: unknown[]; folio: { id: string; creditAmount: unknown; lineItems: { amount: unknown; quantity: number }[]; payments: { amount: unknown }[] } | null }[]) {
+  const live = reservations.filter((r) => r.status !== "CANCELLED" && r.status !== "NO_SHOW");
+  const totals = live.reduce((sum, r) => {
+    const t = folioTotals(r.folio);
+    return { charges: sum.charges + t.charges, paid: sum.paid + t.paid, balance: sum.balance + t.balance };
+  }, { charges: 0, paid: 0, balance: 0 });
+  const outstanding = await folioCreditOutstanding(prisma, tid, live.flatMap((r) => (r.folio && Number(r.folio.creditAmount) > 0 ? [r.folio.id] : [])));
+  return {
+    rooms: live.length,
+    pending: live.filter((r) => r.status === "PENDING" || r.status === "CONFIRMED").length,
+    checkedIn: live.filter((r) => r.status === "CHECKED_IN").length,
+    checkedOut: live.filter((r) => r.status === "CHECKED_OUT").length,
+    guests: live.reduce((sum, r) => sum + r.adults + r.children, 0),
+    charges: round2(totals.charges),
+    paid: round2(totals.paid),
+    balance: round2(totals.balance),
+    creditOutstanding: round2([...outstanding.values()].reduce((sum, v) => sum + Math.max(0, v), 0)),
+  };
+}
+
+async function groupDetail(tid: string, id: string) {
+  const group = await prisma.reservationGroup.findFirst({
+    where: { id, tenantId: tid },
+    include: { customer: true, reservations: { include: groupReservationInclude, orderBy: { room: { number: "asc" } } } },
+  });
+  if (!group) return null;
+  const outstanding = await folioCreditOutstanding(prisma, tid, group.reservations.flatMap((r) => (r.folio && Number(r.folio.creditAmount) > 0 ? [r.folio.id] : [])));
+  return {
+    ...group,
+    reservations: group.reservations.map((r) => (r.folio ? { ...r, folio: { ...r.folio, creditOutstanding: outstanding.get(r.folio.id) ?? 0 } } : r)),
+    summary: await groupSummary(tid, group.reservations),
+  };
+}
+
+function sendStatusError(res: { status: (code: number) => { json: (value: unknown) => unknown } }, error: unknown) {
+  if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return true; }
+  return false;
+}
+
+receptionRouter.post("/groups", async (req, res, next) => {
+  const data = groupCreateSchema.safeParse(req.body);
+  if (!data.success) { invalid(res, "group", data.error.flatten()); return; }
+  if (data.data.checkOut <= data.data.checkIn) { res.status(400).json({ error: "Check-out must be after check-in" }); return; }
+  const tid = tenantId(req);
+  try {
+    const billing = await prisma.customer.findFirst({ where: { id: data.data.customerId, tenantId: tid }, select: { id: true } });
+    if (!billing) { res.status(400).json({ error: "Choose the billing customer from this property" }); return; }
+    const prepared = await prepareGroupRooms(tid, data.data, data.data.rooms, billing.id);
+    const actor = await resolveActor(tid, req);
+    const groupNo = await nextGroupNo(tid);
+    const numbers: { reservationNo: string; folioNo: string }[] = [];
+    for (let i = 0; i < prepared.length; i++) numbers.push({ reservationNo: await nextReservationNo(tid), folioNo: await nextFolioNo(tid) });
+    const groupId = await prisma.$transaction(async (tx) => {
+      const group = await tx.reservationGroup.create({ data: { tenantId: tid, groupNo, name: data.data.name, customerId: billing.id, notes: data.data.notes, createdBy: req.userId } });
+      await bookGroupRooms(tx, tid, actor, req.userId, group, prepared, { status: data.data.status, source: data.data.source, defaultTerms: data.data.terms, numbers });
+      return group.id;
+    }, GROUP_TX);
+    res.status(201).json({ group: await groupDetail(tid, groupId) });
+  } catch (error) {
+    if (sendStatusError(res, error)) return;
+    next(error);
+  }
+});
+
+receptionRouter.get("/groups", async (req, res) => {
+  const tid = tenantId(req);
+  const search = optionalText(120).safeParse(req.query.search);
+  const groups = await prisma.reservationGroup.findMany({
+    where: {
+      tenantId: tid,
+      ...(search.success && search.data ? { OR: [
+        { name: { contains: search.data, mode: "insensitive" } },
+        { groupNo: { contains: search.data, mode: "insensitive" } },
+        { customer: { firstName: { contains: search.data, mode: "insensitive" } } },
+        { customer: { lastName: { contains: search.data, mode: "insensitive" } } },
+      ] } : {}),
+    },
+    include: { customer: true, reservations: { select: { status: true, adults: true, children: true, folio: { include: { lineItems: true, payments: true } } } } },
+    orderBy: { createdAt: "desc" },
+  });
+  res.json({ groups: await Promise.all(groups.map(async ({ reservations, ...group }) => ({ ...group, summary: await groupSummary(tid, reservations) }))) });
+});
+
+receptionRouter.get("/groups/:id", async (req, res) => {
+  const group = await groupDetail(tenantId(req), req.params.id);
+  if (!group) { res.status(404).json({ error: "Group not found" }); return; }
+  res.json({ group });
+});
+
+receptionRouter.patch("/groups/:id", async (req, res) => {
+  const data = groupPatchSchema.safeParse(req.body);
+  if (!data.success) { invalid(res, "group", data.error.flatten()); return; }
+  const tid = tenantId(req);
+  const found = await prisma.reservationGroup.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
+  if (!found) { res.status(404).json({ error: "Group not found" }); return; }
+  if (data.data.customerId && !(await prisma.customer.findFirst({ where: { id: data.data.customerId, tenantId: tid }, select: { id: true } }))) { res.status(400).json({ error: "Choose the billing customer from this property" }); return; }
+  await prisma.reservationGroup.update({ where: { id: found.id }, data: data.data });
+  res.json({ group: await groupDetail(tid, found.id) });
+});
+
+/** Add more rooms to a group that already exists (more people arriving). */
+receptionRouter.post("/groups/:id/rooms", async (req, res, next) => {
+  const data = groupAddRoomsSchema.safeParse(req.body);
+  if (!data.success) { invalid(res, "rooms", data.error.flatten()); return; }
+  if (data.data.checkOut <= data.data.checkIn) { res.status(400).json({ error: "Check-out must be after check-in" }); return; }
+  const tid = tenantId(req);
+  try {
+    const group = await prisma.reservationGroup.findFirst({ where: { id: req.params.id, tenantId: tid } });
+    if (!group) { res.status(404).json({ error: "Group not found" }); return; }
+    const prepared = await prepareGroupRooms(tid, data.data, data.data.rooms, group.customerId);
+    const actor = await resolveActor(tid, req);
+    const numbers: { reservationNo: string; folioNo: string }[] = [];
+    for (let i = 0; i < prepared.length; i++) numbers.push({ reservationNo: await nextReservationNo(tid), folioNo: await nextFolioNo(tid) });
+    await prisma.$transaction((tx) => bookGroupRooms(tx, tid, actor, req.userId, group, prepared, { status: data.data.status, source: data.data.source, defaultTerms: data.data.terms, numbers }), GROUP_TX);
+    res.status(201).json({ group: await groupDetail(tid, group.id) });
+  } catch (error) {
+    if (sendStatusError(res, error)) return;
+    next(error);
+  }
+});
+
+/** Check in the group's waiting rooms (all of them, or the chosen ones). */
+receptionRouter.post("/groups/:id/check-in", async (req, res, next) => {
+  const data = groupCheckInSchema.safeParse(req.body ?? {});
+  if (!data.success) { invalid(res, "check-in", data.error.flatten()); return; }
+  const tid = tenantId(req);
+  try {
+    const group = await prisma.reservationGroup.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
+    if (!group) { res.status(404).json({ error: "Group not found" }); return; }
+    const waiting = await prisma.reservation.findMany({
+      where: { groupId: group.id, tenantId: tid, status: { in: ["PENDING", "CONFIRMED"] }, ...(data.data.reservationIds ? { id: { in: data.data.reservationIds } } : {}) },
+      include: { room: { include: { roomType: true } }, folio: true },
+    });
+    if (waiting.length === 0) { res.status(409).json({ error: "No waiting rooms to check in" }); return; }
+    const actor = await resolveActor(tid, req);
+    await prisma.$transaction(async (tx) => {
+      for (const current of waiting) {
+        await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_IN", updatedBy: req.userId } });
+        await tx.room.update({ where: { id: current.roomId }, data: { status: "OCCUPIED" } });
+        if (current.folio) {
+          const amount = await roomRateFor(tx, current.room.roomTypeId, current.mealPlan, current.room.nightlyRate);
+          await tx.folioLineItem.create({
+            data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: `Room ${current.room.number} — ${current.room.roomType.name} · ${MEAL_PLAN_LABELS[current.mealPlan]}`, amount, quantity: nights(current.checkIn, current.checkOut), createdBy: req.userId },
+          });
+          await syncRoomAdjustment(tx, tid, current.id, req.userId);
+        }
+        await logActivity(tx, tid, current.id, "CHECKED_IN", "Checked in with the group", actor);
+      }
+    }, GROUP_TX);
+    res.json({ group: await groupDetail(tid, group.id) });
+  } catch (error) {
+    if (sendStatusError(res, error)) return;
+    next(error);
+  }
+});
+
+/** Spread payments over rooms in order: each payment fills the first room's
+ * balance, then the next, and so on. Returns one allocation per (payment, room). */
+function allocatePayments(rooms: { id: string; due: number }[], payments: { paymentMethodId: string; amount: number; reference?: string }[]) {
+  const remaining = new Map(rooms.map((r) => [r.id, r.due]));
+  const allocations: { roomId: string; paymentMethodId: string; amount: number; reference?: string }[] = [];
+  for (const payment of payments) {
+    let left = round2(payment.amount);
+    for (const room of rooms) {
+      if (left <= 0.004) break;
+      const due = remaining.get(room.id) ?? 0;
+      if (due <= 0.004) continue;
+      const take = round2(Math.min(left, due));
+      allocations.push({ roomId: room.id, paymentMethodId: payment.paymentMethodId, amount: take, reference: payment.reference });
+      remaining.set(room.id, round2(due - take));
+      left = round2(left - take);
+    }
+  }
+  return { allocations, remaining };
+}
+
+/** Check the whole group (or the chosen rooms) out at once: payments — cash,
+ * card, one company card, any mix — are spread across the rooms, and whatever
+ * isn't paid is completed on credit against the billing customer, with a
+ * reason and expected payment date, ready to be invoiced. */
+receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
+  const data = groupCheckoutSchema.safeParse(req.body ?? {});
+  if (!data.success) { invalid(res, "group checkout", data.error.flatten()); return; }
+  const tid = tenantId(req);
+  try {
+    const group = await prisma.reservationGroup.findFirst({ where: { id: req.params.id, tenantId: tid } });
+    if (!group) { res.status(404).json({ error: "Group not found" }); return; }
+    const targets = (await prisma.reservation.findMany({
+      where: { groupId: group.id, tenantId: tid, status: "CHECKED_IN", ...(data.data.reservationIds ? { id: { in: data.data.reservationIds } } : {}) },
+      include: { customer: true, room: true, folio: { include: { lineItems: true, payments: true } } },
+    })).sort((a, b) => a.room.number.localeCompare(b.room.number, undefined, { numeric: true }));
+    if (targets.length === 0) { res.status(409).json({ error: "No checked-in rooms to check out" }); return; }
+    if (targets.some((r) => !r.folio)) { res.status(500).json({ error: "A room in this group has no folio on record" }); return; }
+
+    for (const payment of data.data.payments) await resolvePaymentMethod(tid, payment.paymentMethodId, payment.reference);
+    const rooms = targets.map((r) => ({ id: r.id, due: Math.max(0, round2(folioTotals(r.folio).balance)) }));
+    const dueTotal = round2(rooms.reduce((sum, r) => sum + r.due, 0));
+    const paidTotal = round2(data.data.payments.reduce((sum, p) => sum + p.amount, 0));
+    if (paidTotal > dueTotal + 0.01) { res.status(400).json({ error: `Payments of ${paidTotal.toFixed(2)} exceed the balance due of ${dueTotal.toFixed(2)}` }); return; }
+    const shortfall = round2(dueTotal - paidTotal);
+    if (shortfall > 0.01 && ((data.data.creditReason ?? "").length < 3 || !data.data.creditExpectedAt)) {
+      res.status(409).json({ error: `A balance of ${shortfall.toFixed(2)} remains — pay it, or complete on credit with a reason and an expected payment date`, code: "BALANCE_DUE", balance: shortfall });
+      return;
+    }
+    const { allocations, remaining } = allocatePayments(rooms, data.data.payments);
+    const transactionNos: string[] = [];
+    for (let i = 0; i < allocations.length; i++) transactionNos.push(await nextTransactionNo(tid));
+    const actor = await resolveActor(tid, req);
+    const byId = new Map(targets.map((r) => [r.id, r]));
+
+    await prisma.$transaction(async (tx) => {
+      for (const [index, alloc] of allocations.entries()) {
+        const reservation = byId.get(alloc.roomId)!;
+        const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", paymentMethodId: alloc.paymentMethodId, amount: alloc.amount, reference: alloc.reference, createdBy: req.userId } });
+        await tx.transaction.create({
+          data: {
+            tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount,
+            paymentMethodId: alloc.paymentMethodId, reference: alloc.reference, customerId: group.customerId, employeeId: req.userId,
+            description: `Group checkout ${group.groupNo} — ${reservation.reservationNo}`, sourceRefId: created.id,
+          },
+        });
+      }
+      for (const reservation of targets) {
+        const credit = round2(remaining.get(reservation.id) ?? 0);
+        const onCredit = credit > 0.01;
+        await tx.folio.update({
+          where: { id: reservation.folio!.id },
+          data: onCredit ? { status: "SETTLED", creditAmount: credit, creditReason: data.data.creditReason, creditExpectedAt: data.data.creditExpectedAt } : { status: "SETTLED" },
+        });
+        if (onCredit) {
+          await applyCustomerBalance(tx, { tenantId: tid, customerId: group.customerId, folioId: reservation.folio!.id, delta: credit, type: "CREDIT", note: `Group ${group.groupNo} — stay ${reservation.reservationNo} checked out on credit`, by: req.userId });
+        }
+        await tx.reservation.update({ where: { id: reservation.id }, data: { status: "CHECKED_OUT", updatedBy: req.userId } });
+        await freeRoom(tx, tid, reservation.roomId, `${reservation.customer.firstName} ${reservation.customer.lastName}`, "checked out with the group");
+        await logActivity(tx, tid, reservation.id, "CHECKED_OUT", onCredit ? `Checked out with the group on credit (${credit.toFixed(2)} owing)` : "Checked out with the group", actor);
+      }
+    }, GROUP_TX);
+    res.json({ group: await groupDetail(tid, group.id) });
+  } catch (error) {
+    if (sendStatusError(res, error)) return;
+    next(error);
+  }
+});
+
+/** Receive payment against the credit a group was checked out on. Spread over
+ * the rooms with credit outstanding, oldest expected date first. */
+receptionRouter.post("/groups/:id/credit-payments", async (req, res, next) => {
+  const data = groupPaymentsSchema.safeParse(req.body ?? {});
+  if (!data.success || data.data.payments.length === 0) { invalid(res, "payment", data.success ? { payments: ["Add at least one payment"] } : data.error.flatten()); return; }
+  const tid = tenantId(req);
+  try {
+    const group = await prisma.reservationGroup.findFirst({ where: { id: req.params.id, tenantId: tid } });
+    if (!group) { res.status(404).json({ error: "Group not found" }); return; }
+    const stays = await prisma.reservation.findMany({ where: { groupId: group.id, tenantId: tid, folio: { creditAmount: { gt: 0 } } }, include: { room: true, folio: true } });
+    const outstanding = await folioCreditOutstanding(prisma, tid, stays.map((r) => r.folio!.id));
+    const owing = stays
+      .map((r) => ({ reservation: r, due: Math.max(0, outstanding.get(r.folio!.id) ?? 0) }))
+      .filter((r) => r.due > 0.01)
+      .sort((a, b) => (a.reservation.folio!.creditExpectedAt?.getTime() ?? Infinity) - (b.reservation.folio!.creditExpectedAt?.getTime() ?? Infinity) || a.reservation.room.number.localeCompare(b.reservation.room.number, undefined, { numeric: true }));
+    const owingTotal = round2(owing.reduce((sum, r) => sum + r.due, 0));
+    if (owingTotal <= 0.01) { res.status(409).json({ error: "This group has no credit left to pay" }); return; }
+    const paidTotal = round2(data.data.payments.reduce((sum, p) => sum + p.amount, 0));
+    if (paidTotal > owingTotal + 0.01) { res.status(400).json({ error: `Payments of ${paidTotal.toFixed(2)} exceed the credit owing of ${owingTotal.toFixed(2)}` }); return; }
+    for (const payment of data.data.payments) await resolvePaymentMethod(tid, payment.paymentMethodId, payment.reference);
+    const { allocations } = allocatePayments(owing.map((r) => ({ id: r.reservation.id, due: r.due })), data.data.payments);
+    const transactionNos: string[] = [];
+    for (let i = 0; i < allocations.length; i++) transactionNos.push(await nextTransactionNo(tid));
+    const actor = await resolveActor(tid, req);
+    const byId = new Map(owing.map((r) => [r.reservation.id, r.reservation]));
+    await prisma.$transaction(async (tx) => {
+      for (const [index, alloc] of allocations.entries()) {
+        const reservation = byId.get(alloc.roomId)!;
+        const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", paymentMethodId: alloc.paymentMethodId, amount: alloc.amount, reference: alloc.reference, createdBy: req.userId } });
+        await tx.transaction.create({
+          data: {
+            tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount,
+            paymentMethodId: alloc.paymentMethodId, reference: alloc.reference, customerId: group.customerId, employeeId: req.userId,
+            description: `Group credit payment ${group.groupNo} — ${reservation.reservationNo}`, sourceRefId: created.id,
+          },
+        });
+        await applyCustomerBalance(tx, { tenantId: tid, customerId: group.customerId, folioId: reservation.folio!.id, delta: -alloc.amount, type: "REPAYMENT", note: `Group ${group.groupNo} payment against stay ${reservation.reservationNo}`, by: req.userId });
+        await logActivity(tx, tid, reservation.id, "CREDIT_PAYMENT", `Credit payment received with the group — ${alloc.amount}`, actor);
+      }
+    }, GROUP_TX);
+    res.status(201).json({ group: await groupDetail(tid, group.id) });
+  } catch (error) {
+    if (sendStatusError(res, error)) return;
+    next(error);
+  }
 });

@@ -418,6 +418,7 @@ model Tenant {
   employeeSalaries      EmployeeSalary[]
   printJobs             PrintJob[]
   menuLedgerEntries     MenuLedgerEntry[]
+  reservationGroups     ReservationGroup[]
 }
 
 enum CustomerType {
@@ -518,6 +519,7 @@ model Customer {
   locationId        String?
   tenant            Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   reservations      Reservation[]
+  reservationGroups ReservationGroup[]
   transactions      Transaction[]
   posOrders         PosOrder[]
   creditEntries     CustomerCreditEntry[]
@@ -777,6 +779,8 @@ model Reservation {
   folio              Folio?
   additionalGuests   ReservationGuest[]
   activities         ReservationActivity[]
+  groupId            String?
+  group              ReservationGroup?     @relation(fields: [groupId], references: [id], onDelete: SetNull)
   // How the room is being sold: normally PAID; COMPLIMENTARY when it's given
   // to the guest free (its value is still shown on the folio, then written
   // off by a matching discount line). A discount — a percentage of the room
@@ -788,8 +792,33 @@ model Reservation {
   discountReason      String?
 
   @@unique([tenantId, reservationNo])
+  @@index([groupId])
   @@index([tenantId, checkIn, checkOut])
   @@index([tenantId, roomId, status])
+}
+
+// A party booked together — a company sending staff, a wedding, a tour. Each
+// room is still its own Reservation (its own folio, guests, dates and terms),
+// so any mix works: one person per room, several to a room, a shared room.
+// The group adds the umbrella: one billing customer (the company) who can be
+// invoiced and who checks the rooms out and pays for them in one go.
+model ReservationGroup {
+  id           String        @id @default(cuid())
+  tenantId     String
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  groupNo      String
+  name         String
+  // Who pays: the customer the group's credit lands on.
+  customerId   String
+  customer     Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  notes        String?
+  createdBy    String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  reservations Reservation[]
+
+  @@unique([tenantId, groupNo])
+  @@index([tenantId, createdAt])
 }
 
 model ReservationGuest {
