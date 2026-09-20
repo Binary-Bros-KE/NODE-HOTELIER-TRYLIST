@@ -213,6 +213,7 @@ async function roomIsAvailable(scope: { tenantId: string; roomId: string; checkI
 
 const reservationInclude = {
   customer: true,
+  group: { select: { id: true, name: true, groupNo: true } },
   room: { include: { roomType: true } },
   location: { select: { id: true, name: true } },
   additionalGuests: { orderBy: { addedAt: "asc" as const } },
