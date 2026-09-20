@@ -6,6 +6,7 @@ import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { nextCustomerNo, nextReservationNo, nextFolioNo, nextTransactionNo, nextGroupNo } from "../../lib/sequence.js";
 import { resolveActorLocationWithHint } from "../../lib/location.js";
+import { resolveRoomCharge, type RoomCharge } from "../../lib/roomCharge.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { applyCustomerBalance, folioCreditOutstanding } from "../../lib/customerCredit.js";
 
@@ -19,12 +20,6 @@ const RESERVATION_SOURCES = ["WALK_IN", "PHONE", "WEBSITE", "BOOKING_ENGINE", "T
 const CANCELLATION_REASONS = ["CHANGED_MIND", "NO_SHOW", "FOUND_ALTERNATIVE", "DUPLICATE_BOOKING", "HOTEL_CANCELLED", "OTHER"] as const;
 const OPEN_RESERVATION_STATUSES = ["PENDING", "CONFIRMED", "CHECKED_IN"] as const;
 const MEAL_PLANS = ["ROOM_ONLY", "BED_AND_BREAKFAST", "HALF_BOARD", "FULL_BOARD"] as const;
-const MEAL_PLAN_LABELS: Record<(typeof MEAL_PLANS)[number], string> = {
-  ROOM_ONLY: "Room Only",
-  BED_AND_BREAKFAST: "Bed & Breakfast",
-  HALF_BOARD: "Half Board",
-  FULL_BOARD: "Full Board",
-};
 
 const CUSTOMER_TYPES = ["PERSONAL", "BUSINESS"] as const;
 const customerSchema = z.object({ customerType: z.enum(CUSTOMER_TYPES).default("PERSONAL"), firstName: z.string().trim().min(1), lastName: z.string().trim().min(1).optional(), email: z.email().optional(), phone: z.string().trim().min(5).max(30) });
@@ -52,6 +47,8 @@ const reservationCreateFields = z.object({
   adults: z.coerce.number().int().min(1).default(1),
   children: z.coerce.number().int().min(0).default(0),
   mealPlan: z.enum(MEAL_PLANS).default("ROOM_ONLY"),
+  // Required (server-checked) when the room type is sold by rate variant.
+  rateId: z.string().trim().min(1).optional(),
   notes: optionalText(500),
   // Walk-ins submit CHECKED_IN directly to skip the Pending→Confirmed hop.
   status: z.enum(["PENDING", "CONFIRMED", "CHECKED_IN"]).default("PENDING"),
@@ -75,7 +72,7 @@ const reservationUpdateSchema = z.object({
 });
 
 const cancelSchema = z.object({ cancellationReason: z.enum(CANCELLATION_REASONS), cancellationNotes: optionalText(500) });
-const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional() });
+const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional(), rateId: z.string().trim().min(1).optional() });
 const extendSchema = z.object({ checkOut: z.coerce.date() });
 const optionalDate = z.preprocess(blankToUndefined, z.coerce.date().optional());
 // What a checkout can carry beyond a payment: if a balance is left, why it's
@@ -101,7 +98,6 @@ async function resolvePaymentMethod(tid: string, paymentMethodId: string, refere
 
 function tenantId(req: { tenantId?: string }): string { if (!req.tenantId) throw new Error("Tenant context is required"); return req.tenantId; }
 function invalid(res: { status: (code: number) => { json: (value: unknown) => unknown } }, label: string, details: unknown) { return res.status(400).json({ error: `Invalid ${label}`, details }); }
-function nights(checkIn: Date, checkOut: Date): number { return Math.max(1, Math.ceil((checkOut.getTime() - checkIn.getTime()) / 86_400_000)); }
 
 type ActorContext = { locationId: string | null; performedBy: string | undefined; name: string };
 
@@ -182,20 +178,6 @@ async function withCreditOutstanding<T extends { folio: { id: string; creditAmou
   const ids = reservations.flatMap((r) => (r.folio && Number(r.folio.creditAmount) > 0 ? [r.folio.id] : []));
   const outstanding = await folioCreditOutstanding(prisma, tid, ids);
   return reservations.map((r) => (r.folio ? { ...r, folio: { ...r.folio, creditOutstanding: outstanding.get(r.folio.id) ?? 0 } } : r));
-}
-
-// The room's own nightlyRate is the fallback when a RoomType hasn't
-// configured a RoomRate tier for the requested meal plan — most tenants will
-// have set up all four, but nothing forces it, so a stay is never blocked on
-// a missing tier.
-async function roomRateFor(
-  client: { roomRate: { findFirst: (args: { where: { roomTypeId: string; mealPlan: (typeof MEAL_PLANS)[number] } }) => Promise<{ price: Prisma.Decimal } | null> } },
-  roomTypeId: string,
-  mealPlan: (typeof MEAL_PLANS)[number],
-  fallback: Prisma.Decimal,
-) {
-  const rate = await client.roomRate.findFirst({ where: { roomTypeId, mealPlan } });
-  return rate ? rate.price : fallback;
 }
 
 receptionRouter.get("/customers", async (req, res) => res.json({ customers: await prisma.customer.findMany({ where: { tenantId: tenantId(req) }, orderBy: [{ lastName: "asc" }, { firstName: "asc" }] }) }));
@@ -294,25 +276,25 @@ receptionRouter.post("/reservations", async (req, res) => {
   if (!customer || !room) { res.status(400).json({ error: "Choose a clean, vacant room and a customer from this property" }); return; }
   if (!available) { res.status(409).json({ error: "This room is already booked for those dates" }); return; }
 
+  const charge = await resolveRoomCharge(prisma, room, { rateId: fields.rateId }, fields.checkIn, fields.checkOut);
   const reservation = await prisma.$transaction(async (tx) => {
     const reservationNo = await nextReservationNo(tid);
     const created = await tx.reservation.create({
-      data: { tenantId: tid, reservationNo, status, createdBy: req.userId, locationId: actor.locationId, ...fields, ...terms },
+      data: { tenantId: tid, reservationNo, status, createdBy: req.userId, locationId: actor.locationId, ...fields, rateId: charge.rateId, rateName: charge.rateName, ...terms },
     });
     const folioNo = await nextFolioNo(tid);
     await tx.folio.create({ data: { tenantId: tid, folioNo, reservationId: created.id } });
     await logActivity(tx, tid, created.id, "CREATED", "Reservation created", actor);
     if (status === "CHECKED_IN") {
       await tx.room.update({ where: { id: room.id }, data: { status: "OCCUPIED" } });
-      const amount = await roomRateFor(tx, room.roomTypeId, fields.mealPlan, room.nightlyRate);
       await tx.folioLineItem.create({
         data: {
           tenantId: tid,
           folioId: (await tx.folio.findUniqueOrThrow({ where: { reservationId: created.id }, select: { id: true } })).id,
           source: "ROOM",
-          label: `Room ${room.number} — ${room.roomType.name} · ${MEAL_PLAN_LABELS[fields.mealPlan]}`,
-          amount,
-          quantity: nights(fields.checkIn, fields.checkOut),
+          label: charge.label,
+          amount: charge.amount,
+          quantity: charge.quantity,
           createdBy: req.userId,
         },
       });
@@ -357,20 +339,21 @@ receptionRouter.patch("/reservations/:id/check-in", async (req, res) => {
   if (!current) { res.status(404).json({ error: "Reservation not found" }); return; }
   if (!["PENDING", "CONFIRMED"].includes(current.status)) { res.status(409).json({ error: "Only a pending or confirmed reservation can be checked in" }); return; }
   const mealPlan = data.data.mealPlan ?? current.mealPlan;
+  const rateId = data.data.rateId ?? current.rateId;
+  const charge = await resolveRoomCharge(prisma, current.room, { rateId, mealPlan: rateId ? undefined : mealPlan }, current.checkIn, current.checkOut);
   const actor = await resolveActor(tid, req);
   const reservation = await prisma.$transaction(async (tx) => {
-    await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_IN", mealPlan, updatedBy: req.userId } });
+    await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_IN", mealPlan, rateId: charge.rateId, rateName: charge.rateName, updatedBy: req.userId } });
     await tx.room.update({ where: { id: current.roomId }, data: { status: "OCCUPIED" } });
     if (current.folio) {
-      const amount = await roomRateFor(tx, current.room.roomTypeId, mealPlan, current.room.nightlyRate);
       await tx.folioLineItem.create({
         data: {
           tenantId: tid,
           folioId: current.folio.id,
           source: "ROOM",
-          label: `Room ${current.room.number} — ${current.room.roomType.name} · ${MEAL_PLAN_LABELS[mealPlan]}`,
-          amount,
-          quantity: nights(current.checkIn, current.checkOut),
+          label: charge.label,
+          amount: charge.amount,
+          quantity: charge.quantity,
           createdBy: req.userId,
         },
       });
@@ -427,16 +410,17 @@ receptionRouter.patch("/reservations/:id/extend", async (req, res) => {
     res.status(409).json({ error: "This room is already booked for those extra nights" });
     return;
   }
-  const extraNights = nights(current.checkOut, data.data.checkOut);
+  const charge = await resolveRoomCharge(prisma, current.room, { rateId: current.rateId, mealPlan: current.rateId ? undefined : current.mealPlan }, current.checkOut, data.data.checkOut);
+  const extraNights = charge.quantity;
+  const unitWord = (charge.unitName ?? "night").toLowerCase().replace(/^per\s+/, "");
   const actor = await resolveActor(tid, req);
   const reservation = await prisma.$transaction(async (tx) => {
     await tx.reservation.update({ where: { id: current.id }, data: { checkOut: data.data.checkOut, updatedBy: req.userId } });
     if (current.folio) {
-      const amount = await roomRateFor(tx, current.room.roomTypeId, current.mealPlan, current.room.nightlyRate);
-      await tx.folioLineItem.create({ data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: `Extended stay (${extraNights} extra night${extraNights === 1 ? "" : "s"} · ${MEAL_PLAN_LABELS[current.mealPlan]})`, amount, quantity: extraNights, createdBy: req.userId } });
+      await tx.folioLineItem.create({ data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: `Extended stay (${extraNights} extra ${unitWord}${extraNights === 1 ? "" : "s"}${charge.rateName ? ` · ${charge.rateName}` : ""})`, amount: charge.amount, quantity: extraNights, createdBy: req.userId } });
       await syncRoomAdjustment(tx, tid, current.id, req.userId);
     }
-    await logActivity(tx, tid, current.id, "EXTENDED", `Extended by ${extraNights} night${extraNights === 1 ? "" : "s"}`, actor);
+    await logActivity(tx, tid, current.id, "EXTENDED", `Extended by ${extraNights} ${unitWord}${extraNights === 1 ? "" : "s"}`, actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation });
@@ -699,6 +683,7 @@ const groupRoomSchema = z.object({
   // Who the room is registered to; defaults to the group's billing customer.
   customerId: z.string().cuid().optional(),
   mealPlan: z.enum(MEAL_PLANS).default("ROOM_ONLY"),
+  rateId: z.string().trim().min(1).optional(),
   adults: z.coerce.number().int().min(1).default(1),
   children: z.coerce.number().int().min(0).default(0),
   // Everyone sleeping in the room, by name.
@@ -745,7 +730,7 @@ async function prepareGroupRooms(tid: string, defaults: { checkIn: Date; checkOu
   ]);
   const roomById = new Map(rooms.map((r) => [r.id, r]));
   const customerIds = new Set(customers.map((c) => c.id));
-  const prepared: { row: GroupRoomInput; room: (typeof rooms)[number]; checkIn: Date; checkOut: Date; customerId: string }[] = [];
+  const prepared: { row: GroupRoomInput; room: (typeof rooms)[number]; checkIn: Date; checkOut: Date; customerId: string; charge: RoomCharge }[] = [];
   for (const row of rows) {
     const room = roomById.get(row.roomId);
     if (!room) throw Object.assign(new Error("One of the rooms is not from this property"), { status: 400 });
@@ -756,7 +741,8 @@ async function prepareGroupRooms(tid: string, defaults: { checkIn: Date; checkOu
     const customerId = row.customerId ?? billingCustomerId;
     if (!customerIds.has(customerId)) throw Object.assign(new Error(`Room ${room.number}: guest not found`), { status: 400 });
     if (!(await roomIsAvailable({ tenantId: tid, roomId: room.id, checkIn, checkOut }))) throw Object.assign(new Error(`Room ${room.number} is already booked for those dates`), { status: 409 });
-    prepared.push({ row, room, checkIn, checkOut, customerId });
+    const charge = await resolveRoomCharge(prisma, room, { rateId: row.rateId }, checkIn, checkOut);
+    prepared.push({ row, room, checkIn, checkOut, customerId, charge });
   }
   return prepared;
 }
@@ -773,12 +759,12 @@ async function bookGroupRooms(
 ) {
   const baseTerms = args.defaultTerms ?? { roomSaleType: "PAID" as const, discountValue: 0 };
   for (const [index, item] of prepared.entries()) {
-    const { row, room, checkIn, checkOut, customerId } = item;
+    const { row, room, checkIn, checkOut, customerId, charge } = item;
     const terms = normalizeTerms(row.terms ?? baseTerms);
     const created = await tx.reservation.create({
       data: {
         tenantId: tid, reservationNo: args.numbers[index].reservationNo, groupId: group.id, customerId, roomId: room.id, source: args.source,
-        checkIn, checkOut, adults: row.adults, children: row.children, mealPlan: row.mealPlan, notes: row.notes,
+        checkIn, checkOut, adults: row.adults, children: row.children, mealPlan: row.mealPlan, rateId: charge.rateId, rateName: charge.rateName, notes: row.notes,
         status: args.status, createdBy: userId, locationId: actor.locationId, ...terms,
       },
     });
@@ -789,9 +775,8 @@ async function bookGroupRooms(
     await logActivity(tx, tid, created.id, "CREATED", `Reservation created for group ${group.name}`, actor);
     if (args.status === "CHECKED_IN") {
       await tx.room.update({ where: { id: room.id }, data: { status: "OCCUPIED" } });
-      const amount = await roomRateFor(tx, room.roomTypeId, row.mealPlan, room.nightlyRate);
       await tx.folioLineItem.create({
-        data: { tenantId: tid, folioId: folio.id, source: "ROOM", label: `Room ${room.number} — ${room.roomType.name} · ${MEAL_PLAN_LABELS[row.mealPlan]}`, amount, quantity: nights(checkIn, checkOut), createdBy: userId },
+        data: { tenantId: tid, folioId: folio.id, source: "ROOM", label: charge.label, amount: charge.amount, quantity: charge.quantity, createdBy: userId },
       });
       await syncRoomAdjustment(tx, tid, created.id, userId);
       await logActivity(tx, tid, created.id, "CHECKED_IN", "Checked in", actor);
@@ -951,9 +936,9 @@ receptionRouter.post("/groups/:id/check-in", async (req, res, next) => {
         await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_IN", updatedBy: req.userId } });
         await tx.room.update({ where: { id: current.roomId }, data: { status: "OCCUPIED" } });
         if (current.folio) {
-          const amount = await roomRateFor(tx, current.room.roomTypeId, current.mealPlan, current.room.nightlyRate);
+          const charge = await resolveRoomCharge(tx, current.room, { rateId: current.rateId, mealPlan: current.rateId ? undefined : current.mealPlan }, current.checkIn, current.checkOut);
           await tx.folioLineItem.create({
-            data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: `Room ${current.room.number} — ${current.room.roomType.name} · ${MEAL_PLAN_LABELS[current.mealPlan]}`, amount, quantity: nights(current.checkIn, current.checkOut), createdBy: req.userId },
+            data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: charge.label, amount: charge.amount, quantity: charge.quantity, createdBy: req.userId },
           });
           await syncRoomAdjustment(tx, tid, current.id, req.userId);
         }

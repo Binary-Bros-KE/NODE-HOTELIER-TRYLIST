@@ -53,16 +53,17 @@ for (const roomType of [
 // property configures every type immediately) and exercises the "no tiers
 // yet" empty state for the other 13 types.
 const deluxeKingId = roomTypeIds.get("Deluxe King")!;
+const night = await prisma.unitOfMeasure.upsert({ where: { tenantId_name: { tenantId: tenant.id, name: "Night" } }, update: {}, create: { tenantId: tenant.id, name: "Night" } });
 for (const rate of [
-  { mealPlan: "ROOM_ONLY", price: 7500 },
-  { mealPlan: "BED_AND_BREAKFAST", price: 8500 },
-  { mealPlan: "HALF_BOARD", price: 11000 },
-  { mealPlan: "FULL_BOARD", price: 14000 },
+  { name: "Room Only", mealPlan: "ROOM_ONLY", price: 7500 },
+  { name: "Bed & Breakfast", mealPlan: "BED_AND_BREAKFAST", price: 8500 },
+  { name: "Half Board", mealPlan: "HALF_BOARD", price: 11000 },
+  { name: "Full Board", mealPlan: "FULL_BOARD", price: 14000 },
 ] as const) {
   await prisma.roomRate.upsert({
-    where: { roomTypeId_mealPlan: { roomTypeId: deluxeKingId, mealPlan: rate.mealPlan } },
-    update: { price: rate.price },
-    create: { tenantId: tenant.id, roomTypeId: deluxeKingId, mealPlan: rate.mealPlan, price: rate.price },
+    where: { roomTypeId_name: { roomTypeId: deluxeKingId, name: rate.name } },
+    update: { price: rate.price, mealPlan: rate.mealPlan, unitId: night.id },
+    create: { tenantId: tenant.id, roomTypeId: deluxeKingId, name: rate.name, mealPlan: rate.mealPlan, price: rate.price, unitId: night.id },
   });
 }
 

@@ -574,18 +574,26 @@ model RoomRate {
   id                String    @id @default(cuid())
   tenantId          String
   roomTypeId        String
-  mealPlan          MealPlan
+  // A sellable variant of the room type — "Bed only", "Bed & Breakfast",
+  // "Boardroom half-day" — each with its own price and unit of measure
+  // (per night, per hour, per 24 hrs…). mealPlan is legacy from when these
+  // were a hardcoded enum; new variants leave it null.
+  name              String
+  mealPlan          MealPlan?
   price             Decimal   @db.Decimal(12, 2)
+  unitId            String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
   createdBy         String?
   updatedBy         String?
   tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   roomType          RoomType  @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  unit              UnitOfMeasure? @relation("RoomRateUnit", fields: [unitId], references: [id], onDelete: SetNull)
+  reservations      Reservation[]
   createdByEmployee Employee? @relation("RoomRateCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
   updatedByEmployee Employee? @relation("RoomRateUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
 
-  @@unique([roomTypeId, mealPlan])
+  @@unique([roomTypeId, name])
   @@index([tenantId, roomTypeId])
 }
 
@@ -595,7 +603,10 @@ model RoomType {
   name              String
   description       String?
   capacity          Int        @default(2)
+  // Only meaningful when the type has no rate variants (0 otherwise); its
+  // unit is priceUnitId.
   baseRate          Decimal    @db.Decimal(12, 2)
+  priceUnitId       String?
   amenities         String[]   @default([])
   isActive          Boolean    @default(true)
   createdAt         DateTime   @default(now())
@@ -603,6 +614,7 @@ model RoomType {
   createdBy         String?
   updatedBy         String?
   tenant            Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  priceUnit         UnitOfMeasure? @relation("RoomTypePriceUnit", fields: [priceUnitId], references: [id], onDelete: SetNull)
   rooms             Room[]
   rates             RoomRate[]
   createdByEmployee Employee?  @relation("RoomTypeCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
@@ -638,6 +650,8 @@ model UnitOfMeasure {
   updatedAt    DateTime  @updatedAt
   services     Service[]
   packProducts Product[] @relation("ProductPackUnit")
+  roomRates    RoomRate[] @relation("RoomRateUnit")
+  roomTypes    RoomType[] @relation("RoomTypePriceUnit")
 
   @@unique([tenantId, name])
 }
@@ -760,6 +774,11 @@ model Reservation {
   adults             Int                   @default(1)
   children           Int                   @default(0)
   mealPlan           MealPlan              @default(ROOM_ONLY)
+  // The rate variant the room was sold under (null for room types with no
+  // variants); rateName is a snapshot so history survives a rename/delete.
+  rateId             String?
+  rateName           String?
+  rate               RoomRate?             @relation(fields: [rateId], references: [id], onDelete: SetNull)
   status             ReservationStatus     @default(PENDING)
   cancellationReason CancellationReason?
   cancellationNotes  String?

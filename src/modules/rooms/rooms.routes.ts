@@ -10,16 +10,17 @@ import { requireModule } from "../../middleware/tenantContext.js";
 export const roomsRouter = Router();
 roomsRouter.use(requireModule("ROOMS"));
 
-const MEAL_PLANS = ["ROOM_ONLY", "BED_AND_BREAKFAST", "HALF_BOARD", "FULL_BOARD"] as const;
-
 const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 const optionalText = (max: number) => z.preprocess(blankToUndefined, z.string().trim().max(max).optional());
 
-const rateSchema = z.object({ mealPlan: z.enum(MEAL_PLANS), price: z.coerce.number().nonnegative() });
+// A room type is sold either at one price (baseRate + priceUnitId) or by
+// rate variants, each with its own name, price and unit of measure. With
+// variants the single price is meaningless and is stored as 0.
+const rateSchema = z.object({ name: z.string().trim().min(1).max(60), price: z.coerce.number().nonnegative(), unitId: z.string().trim().min(1) });
 const ratesSchema = z
   .array(rateSchema)
-  .max(4)
-  .refine((rates) => new Set(rates.map((r) => r.mealPlan)).size === rates.length, "Duplicate meal plan");
+  .max(30)
+  .refine((rates) => new Set(rates.map((r) => r.name.toLowerCase())).size === rates.length, "Each rate needs a different name");
 
 // NOTE: fields with .default() must NOT also go through .partial() for
 // updates — Zod re-applies the default whenever the key is simply absent
@@ -35,8 +36,9 @@ const roomSchema = z.object({
   floor: optionalText(30),
   wing: optionalText(30),
   notes: optionalText(500),
-  capacity: z.coerce.number().int().min(1).max(20).default(2),
-  nightlyRate: z.coerce.number().nonnegative(),
+  capacity: z.coerce.number().int().min(1).default(2),
+  // Omitted for room types sold by rate variant (their variants carry the price).
+  nightlyRate: z.coerce.number().nonnegative().optional(),
   status: z.enum(["VACANT", "OCCUPIED", "OUT_OF_SERVICE"]).default("VACANT"),
   cleanliness: z.enum(["CLEAN", "DIRTY", "INSPECTING"]).default("CLEAN"),
 });
@@ -47,7 +49,7 @@ const roomUpdateSchema = z.object({
   floor: optionalText(30),
   wing: optionalText(30),
   notes: optionalText(500),
-  capacity: z.coerce.number().int().min(1).max(20).optional(),
+  capacity: z.coerce.number().int().min(1).optional(),
   nightlyRate: z.coerce.number().nonnegative().optional(),
   status: z.enum(["VACANT", "OCCUPIED", "OUT_OF_SERVICE"]).optional(),
   cleanliness: z.enum(["CLEAN", "DIRTY", "INSPECTING"]).optional(),
@@ -55,8 +57,9 @@ const roomUpdateSchema = z.object({
 const roomTypeSchema = z.object({
   name: z.string().trim().min(2).max(60),
   description: z.string().trim().max(240).optional(),
-  capacity: z.coerce.number().int().min(1).max(20),
-  baseRate: z.coerce.number().nonnegative(),
+  capacity: z.coerce.number().int().min(1),
+  baseRate: z.coerce.number().nonnegative().optional(),
+  priceUnitId: z.string().trim().min(1).optional(),
   amenities: z.array(z.string().trim().min(1).max(50)).max(20).default([]),
   isActive: z.boolean().default(true),
   rates: ratesSchema.optional(),
@@ -64,8 +67,9 @@ const roomTypeSchema = z.object({
 const roomTypeUpdateSchema = z.object({
   name: z.string().trim().min(2).max(60).optional(),
   description: z.string().trim().max(240).optional(),
-  capacity: z.coerce.number().int().min(1).max(20).optional(),
+  capacity: z.coerce.number().int().min(1).optional(),
   baseRate: z.coerce.number().nonnegative().optional(),
+  priceUnitId: z.string().trim().min(1).nullable().optional(),
   amenities: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
   isActive: z.boolean().optional(),
   rates: ratesSchema.optional(),
@@ -87,6 +91,8 @@ const roomTypeFields = {
   description: true,
   capacity: true,
   baseRate: true,
+  priceUnitId: true,
+  priceUnit: { select: { id: true, name: true } },
   amenities: true,
   isActive: true,
   createdAt: true,
@@ -95,25 +101,36 @@ const roomTypeFields = {
   updatedBy: true,
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
   updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
-  rates: { select: { mealPlan: true, price: true }, orderBy: { mealPlan: "asc" as const } },
+  rates: { select: { id: true, name: true, price: true, unitId: true, unit: { select: { id: true, name: true } } }, orderBy: { name: "asc" as const } },
 } satisfies Prisma.RoomTypeSelect;
+
+async function assertUnits(tid: string, ids: (string | null | undefined)[]) {
+  const wanted = [...new Set(ids.filter((id): id is string => !!id))];
+  if (!wanted.length) return;
+  const found = await prisma.unitOfMeasure.count({ where: { tenantId: tid, id: { in: wanted } } });
+  if (found !== wanted.length) throw Object.assign(new Error("Choose a unit of measure from your list"), { status: 400 });
+}
 
 roomsRouter.get("/types", async (req, res) => res.json({ types: await prisma.roomType.findMany({ where: { tenantId: tenantId(req) }, select: roomTypeFields, orderBy: [{ isActive: "desc" }, { name: "asc" }] }) }));
 
 roomsRouter.post("/types", async (req, res, next) => {
   const parsed = roomTypeSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid room type", details: parsed.error.flatten() }); return; }
-  const { rates, ...data } = parsed.data;
+  const { rates, baseRate, priceUnitId, ...data } = parsed.data;
   const tid = tenantId(req);
   try {
+    const hasRates = Boolean(rates?.length);
+    if (!hasRates && (baseRate === undefined || !priceUnitId)) { res.status(400).json({ error: "Set a price and unit of measure, or add at least one rate variant" }); return; }
+    await assertUnits(tid, [priceUnitId, ...(rates ?? []).map((r) => r.unitId)]);
     const type = await prisma.$transaction(async (tx) => {
-      const created = await tx.roomType.create({ data: { tenantId: tid, createdBy: req.userId, ...data } });
-      if (rates?.length) await tx.roomRate.createMany({ data: rates.map((r) => ({ tenantId: tid, roomTypeId: created.id, mealPlan: r.mealPlan, price: r.price, createdBy: req.userId })) });
+      const created = await tx.roomType.create({ data: { tenantId: tid, createdBy: req.userId, ...data, baseRate: hasRates ? 0 : baseRate ?? 0, priceUnitId: hasRates ? null : priceUnitId ?? null } });
+      if (rates?.length) await tx.roomRate.createMany({ data: rates.map((r) => ({ tenantId: tid, roomTypeId: created.id, name: r.name, price: r.price, unitId: r.unitId, createdBy: req.userId })) });
       return tx.roomType.findUniqueOrThrow({ where: { id: created.id }, select: roomTypeFields });
     });
     res.status(201).json({ type });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "This room type already exists" }); return; }
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     next(error);
   }
 });
@@ -122,20 +139,31 @@ roomsRouter.patch("/types/:id", async (req, res, next) => {
   const parsed = roomTypeUpdateSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid room type", details: parsed.error.flatten() }); return; }
   const tid = tenantId(req);
-  const { rates, ...data } = parsed.data;
-  const existing = await prisma.roomType.findFirst({ where: { id: req.params.id, tenantId: tid } });
+  const { rates, baseRate, priceUnitId, ...data } = parsed.data;
+  const existing = await prisma.roomType.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { _count: { select: { rates: true } } } });
   if (!existing) { res.status(404).json({ error: "Room type not found" }); return; }
   try {
+    const willHaveRates = rates !== undefined ? rates.length > 0 : existing._count.rates > 0;
+    if (!willHaveRates && rates !== undefined && (baseRate === undefined || !priceUnitId)) { res.status(400).json({ error: "Set a price and unit of measure, or keep at least one rate variant" }); return; }
+    await assertUnits(tid, [priceUnitId, ...(rates ?? []).map((r) => r.unitId)]);
     const type = await prisma.$transaction(async (tx) => {
-      await tx.roomType.update({ where: { id: existing.id }, data: { ...data, updatedBy: req.userId } });
+      await tx.roomType.update({
+        where: { id: existing.id },
+        data: {
+          ...data,
+          updatedBy: req.userId,
+          ...(willHaveRates ? { baseRate: 0, priceUnitId: null } : { ...(baseRate !== undefined ? { baseRate } : {}), ...(priceUnitId !== undefined ? { priceUnitId } : {}) }),
+        },
+      });
       if (rates !== undefined) {
-        const keep = rates.map((r) => r.mealPlan);
-        await tx.roomRate.deleteMany({ where: { roomTypeId: existing.id, ...(keep.length ? { mealPlan: { notIn: keep } } : {}) } });
+        // Rates are matched by name so a rename keeps history only if the name is unchanged; removed variants are dropped (reservations keep their rateName snapshot).
+        const keep = rates.map((r) => r.name);
+        await tx.roomRate.deleteMany({ where: { roomTypeId: existing.id, ...(keep.length ? { name: { notIn: keep } } : {}) } });
         for (const r of rates) {
           await tx.roomRate.upsert({
-            where: { roomTypeId_mealPlan: { roomTypeId: existing.id, mealPlan: r.mealPlan } },
-            create: { tenantId: tid, roomTypeId: existing.id, mealPlan: r.mealPlan, price: r.price, createdBy: req.userId },
-            update: { price: r.price, updatedBy: req.userId },
+            where: { roomTypeId_name: { roomTypeId: existing.id, name: r.name } },
+            create: { tenantId: tid, roomTypeId: existing.id, name: r.name, price: r.price, unitId: r.unitId, createdBy: req.userId },
+            update: { price: r.price, unitId: r.unitId, updatedBy: req.userId },
           });
         }
       }
@@ -144,6 +172,7 @@ roomsRouter.patch("/types/:id", async (req, res, next) => {
     res.json({ type });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "This room type already exists" }); return; }
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     next(error);
   }
 });
@@ -162,7 +191,7 @@ roomsRouter.get("/rooms", async (req, res) => {
   const rooms = await prisma.room.findMany({
     where: { tenantId: tenantId(req) },
     include: {
-      roomType: { include: { rates: { select: { mealPlan: true, price: true } } } },
+      roomType: { include: { priceUnit: { select: { id: true, name: true } }, rates: { select: { id: true, name: true, price: true, unit: { select: { id: true, name: true } } }, orderBy: { name: "asc" } } } },
       createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
       updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
       _count: { select: { reservations: true } },
@@ -203,7 +232,9 @@ roomsRouter.post("/rooms", async (req, res, next) => {
   const tid = tenantId(req);
   try {
     await assertActiveRoomType(parsed.data.roomTypeId, tid);
-    const room = await prisma.room.create({ data: { tenantId: tid, createdBy: req.userId, ...parsed.data }, include: { roomType: true } });
+    const rateCount = await prisma.roomRate.count({ where: { roomTypeId: parsed.data.roomTypeId } });
+    if (rateCount === 0 && parsed.data.nightlyRate === undefined) { res.status(400).json({ error: "Set a price for this room" }); return; }
+    const room = await prisma.room.create({ data: { tenantId: tid, createdBy: req.userId, ...parsed.data, nightlyRate: rateCount > 0 ? 0 : parsed.data.nightlyRate ?? 0 }, include: { roomType: true } });
     res.status(201).json({ room });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "This room number already exists" }); return; }
