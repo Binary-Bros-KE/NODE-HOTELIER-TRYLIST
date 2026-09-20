@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { prisma } from "../../lib/prisma.js";
+import { ensureSystemUnits } from "../../lib/systemUnits.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 
 // Room inventory is shared with Reception: a room created here is immediately
@@ -92,7 +93,7 @@ const roomTypeFields = {
   capacity: true,
   baseRate: true,
   priceUnitId: true,
-  priceUnit: { select: { id: true, name: true } },
+  priceUnit: { select: { id: true, name: true, systemKey: true } },
   amenities: true,
   isActive: true,
   createdAt: true,
@@ -101,14 +102,15 @@ const roomTypeFields = {
   updatedBy: true,
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
   updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
-  rates: { select: { id: true, name: true, price: true, unitId: true, unit: { select: { id: true, name: true } } }, orderBy: { name: "asc" as const } },
+  rates: { select: { id: true, name: true, price: true, unitId: true, unit: { select: { id: true, name: true, systemKey: true } } }, orderBy: { name: "asc" as const } },
 } satisfies Prisma.RoomTypeSelect;
 
 async function assertUnits(tid: string, ids: (string | null | undefined)[]) {
   const wanted = [...new Set(ids.filter((id): id is string => !!id))];
   if (!wanted.length) return;
-  const found = await prisma.unitOfMeasure.count({ where: { tenantId: tid, id: { in: wanted } } });
-  if (found !== wanted.length) throw Object.assign(new Error("Choose a unit of measure from your list"), { status: 400 });
+  await ensureSystemUnits(prisma, tid);
+  const found = await prisma.unitOfMeasure.count({ where: { tenantId: tid, id: { in: wanted }, systemKey: { not: null } } });
+  if (found !== wanted.length) throw Object.assign(new Error("Rooms are priced per Hour, Night or Day — choose one of those units"), { status: 400 });
 }
 
 roomsRouter.get("/types", async (req, res) => res.json({ types: await prisma.roomType.findMany({ where: { tenantId: tenantId(req) }, select: roomTypeFields, orderBy: [{ isActive: "desc" }, { name: "asc" }] }) }));
@@ -191,7 +193,7 @@ roomsRouter.get("/rooms", async (req, res) => {
   const rooms = await prisma.room.findMany({
     where: { tenantId: tenantId(req) },
     include: {
-      roomType: { include: { priceUnit: { select: { id: true, name: true } }, rates: { select: { id: true, name: true, price: true, unit: { select: { id: true, name: true } } }, orderBy: { name: "asc" } } } },
+      roomType: { include: { priceUnit: { select: { id: true, name: true, systemKey: true } }, rates: { select: { id: true, name: true, price: true, unit: { select: { id: true, name: true, systemKey: true } } }, orderBy: { name: "asc" } } } },
       createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
       updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
       _count: { select: { reservations: true } },

@@ -2,14 +2,12 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 
 type Client = PrismaClient | Prisma.TransactionClient;
 
-const HOURLY = /\bhours?\b|\bhrs?\b/;
-
-/** How many billing units a stay spans: hours for an hourly unit, otherwise
- * 24-hour days ("Night", "24 hrs", "Day", or anything unrecognised). At least 1. */
-export function unitQuantity(unitName: string | null | undefined, checkIn: Date, checkOut: Date): number {
-  const name = (unitName ?? "night").toLowerCase();
+/** How many billing units a stay spans: hours for the built-in HOUR unit,
+ * otherwise 24-hour days (NIGHT, DAY). Keyed on the unit's system key — never
+ * its name — so a user can't break billing by how they spell things. At least 1. */
+export function unitQuantity(systemKey: string | null | undefined, checkIn: Date, checkOut: Date): number {
   const ms = checkOut.getTime() - checkIn.getTime();
-  if (HOURLY.test(name) && !/\b24\b/.test(name)) return Math.max(1, Math.ceil(ms / 3_600_000));
+  if (systemKey === "HOUR") return Math.max(1, Math.ceil(ms / 3_600_000));
   return Math.max(1, Math.ceil(ms / 86_400_000));
 }
 
@@ -41,17 +39,19 @@ export async function resolveRoomCharge(
 ): Promise<RoomCharge> {
   const type = await client.roomType.findUniqueOrThrow({
     where: { id: room.roomTypeId },
-    select: { name: true, priceUnit: { select: { name: true } }, rates: { select: { id: true, name: true, price: true, mealPlan: true, unit: { select: { name: true } } }, orderBy: { name: "asc" } } },
+    select: {
+      name: true,
+      priceUnit: { select: { name: true, systemKey: true } },
+      rates: { select: { id: true, name: true, price: true, mealPlan: true, unit: { select: { name: true, systemKey: true } } }, orderBy: { name: "asc" } },
+    },
   });
   const base = `Room ${room.number} — ${type.name}`;
   if (type.rates.length === 0) {
-    const unitName = type.priceUnit?.name ?? null;
-    return { amount: Number(room.nightlyRate), quantity: unitQuantity(unitName, checkIn, checkOut), label: base, rateId: null, rateName: null, unitName };
+    return { amount: Number(room.nightlyRate), quantity: unitQuantity(type.priceUnit?.systemKey, checkIn, checkOut), label: base, rateId: null, rateName: null, unitName: type.priceUnit?.name ?? null };
   }
   const rate =
     (selection.rateId ? type.rates.find((r) => r.id === selection.rateId) : undefined) ??
     (!selection.rateId && selection.mealPlan ? type.rates.find((r) => r.mealPlan === selection.mealPlan) : undefined);
   if (!rate) throw Object.assign(new Error(`Room ${room.number} (${type.name}) is sold by rate — choose one`), { status: 400 });
-  const unitName = rate.unit?.name ?? null;
-  return { amount: Number(rate.price), quantity: unitQuantity(unitName, checkIn, checkOut), label: `${base} · ${rate.name}`, rateId: rate.id, rateName: rate.name, unitName };
+  return { amount: Number(rate.price), quantity: unitQuantity(rate.unit?.systemKey, checkIn, checkOut), label: `${base} · ${rate.name}`, rateId: rate.id, rateName: rate.name, unitName: rate.unit?.name ?? null };
 }

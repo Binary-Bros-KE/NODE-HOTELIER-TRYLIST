@@ -646,6 +646,9 @@ model UnitOfMeasure {
   tenantId     String
   tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name         String
+  // Built-in units the system's logic depends on (HOUR, NIGHT, DAY): locked
+  // against rename/delete so billing never hinges on how a name is spelled.
+  systemKey    String?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   services     Service[]
@@ -654,6 +657,7 @@ model UnitOfMeasure {
   roomTypes    RoomType[] @relation("RoomTypePriceUnit")
 
   @@unique([tenantId, name])
+  @@unique([tenantId, systemKey])
 }
 
 model Service {
