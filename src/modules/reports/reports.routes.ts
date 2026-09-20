@@ -42,6 +42,29 @@ function dayBounds(from?: string, to?: string) {
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+/** Cash that was really a customer settling CREDIT given earlier, not a new
+ * sale: a POS payment recorded after the order had already been completed on
+ * credit (its CREDIT entry pre-dates the payment). Revenue counts that sale
+ * once, when the credit was given — counting the repayment's cash again on
+ * a later day would double it. Returns the ids of those transactions. */
+async function creditRepaymentTxnIds(tid: string, txns: { id: string; source: string; sourceRefId: string | null }[]): Promise<Set<string>> {
+  const pos = txns.filter((t) => t.source === "POS_SALE" && t.sourceRefId);
+  if (pos.length === 0) return new Set();
+  const payments = await prisma.payment.findMany({ where: { tenantId: tid, id: { in: pos.map((t) => t.sourceRefId!) } }, select: { id: true, orderId: true, createdAt: true } });
+  const orderIds = [...new Set(payments.map((p) => p.orderId))];
+  const credits = orderIds.length ? await prisma.customerCreditEntry.findMany({ where: { tenantId: tid, type: "CREDIT", orderId: { in: orderIds } }, select: { orderId: true, createdAt: true } }) : [];
+  const firstCredit = new Map<string, number>();
+  for (const c of credits) if (c.orderId) firstCredit.set(c.orderId, Math.min(firstCredit.get(c.orderId) ?? Infinity, c.createdAt.getTime()));
+  const paymentById = new Map(payments.map((p) => [p.id, p]));
+  const repayments = new Set<string>();
+  for (const t of pos) {
+    const payment = paymentById.get(t.sourceRefId!);
+    const credited = payment ? firstCredit.get(payment.orderId) : undefined;
+    if (payment && credited !== undefined && credited < payment.createdAt.getTime()) repayments.add(t.id);
+  }
+  return repayments;
+}
+
 async function businessDayStartHourFor(tid: string): Promise<number> {
   const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessDayStartHour: true } });
   return profile?.businessDayStartHour ?? 0;
@@ -153,7 +176,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       tax, completedOrders, cancelledOrders, transactionsIn, trendTransactions,
       appointmentsPaid, membershipPayments, expenses, goodsReceiptItems,
       cancelledPurchases, supplierPayments, debtorCustomers, openFolios,
-      creditorSuppliers, employeesForBranch,
+      creditorSuppliers, employeesForBranch, creditEntries, trendCreditEntries,
     ] = await Promise.all([
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
@@ -170,7 +193,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       }),
       prisma.transaction.findMany({
         where: { tenantId: tid, direction: "IN", status: "COMPLETE", createdAt: { gte: trendStart, lte: trendEnd }, ...(locationId ? { locationId } : {}) },
-        select: { amount: true, createdAt: true },
+        select: { id: true, source: true, sourceRefId: true, amount: true, createdAt: true },
       }),
       locationId ? Promise.resolve([]) : prisma.appointment.findMany({ where: { tenantId: tid, paymentStatus: "PAID", updatedAt: { gte: start, lte: end } }, select: { amount: true } }),
       locationId ? Promise.resolve([]) : prisma.membershipPayment.findMany({ where: { tenantId: tid, status: "PAID", createdAt: { gte: start, lte: end } }, select: { amount: true } }),
@@ -188,6 +211,17 @@ reportsRouter.get("/sales", async (req, res, next) => {
       }),
       prisma.supplier.findMany({ where: { tenantId: tid, balance: { gt: 0 } }, select: { id: true, name: true, balance: true }, orderBy: { balance: "desc" } }),
       prisma.employee.findMany({ where: { tenantId: tid }, select: { id: true, firstName: true, lastName: true, defaultLocation: { select: { name: true } } } }),
+      // Credit given = what an order was completed short by, recorded at the
+      // moment it was completed — unlike re-deriving "total minus paid" now,
+      // it doesn't shrink to zero when the customer later repays.
+      prisma.customerCreditEntry.findMany({
+        where: { tenantId: tid, type: "CREDIT", createdAt: { gte: start, lte: end }, order: { status: "COMPLETED", ...(locationId ? { locationId } : {}) } },
+        select: { amount: true, orderId: true },
+      }),
+      prisma.customerCreditEntry.findMany({
+        where: { tenantId: tid, type: "CREDIT", createdAt: { gte: trendStart, lte: trendEnd }, order: { status: "COMPLETED", ...(locationId ? { locationId } : {}) } },
+        select: { amount: true, createdAt: true },
+      }),
     ]);
 
     // ---- Total Revenue: cash actually received (Transaction ledger is the
@@ -199,7 +233,13 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const folioDepositsCash = round2(transactionsIn.filter((t) => t.source === "FOLIO_DEPOSIT").reduce((s, t) => s + Number(t.amount), 0));
     const folioSettlementsCash = round2(transactionsIn.filter((t) => t.source === "FOLIO_SETTLEMENT").reduce((s, t) => s + Number(t.amount), 0));
     const serviceCenterCash = round2(appointmentsPaid.reduce((s, a) => s + Number(a.amount), 0) + membershipPayments.reduce((s, m) => s + Number(m.amount), 0));
-    const totalRevenue = round2(posSalesCash + folioDepositsCash + folioSettlementsCash + serviceCenterCash);
+    // Revenue = money taken in for sales made, plus sales given on credit —
+    // minus cash that merely repaid earlier credit (already counted then).
+    const allTxns = [...new Map([...transactionsIn, ...trendTransactions].map((t) => [t.id, t])).values()];
+    const repaymentTxnIds = await creditRepaymentTxnIds(tid, allTxns);
+    const creditRepaymentsCash = round2(transactionsIn.filter((t) => repaymentTxnIds.has(t.id)).reduce((s, t) => s + Number(t.amount), 0));
+    const creditSalesRevenue = round2(creditEntries.reduce((s, e) => s + Number(e.amount), 0));
+    const totalRevenue = round2(posSalesCash - creditRepaymentsCash + creditSalesRevenue + folioDepositsCash + folioSettlementsCash + serviceCenterCash);
 
     // ---- Completed orders: the sales-volume + Net Revenue/Profit basis.
     // Deliberately NOT the same base as Total Revenue above — a sale settled
@@ -220,8 +260,6 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const compSessions = new Map<string, { id: string; title: string; hostName: string | null; startsAt: Date | null; endsAt: Date | null; complimentaryValue: number; complimentaryCogs: number; guestRevenue: number; guestCogs: number; orders: number }>();
     let complimentaryValue = 0;
     let complimentaryCogs = 0;
-    let creditGiven = 0;
-    let creditCount = 0;
     let complimentaryCount = 0;
 
     for (const order of completedOrders) {
@@ -230,16 +268,6 @@ reportsRouter.get("/sales", async (req, res, next) => {
       taxCollected += fin.taxAmount;
       discountsGiven += Number(order.discount);
       if (order.channel === "FOOD") menuOrdersCompleted += 1;
-
-      // A completed order can be settled short of its total (the rest parked
-      // as customer credit at /settle) — that gap never produces a
-      // Transaction row, so it's invisible to the cash-basis breakdown below
-      // unless counted here explicitly.
-      if (order.saleType !== "COMPLIMENTARY") {
-        const paidSoFar = order.payments.reduce((s, p) => s + Number(p.amount), 0);
-        const shortfall = round2(fin.total - paidSoFar);
-        if (shortfall > 0.01) { creditGiven += shortfall; creditCount += 1; }
-      }
 
       for (const line of fin.taxLines) {
         const bucket = taxBuckets.get(line.key) ?? { ...line, net: 0, tax: 0, gross: 0 };
@@ -308,7 +336,9 @@ reportsRouter.get("/sales", async (req, res, next) => {
     discountsGiven = round2(discountsGiven);
     complimentaryValue = round2(complimentaryValue);
     complimentaryCogs = round2(complimentaryCogs);
-    creditGiven = round2(creditGiven);
+    // Credit given in the period (see creditEntries above).
+    const creditGiven = creditSalesRevenue;
+    const creditCount = new Set(creditEntries.map((e) => e.orderId)).size;
 
     const soldItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).map((i) => ({ ...i, revenue: round2(i.revenue) }));
     const topItems = soldItems.slice(0, 10);
@@ -433,7 +463,11 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // ---- Revenue trend: 11 days centered on the range's end date ----
     const trendMap = new Map<string, number>();
     for (let d = trendStart; d <= trendEnd; d = addBusinessDays(d, 1)) trendMap.set(businessDayKey(startHour, d), 0);
-    for (const t of trendTransactions) trendMap.set(businessDayKey(startHour, t.createdAt), (trendMap.get(businessDayKey(startHour, t.createdAt)) ?? 0) + Number(t.amount));
+    for (const t of trendTransactions) {
+      if (repaymentTxnIds.has(t.id)) continue;
+      trendMap.set(businessDayKey(startHour, t.createdAt), (trendMap.get(businessDayKey(startHour, t.createdAt)) ?? 0) + Number(t.amount));
+    }
+    for (const e of trendCreditEntries) trendMap.set(businessDayKey(startHour, e.createdAt), (trendMap.get(businessDayKey(startHour, e.createdAt)) ?? 0) + Number(e.amount));
     const trend = [...trendMap.entries()].map(([trendDate, value]) => ({ date: trendDate, revenue: round2(value) }));
 
     // ---- Debtors: a live snapshot, not scoped to the selected period —
@@ -476,7 +510,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         posSalesCash, folioDepositsCash, folioSettlementsCash, serviceCenterCash, totalRevenue,
         taxCollected, discountsGiven,
         complimentaryValue, complimentaryCogs,
-        creditGiven, creditCount,
+        creditGiven, creditCount, creditRepaymentsCash,
         completedSalesValue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
         serviceCenterExcludedByLocationFilter: !!locationId,
       },
