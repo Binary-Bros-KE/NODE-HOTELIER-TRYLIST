@@ -62,3 +62,17 @@ export async function resolveEffectiveLocation(
 export async function resolveActorLocation(tid: string, userId: string | undefined): Promise<string | null> {
   return employeeLocationId(tid, userId);
 }
+
+/** Like resolveActorLocation, but also honours the location the client says
+ * it is working at (Reception's location picker). A pinned-to-one employee is
+ * always that location; otherwise a requested location is used only if it
+ * belongs to the tenant (and to the employee's set, when they have one).
+ * Never errors — an unusable request just falls back to null. */
+export async function resolveActorLocationWithHint(tid: string, userId: string | undefined, requested: string | undefined): Promise<string | null> {
+  const assigned = await employeeLocationIds(tid, userId);
+  if (assigned.length === 1) return assigned[0];
+  if (!requested) return null;
+  if (assigned.length > 1 && !assigned.includes(requested)) return null;
+  const location = await prisma.location.findFirst({ where: { id: requested, tenantId: tid, isActive: true }, select: { id: true } });
+  return location?.id ?? null;
+}
