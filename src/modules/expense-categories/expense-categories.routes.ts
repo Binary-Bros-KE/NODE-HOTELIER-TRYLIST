@@ -23,9 +23,24 @@ const tenantId = (req: { tenantId?: string }) => {
   return req.tenantId;
 };
 
+// A brand-new workspace starts with a handful of everyday categories so the
+// first expense never hits an "add a category first" wall. Only seeded when the
+// tenant has none at all, so anything they add or rename is never overwritten.
+const DEFAULT_CATEGORIES = [
+  { name: "Transport", description: "Fares, fuel, deliveries" },
+  { name: "Supplies", description: "Cleaning, stationery, consumables" },
+  { name: "Utilities", description: "Power, water, internet, airtime" },
+  { name: "Repairs & Maintenance", description: "Fixes, spare parts, servicing" },
+  { name: "Miscellaneous", description: "Anything that doesn't fit elsewhere" },
+];
+
 expenseCategoriesRouter.get("/", async (req, res) => {
+  const tid = tenantId(req);
+  if ((await prisma.expenseCategory.count({ where: { tenantId: tid } })) === 0) {
+    await prisma.expenseCategory.createMany({ data: DEFAULT_CATEGORIES.map((c) => ({ tenantId: tid, ...c })), skipDuplicates: true });
+  }
   const categories = await prisma.expenseCategory.findMany({
-    where: { tenantId: tenantId(req) },
+    where: { tenantId: tid },
     select: { id: true, name: true, description: true, isActive: true, createdAt: true, updatedAt: true, _count: { select: { expenses: true } } },
     orderBy: [{ isActive: "desc" }, { name: "asc" }],
   });
