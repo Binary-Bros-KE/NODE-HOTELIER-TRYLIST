@@ -1792,19 +1792,20 @@ model Product {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  menuItems          MenuItem[]
-  variantStocks      MenuItemVariant[]         @relation("VariantStock")
-  addonStocks        Addon[]                   @relation("AddonStock")
-  movements          InventoryMovement[]
-  recipeIngredients  RecipeIngredient[]
-  stocks             ProductStock[]
-  orderItems         PosOrderItem[]
-  purchaseItems      PurchaseItem[]
-  requisitionItems   PurchaseRequisitionItem[]
-  goodsReceiptItems  GoodsReceiptItem[]
-  stockTransferItems StockTransferItem[]
-  stockDispatchItems StockDispatchItem[]
-  stockReceiptItems  StockReceiptItem[]
+  menuItems                  MenuItem[]
+  variantStocks              MenuItemVariant[]           @relation("VariantStock")
+  addonStocks                Addon[]                     @relation("AddonStock")
+  movements                  InventoryMovement[]
+  recipeIngredients          RecipeIngredient[]
+  stocks                     ProductStock[]
+  orderItems                 PosOrderItem[]
+  purchaseItems              PurchaseItem[]
+  requisitionItems           PurchaseRequisitionItem[]
+  goodsReceiptItems          GoodsReceiptItem[]
+  stockTransferItems         StockTransferItem[]
+  stockDispatchItems         StockDispatchItem[]
+  variantIngredientOverrides MenuItemVariantIngredient[] @relation("VariantIngredientProduct")
+  stockReceiptItems          StockReceiptItem[]
 
   @@unique([tenantId, sku])
   @@unique([tenantId, barcode])
@@ -1972,6 +1973,9 @@ model Location {
   // before a ticket can be started. dispatchFromLocationId is the Store that
   // supplies this kitchen (falls back to the first STORE location).
   requireStoreDispatch   Boolean                @default(false)
+  // Queue the store's dispatch slip to the store's printer the moment an order
+  // is posted (true), or leave printing to the storekeeper's Print button (false).
+  dispatchAutoPrint      Boolean                @default(true)
   dispatchFromLocationId String?
   // Free-text blocks a document can print above/below its body, specific to
   // this location (e.g. a branch's own thank-you note or return policy).
@@ -2094,6 +2098,21 @@ model MenuItem {
 // Small/Medium/Large, Cappuccino: Regular/Large. NOT an add-on. An item has
 // zero or many; with none, the item's base price is used, otherwise each
 // variant carries its own price.
+// One ingredient a variant changes relative to its recipe: a different
+// quantity, removed altogether (isRemoved), or an extra the recipe lacks.
+model MenuItemVariantIngredient {
+  id        String          @id @default(cuid())
+  variantId String
+  variant   MenuItemVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product         @relation("VariantIngredientProduct", fields: [productId], references: [id], onDelete: Restrict)
+  quantity  Decimal         @default(0) @db.Decimal(12, 3)
+  isRemoved Boolean         @default(false)
+
+  @@unique([variantId, productId])
+  @@index([productId])
+}
+
 model MenuItemVariant {
   id                   String                        @id @default(cuid())
   tenantId             String
@@ -2109,6 +2128,13 @@ model MenuItemVariant {
   stockProductId       String?
   stockProduct         Product?                      @relation("VariantStock", fields: [stockProductId], references: [id], onDelete: SetNull)
   stockQtyPerUnit      Decimal?                      @db.Decimal(12, 3)
+  // Or a recipe instead of a single product: this size is made from that recipe
+  // (any recipe - a dedicated one per size, or the same one as its siblings),
+  // with ingredientOverrides changing quantities, dropping ingredients, or
+  // adding extras for just this variant. Replaces the parent item's stock.
+  recipeId             String?
+  recipe               Recipe?                       @relation("VariantRecipe", fields: [recipeId], references: [id], onDelete: SetNull)
+  ingredientOverrides  MenuItemVariantIngredient[]
   isActive             Boolean                       @default(true)
   sortOrder            Int                           @default(0)
   createdAt            DateTime                      @default(now())
@@ -2324,6 +2350,13 @@ model Payment {
   @@index([tenantId, paymentMethodId])
 }
 
+// What a queued print job prints: an order's receipt, or the store's
+// dispatch slip for a kitchen's ingredient request.
+enum PrintJobKind {
+  RECEIPT
+  DISPATCH
+}
+
 enum PrintJobStatus {
   PENDING
   CLAIMED
@@ -2341,25 +2374,28 @@ enum PrintJobStatus {
 // PENDING -> CLAIMED (atomically, so two polling hosts can't both print it)
 // -> DONE or FAILED.
 model PrintJob {
-  id          String         @id @default(cuid())
-  tenantId    String
-  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  locationId  String
-  location    Location       @relation(fields: [locationId], references: [id], onDelete: Cascade)
-  orderId     String
-  order       PosOrder       @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  status      PrintJobStatus @default(PENDING)
+  id                String         @id @default(cuid())
+  tenantId          String
+  tenant            Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  locationId        String
+  location          Location       @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  orderId           String
+  order             PosOrder       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status            PrintJobStatus @default(PENDING)
+  kind              PrintJobKind   @default(RECEIPT)
+  // For DISPATCH jobs: the request whose slip is printed (locationId is then the store).
+  dispatchRequestId String?
   // Plain id, no relation — same convention as PosOrder.createdBy.
-  requestedBy String?
-  claimedBy   String?
-  claimedAt   DateTime?
-  completedAt DateTime?
-  error       String?
+  requestedBy       String?
+  claimedBy         String?
+  claimedAt         DateTime?
+  completedAt       DateTime?
+  error             String?
   // Set (and re-set) when the requester nudges a job that's taking a while
   // — surfaced to whichever device is polling /pending so a stuck job is
   // visible there, not just silently waiting.
-  nudgedAt    DateTime?
-  createdAt   DateTime       @default(now())
+  nudgedAt          DateTime?
+  createdAt         DateTime       @default(now())
 
   @@index([tenantId, locationId, status])
   @@index([orderId])
@@ -2457,6 +2493,10 @@ model Addon {
   stockProductId  String?
   stockProduct    Product?            @relation("AddonStock", fields: [stockProductId], references: [id], onDelete: SetNull)
   stockQtyPerUnit Decimal?            @db.Decimal(12, 3)
+  // Or a recipe (like a menu item): one unit of the add-on consumes that
+  // recipe's ingredients. Used instead of stockProductId, never both.
+  recipeId        String?
+  recipe          Recipe?             @relation("AddonRecipe", fields: [recipeId], references: [id], onDelete: SetNull)
   isActive        Boolean             @default(true)
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
@@ -2499,6 +2539,8 @@ model Recipe {
   updatedAt        DateTime           @updatedAt
   ingredients      RecipeIngredient[]
   menuItems        MenuItem[]
+  variants         MenuItemVariant[]  @relation("VariantRecipe")
+  addons           Addon[]            @relation("AddonRecipe")
 
   @@unique([tenantId, name])
   @@index([tenantId])

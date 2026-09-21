@@ -27,7 +27,7 @@ const handle = (fn: (req: Request, res: Response) => Promise<void>) => (req: Req
 };
 
 const requestInclude = {
-  items: true,
+  items: { include: { product: { select: { unit: true } } } },
   fromLocation: { select: { id: true, name: true } },
   toLocation: { select: { id: true, name: true } },
   order: { select: { id: true, orderNumber: true, status: true, table: { select: { label: true } } } },

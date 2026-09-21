@@ -127,10 +127,17 @@ type Moneyish = Prisma.Decimal | number | null;
  * Null means "can't be costed" (a Service line, or a MenuItem with none of
  * the above) — never silently treated as zero, so it can be surfaced as a
  * caveat instead of quietly inflating Net Revenue. */
+type CostProduct = { id: string; unitCost: Moneyish; packSize: Moneyish };
 type CostableItem = {
   quantity: number;
   product: { unitCost: Moneyish; packSize: Moneyish } | null;
-  variant: { stockQtyPerUnit: Moneyish; stockProduct: { unitCost: Moneyish; packSize: Moneyish } | null } | null;
+  variant: {
+    stockQtyPerUnit: Moneyish;
+    stockProduct: { unitCost: Moneyish; packSize: Moneyish } | null;
+    // A variant made from its own recipe (with overrides) instead of one product.
+    recipe?: { ingredients: { quantity: Moneyish; product: CostProduct }[] } | null;
+    ingredientOverrides?: { quantity: Moneyish; isRemoved: boolean; product: CostProduct }[];
+  } | null;
   service: { id: string } | null;
   menuItem: {
     stockQtyPerUnit: Moneyish;
@@ -144,6 +151,17 @@ function resolveItemCost(item: CostableItem): number | null {
   if (item.variant?.stockProduct) {
     const perUnit = Number(item.variant.stockQtyPerUnit ?? 1);
     return stockValue(perUnit * item.quantity, item.variant.stockProduct.unitCost, item.variant.stockProduct.packSize);
+  }
+  if (item.variant?.recipe) {
+    const merged = new Map<string, { quantity: Moneyish; product: CostProduct }>();
+    for (const ing of item.variant.recipe.ingredients) merged.set(ing.product.id, ing);
+    for (const o of item.variant.ingredientOverrides ?? []) {
+      if (o.isRemoved) merged.delete(o.product.id);
+      else merged.set(o.product.id, { quantity: o.quantity, product: o.product });
+    }
+    const lines = [...merged.values()];
+    if (lines.some((ing) => ing.product.unitCost == null)) return null;
+    return lines.reduce((sum, ing) => sum + (stockValue(ing.quantity, ing.product.unitCost, ing.product.packSize) ?? 0), 0) * item.quantity;
   }
   if (item.menuItem?.recipe?.ingredients.length) {
     if (item.menuItem.recipe.ingredients.some((ing) => ing.product.unitCost == null)) return null;
@@ -170,14 +188,21 @@ const orderItemInclude = {
   addons: { select: { quantity: true, unitPrice: true } },
   product: { select: { id: true, name: true, unit: true, unitCost: true, packSize: true } },
   service: { select: { id: true, name: true } },
-  variant: { select: { id: true, name: true, stockQtyPerUnit: true, stockProduct: { select: { unitCost: true, packSize: true } } } },
+  variant: {
+    select: {
+      id: true, name: true, stockQtyPerUnit: true,
+      stockProduct: { select: { unitCost: true, packSize: true } },
+      recipe: { select: { ingredients: { select: { quantity: true, product: { select: { id: true, unitCost: true, packSize: true } } } } } },
+      ingredientOverrides: { select: { quantity: true, isRemoved: true, product: { select: { id: true, unitCost: true, packSize: true } } } },
+    },
+  },
   menuItem: {
     select: {
       id: true,
       name: true,
       stockQtyPerUnit: true,
       product: { select: { unitCost: true, packSize: true } },
-      recipe: { select: { ingredients: { select: { quantity: true, product: { select: { unitCost: true, packSize: true } } } } } },
+      recipe: { select: { ingredients: { select: { quantity: true, product: { select: { id: true, unitCost: true, packSize: true } } } } } },
     },
   },
 } as const;

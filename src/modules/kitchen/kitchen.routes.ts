@@ -6,7 +6,9 @@ import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
 import { employeeLocationIds } from "../../lib/location.js";
-import { DispatchError, createDispatchRequest, orderDispatchInfo } from "../../lib/dispatch.js";
+import { addonStockInclude, variantStockSelect } from "../../lib/stockRequirements.js";
+import { DispatchError, createDispatchRequest, lineNeedsDispatch, orderDispatchInfo } from "../../lib/dispatch.js";
+import { settleServedAdditions } from "../../lib/orderStock.js";
 
 export const kitchenRouter = Router();
 kitchenRouter.use(requireModule("KITCHEN"));
@@ -18,19 +20,25 @@ const orderInclude = {
   dispatchRequests: { orderBy: { requestedAt: "desc" }, take: 5, select: { id: true, requestNo: true, status: true, rejectReason: true, requestedAt: true, respondedAt: true } },
   items: { include: {
     menuItem: { include: { category: true, product: true, recipe: { include: { ingredients: { include: { product: true } } } } } },
-    variant: { select: { id: true, name: true, stockProductId: true, stockQtyPerUnit: true, stockProduct: { select: { id: true, name: true } } } },
-    addons: { include: { addon: { include: { stockProduct: { select: { id: true, name: true } } } } } },
+    variant: { select: variantStockSelect },
+    addons: { include: { addon: { include: addonStockInclude } } },
     dispatchRequest: { select: { id: true, requestNo: true, status: true } },
   } },
 } satisfies Prisma.PosOrderInclude;
 
 type KitchenOrder = Prisma.PosOrderGetPayload<{ include: typeof orderInclude }>;
-const withDispatch = (order: KitchenOrder) => ({ ...order, dispatch: orderDispatchInfo(order) });
+// Each line says whether it still has to be requested from the store, so the
+// kitchen can see exactly what was added since the last request.
+const withDispatch = (order: KitchenOrder) => {
+  const dispatch = orderDispatchInfo(order);
+  return { ...order, dispatch, items: order.items.map((item) => ({ ...item, needsDispatch: dispatch.required && lineNeedsDispatch(item) })) };
+};
 
 // Same wrapper idea as housekeeping: handlers throw DispatchError, get a clean status.
 const handle = (fn: (req: Request, res: Response) => Promise<void>) => (req: Request, res: Response, next: NextFunction) => {
   fn(req, res).catch((error) => {
     if (error instanceof DispatchError) { res.status(error.status).json({ error: error.message, ...(error.code ? { code: error.code } : {}) }); return; }
+    if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
     next(error);
   });
 };
@@ -80,6 +88,9 @@ kitchenRouter.get("/orders/updated", handle(async (req, res) => {
 kitchenRouter.patch("/orders/:id/ack-updates", handle(async (req, res) => {
   const order = await loadTicket(req, ["OPEN", "PREPARING", "READY", "SERVED"]);
   await prisma.$transaction(async (tx) => {
+    // On a served order at a store-dispatch location this is when the added
+    // items' ingredients leave the kitchen shelf (and only once dispatched).
+    await settleServedAdditions(tx, tenantId(req), order, req);
     await tx.posOrderItem.updateMany({ where: { orderId: order.id, addedAfterSend: true }, data: { addedAfterSend: false } });
     // Acknowledged: the bar has seen the additions, so fold identical lines
     // together (5 x White Cap, not 1 + 1 + 1 + 2) to keep the bill short.
@@ -118,14 +129,14 @@ kitchenRouter.patch("/orders/:id/ready", handle(async (req, res) => {
 
 /** The chef asks the store for the ingredients of every line not yet covered. */
 kitchenRouter.post("/orders/:id/request-dispatch", handle(async (req, res) => {
-  const order = await loadTicket(req, ["OPEN", "PREPARING", "READY"]);
+  const order = await loadTicket(req, ["OPEN", "PREPARING", "READY", "SERVED"]);
   const request = await createDispatchRequest({ ...order, tenantId: tenantId(req) }, req.userId, typeof req.body?.note === "string" ? req.body.note.slice(0, 300) : undefined);
   res.status(201).json({ request, order: withDispatch(await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude })) });
 }));
 
 /** Withdraws a still-waiting request (asked by mistake); its lines become requestable again. */
 kitchenRouter.post("/orders/:id/cancel-dispatch", handle(async (req, res) => {
-  const order = await loadTicket(req, ["OPEN", "PREPARING", "READY"]);
+  const order = await loadTicket(req, ["OPEN", "PREPARING", "READY", "SERVED"]);
   await prisma.$transaction(async (tx) => {
     const waiting = await tx.stockDispatchRequest.findMany({ where: { orderId: order.id, tenantId: tenantId(req), status: "REQUESTED" }, select: { id: true } });
     if (waiting.length === 0) throw new DispatchError("There is no waiting request to cancel", 409);

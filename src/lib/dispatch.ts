@@ -32,6 +32,9 @@ type DispatchOrder = {
 
 const needsStock = (item: OrderItemForStock) => computeStockRequirements([item]).size > 0;
 
+/** A line that consumes stock and hasn't been covered by any store request yet. */
+export const lineNeedsDispatch = (item: OrderItemForStock & { dispatchRequestId: string | null }) => !item.dispatchRequestId && needsStock(item);
+
 /** Where this order's ingredients stand with the store. `clear` = the chef may start/finish it. */
 export function orderDispatchInfo(order: DispatchOrder) {
   if (!dispatchRequired(order.location)) return { required: false, state: "NOT_REQUIRED" as DispatchState, clear: true, uncovered: 0, rejectReason: null as string | null };
@@ -76,7 +79,7 @@ type RequestableOrder = {
 export async function createDispatchRequest(order: RequestableOrder, actorId: string | undefined, note?: string) {
   const location = order.location;
   if (!location || !dispatchRequired(location)) throw new DispatchError("This location doesn't use store dispatch", 409);
-  if (!["OPEN", "PREPARING", "READY"].includes(order.status)) throw new DispatchError("This order can't request ingredients any more", 409);
+  if (!["OPEN", "PREPARING", "READY", "SERVED"].includes(order.status)) throw new DispatchError("This order can't request ingredients any more", 409);
   const lines = order.items.filter((item) => !item.dispatchRequestId && needsStock(item));
   if (lines.length === 0) throw new DispatchError("Everything on this order has already been requested", 409);
   const fromLocationId = await supplyingStoreId(order.tenantId, location);
@@ -95,6 +98,7 @@ export async function createDispatchRequest(order: RequestableOrder, actorId: st
         requestedBy: actorId ?? null, requestedByName: requesterName,
         items: { create: [...requirements].map(([productId, r]) => ({ productId, productName: r.name, requestedQty: r.quantity })) },
       },
+      include: { items: true },
     });
     // Claim the lines conditionally: a second tap (or another chef) finds them taken and aborts.
     const claimed = await tx.posOrderItem.updateMany({ where: { orderId: order.id, id: { in: lines.map((l) => l.id) }, dispatchRequestId: null }, data: { dispatchRequestId: request.id } });

@@ -11,8 +11,10 @@ import { resolveEffectiveLocation, employeeLocationId } from "../../lib/location
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
 import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger.js";
 import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
-import { computeStockRequirements, type OrderItemForStock } from "../../lib/stockRequirements.js";
-import { dispatchRequired } from "../../lib/dispatch.js";
+import { computeStockRequirements, addonStockInclude, addonStockSelect, variantStockInclude, variantStockSelect, type OrderItemForStock } from "../../lib/stockRequirements.js";
+import { DispatchError, dispatchRequired, orderDispatchInfo, supplyingStoreId } from "../../lib/dispatch.js";
+import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
+import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, settleServedAdditions } from "../../lib/orderStock.js";
 
 // POS configuration, stores, and stock all remain scoped to the tenant supplied
 // by the authenticated request context (currently x-tenant-id during scaffolding).
@@ -101,7 +103,7 @@ type OrderLineInput = z.infer<typeof orderLineSchema>;
 // and the product/recipe used later for stock deduction. Add-ons are a flat
 // tenant catalog now — validated separately, not per item.
 const menuLineInclude = {
-  variants: { where: { isActive: true }, include: { stockProduct: { select: { id: true, name: true } } } },
+  variants: { where: { isActive: true }, include: variantStockInclude },
   product: true,
   recipe: { include: { ingredients: { include: { product: true } } } },
 } satisfies Prisma.MenuItemInclude;
@@ -134,7 +136,7 @@ async function resolveMenuLines(tid: string, lines: OrderLineInput[], taxDefault
     addonIds.length
       ? prisma.addon.findMany({
           where: { id: { in: addonIds }, tenantId: tid, isActive: true },
-          select: { id: true, name: true, price: true, stockProductId: true, stockQtyPerUnit: true, stockProduct: { select: { id: true, name: true } } },
+          select: addonStockSelect,
         })
       : Promise.resolve([]),
   ]);
@@ -238,11 +240,12 @@ function tenantIdFor(request: { tenantId?: string }): string {
 export const orderInclude = {
   items: { include: {
     menuItem: { include: { product: true, recipe: { include: { ingredients: { include: { product: true } } } } } },
-    variant: { select: { id: true, name: true, stockProductId: true, stockQtyPerUnit: true, stockProduct: { select: { id: true, name: true } } } },
+    variant: { select: variantStockSelect },
     product: { select: { id: true, name: true, unit: true } },
     service: { select: { id: true, name: true, unit: { select: { name: true } } } },
-    addons: { include: { addon: { include: { stockProduct: { select: { id: true, name: true } } } } } },
+    addons: { include: { addon: { include: addonStockInclude } } },
     returnRequests: { orderBy: { requestedAt: "desc" } },
+    dispatchRequest: { select: { status: true } },
   } },
   payments: { include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } } },
   table: true,
@@ -668,6 +671,9 @@ posRouter.post("/orders", async (req, res) => {
       }
       return created;
     });
+    // Store-dispatch locations: the ingredients are requested from the store right now,
+    // so the chef just sees "waiting for store approval".
+    await autoRequestDispatch(tid, order.id, req.userId);
     res.status(201).json({ order: withFinancials(order, tax) });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
@@ -734,7 +740,8 @@ posRouter.post("/orders/:id/items", async (req, res) => {
     const updated = await prisma.$transaction(async (tx) => {
       for (const line of resolvedLines) {
         const key = lineKey(line.variantId, line.addons);
-        const existing = !flagAsUpdate ? order.items.find((row) => row.menuItemId === line.menuItemId && lineKey(row.variantId, row.addons) === key) : undefined;
+        // A line the store already dispatched for is never bumped in place - the extra would look covered.
+        const existing = !flagAsUpdate ? order.items.find((row) => !row.dispatchRequestId && row.menuItemId === line.menuItemId && lineKey(row.variantId, row.addons) === key) : undefined;
         if (existing) {
           await tx.posOrderItem.update({ where: { id: existing.id }, data: { quantity: { increment: line.quantity } } });
           continue;
@@ -755,8 +762,13 @@ posRouter.post("/orders/:id/items", async (req, res) => {
         });
       }
       if (order.status === "SERVED") {
-        const stockLocationId = await resolveStockLocationId(tid, order.locationId);
-        if (!stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this order"), { status: 400 });
+        // At a store-dispatch location the kitchen shelf is empty until the store
+        // dispatches, so this round follows the normal flow: the chef sees it,
+        // requests it, the store sends only what it needs, and the stock is taken
+        // when the chef marks it prepared (settleServedAdditions).
+        const deferStock = dispatchRequired(order.location);
+        const stockLocationId = deferStock ? null : await resolveStockLocationId(tid, order.locationId);
+        if (!deferStock && !stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this order"), { status: 400 });
         // Only the newly added items need deducting — the rest were already
         // committed when the order was first served. Reuses menuItemsById's
         // full variant list (with its own stockProduct) rather than just a
@@ -775,7 +787,7 @@ posRouter.post("/orders/:id/items", async (req, res) => {
             addons: line.addons.map((a) => ({ quantity: a.quantity, addon: addonsById.get(a.addonId)! })),
           };
         });
-        await deductStockForOrder(tx, tid, computeStockRequirements(newItems), stockLocationId, order.orderNumber, req);
+        if (stockLocationId) await deductStockForOrder(tx, tid, computeStockRequirements(newItems), stockLocationId, order.orderNumber, req);
         // Only the newly added round is a new sale — the rest was recorded when the order was served.
         await recordMenuLedger(tx, {
           tenantId: tid,
@@ -799,6 +811,7 @@ posRouter.post("/orders/:id/items", async (req, res) => {
       }
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
+    await autoRequestDispatch(tid, order.id, req.userId);
     res.status(201).json({ order: withFinancials(updated, tax) });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
@@ -864,6 +877,18 @@ posRouter.patch("/orders/:id/items/:itemId", async (req, res) => {
   if (!existing) { res.status(404).json({ error: "That line isn't on this order" }); return; }
   if (!existing.menuItemId) { res.status(409).json({ error: "Only menu-item lines can be edited" }); return; }
 
+  // Once the kitchen has asked the store for a line's ingredients, changing what
+  // it needs would leave the dispatch out of step. Fewer of the same thing is fine;
+  // anything else is a new round (or remove the line).
+  if (existing.dispatchRequestId && existing.dispatchRequest?.status !== "REQUESTED") {
+    const sameShape = ("variantId" in parsed.data ? (parsed.data.variantId ?? null) : existing.variantId) === existing.variantId
+      && (parsed.data.addons === undefined || JSON.stringify(parsed.data.addons.map((a) => [a.addonId, a.quantity]).sort()) === JSON.stringify(existing.addons.map((a) => [a.addonId, a.quantity]).sort()));
+    if (!sameShape || (parsed.data.quantity ?? existing.quantity) > existing.quantity) {
+      res.status(409).json({ error: "The store already handled the ingredients for this line. Add the extra as a new item instead." });
+      return;
+    }
+  }
+
   const desired: OrderLineInput = {
     menuItemId: existing.menuItemId,
     variantId: ("variantId" in parsed.data ? parsed.data.variantId : existing.variantId) ?? undefined,
@@ -919,6 +944,8 @@ posRouter.patch("/orders/:id/items/:itemId", async (req, res) => {
           addons: { create: resolved.addons.map((addon) => ({ addonId: addon.addonId, quantity: addon.quantity, unitPrice: addon.unitPrice })) },
         },
       });
+      // The store hasn't answered yet: keep its request in step with the edited line.
+      if (existing.dispatchRequestId && existing.dispatchRequest?.status === "REQUESTED") await refreshOpenRequest(tx, tid, existing.dispatchRequestId);
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
     res.status(200).json({ order: withFinancials(updated, tax) });
@@ -956,6 +983,7 @@ posRouter.delete("/orders/:id/items/:itemId", async (req, res) => {
         await applyStockDelta(tx, tid, stockLocationId, before, new Map(), order.orderNumber, req);
       }
       await tx.posOrderItem.delete({ where: { id: existing.id } });
+      if (existing.dispatchRequestId && existing.dispatchRequest?.status === "REQUESTED") await refreshOpenRequest(tx, tid, existing.dispatchRequestId);
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
     res.status(200).json({ order: withFinancials(updated, tax) });
@@ -977,7 +1005,7 @@ async function resolveStockLocationId(tid: string, orderLocationId: string | nul
 function resolvedLinesForStock(
   lines: ResolvedLine[],
   menuItemsById: Map<string, Prisma.MenuItemGetPayload<{ include: typeof menuLineInclude }>>,
-  addonsById: Map<string, Prisma.AddonGetPayload<{ select: { id: true; price: true; stockProductId: true; stockQtyPerUnit: true; stockProduct: { select: { id: true; name: true } } } }>>,
+  addonsById: Map<string, Prisma.AddonGetPayload<{ select: typeof addonStockSelect }>>,
 ): OrderItemForStock[] {
   return lines.map((line) => {
     const mi = menuItemsById.get(line.menuItemId)!;
@@ -989,31 +1017,6 @@ function resolvedLinesForStock(
       addons: line.addons.map((a) => ({ quantity: a.quantity, addon: addonsById.get(a.addonId)! })),
     };
   });
-}
-
-/** Decrements ProductStock for each requirement and logs a matching DISPATCH
- * movement — the actual moment ingredients leave the building. Throws (never
- * responds directly) so callers can shape their own error response. */
-async function deductStockForOrder(
-  tx: Prisma.TransactionClient,
-  tid: string,
-  requirements: Map<string, { quantity: number; name: string }>,
-  locationId: string,
-  orderNumber: number,
-  req: { userId?: string },
-) {
-  for (const [productId, requirement] of requirements) {
-    try {
-      await recordStockMovement(tx, {
-        tenantId: tid, productId, locationId, type: "SALE", quantity: -requirement.quantity,
-        note: `Used for POS order #${orderNumber}`, sourceType: "POS_ORDER", sourceRefId: String(orderNumber),
-        performedBy: req.userId ?? null, label: requirement.name,
-      });
-    } catch (error) {
-      if (error instanceof InsufficientStockError) throw new Error(`Not enough ${requirement.name} at this location — transfer more stock in`);
-      throw error;
-    }
-  }
 }
 
 /** Marks a READY order served — the point the ingredients are actually gone,
@@ -1049,6 +1052,12 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
   if (activeOrder.location?.serveMode === "COUNTER") {
     const allowed = await hasPermission(tid, req.userId, "POS_APPROVE_COUNTER");
     if (!allowed) { res.status(403).json({ error: "You don't have permission to approve counter orders" }); return; }
+  }
+
+  const dispatch = orderDispatchInfo(activeOrder);
+  if (!dispatch.clear) {
+    res.status(409).json({ error: dispatch.state === "WAITING" ? "The kitchen is still waiting for the store to dispatch the added items" : "The added items haven't been requested from the store yet", code: "DISPATCH_REQUIRED" });
+    return;
   }
 
   const stockLocationId = await resolveStockLocationId(tid, activeOrder.locationId);
@@ -1091,16 +1100,23 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
  * it's gated to POS_APPROVE_COUNTER, same as serving there. */
 posRouter.patch("/orders/:id/ack-updates", async (req, res) => {
   const tid = tenantIdFor(req);
-  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid, status: { notIn: ["COMPLETED", "CANCELLED"] } }, include: { location: { select: { serveMode: true } } } });
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid, status: { notIn: ["COMPLETED", "CANCELLED"] } }, include: orderInclude });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   if (order.location?.serveMode === "COUNTER" && !(await hasPermission(tid, req.userId, "POS_APPROVE_COUNTER"))) {
     res.status(403).json({ error: "You don't have permission to confirm counter orders" });
     return;
   }
-  await prisma.$transaction(async (tx) => {
-    await tx.posOrderItem.updateMany({ where: { orderId: order.id, addedAfterSend: true }, data: { addedAfterSend: false } });
-    await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: false });
-  });
+  try {
+    await prisma.$transaction(async (tx) => {
+      await settleServedAdditions(tx, tid, order, req);
+      await tx.posOrderItem.updateMany({ where: { orderId: order.id, addedAfterSend: true }, data: { addedAfterSend: false } });
+      await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: false });
+    });
+  } catch (error) {
+    if (error instanceof DispatchError) { res.status(error.status).json({ error: error.message, code: error.code }); return; }
+    if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
+    throw error;
+  }
   const [updated, tax] = await Promise.all([
     prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude }),
     taxSettingsFor(tid),
@@ -1206,7 +1222,7 @@ posRouter.post("/orders/:id/cancel/approve", requirePermission("POS_APPROVE_CANC
       if (order.servedAt) {
         const stockLocationId = await resolveStockLocationId(tid, order.locationId);
         if (stockLocationId) {
-          const req0 = computeStockRequirements(order.items);
+          const req0 = computeStockRequirements(order.items.filter((item) => !isUndeductedAddition(order, item)));
           await applyStockDelta(tx, tid, stockLocationId, req0, new Map(), order.orderNumber, req);
         }
         await recordMenuLedger(tx, { tenantId: tid, type: "RETURN", order, lines: menuLedgerLinesFromItems(order.items), note: order.cancelReason ? `Order cancelled: ${order.cancelReason}` : "Order cancelled", by: req.userId });
@@ -1394,8 +1410,8 @@ posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CA
       orderItem: {
         include: {
           menuItem: { include: { product: true, recipe: { include: { ingredients: { include: { product: true } } } } } },
-          variant: { select: { id: true, name: true, stockProductId: true, stockQtyPerUnit: true, stockProduct: { select: { id: true, name: true } } } },
-          addons: { include: { addon: { include: { stockProduct: { select: { id: true, name: true } } } } } },
+          variant: { select: variantStockSelect },
+          addons: { include: { addon: { include: addonStockInclude } } },
         },
       },
     },
@@ -1417,7 +1433,7 @@ posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CA
     const tax = await taxSettingsFor(tid);
     const updated = await prisma.$transaction(async (tx) => {
       const stockLocationId = await resolveStockLocationId(tid, request.order.locationId);
-      if (stockLocationId && request.orderItem.menuItem) {
+      if (stockLocationId && request.orderItem.menuItem && !isUndeductedAddition(request.order, request.orderItem)) {
         const returned = computeStockRequirements([{ quantity: request.quantity, menuItem: request.orderItem.menuItem, variant: request.orderItem.variant, addons: request.orderItem.addons }]);
         await applyStockDelta(tx, tid, stockLocationId, returned, new Map(), request.order.orderNumber, req);
       }
@@ -1475,6 +1491,10 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
   }
   if (hasPendingReturnRequests(order)) {
     res.status(409).json({ error: "Approve or reject the pending return before taking payment" });
+    return;
+  }
+  if (hasPendingAdditions(order)) {
+    res.status(409).json({ error: "The kitchen hasn't handed over the items added to this order yet" });
     return;
   }
   const payable = order.status === "SERVED" || (order.status === "COMPLETED" && order.paymentStatus !== "PAID");
@@ -1557,6 +1577,7 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only complete your own orders" }); return; }
   if (order.status !== "SERVED") { res.status(409).json({ error: "Only a served order can be completed" }); return; }
+  if (hasPendingAdditions(order)) { res.status(409).json({ error: "The kitchen hasn't handed over the items added to this order yet" }); return; }
   if (hasPendingReturnRequests(order)) {
     res.status(409).json({ error: "Approve or reject the pending return before completing this order" });
     return;
@@ -1708,6 +1729,13 @@ posRouter.get("/menu-items", async (req, res) => {
     taxSettingsFor(tid),
   ]);
   const effectiveLocationId = fixedLocationId ?? query.data.locationId ?? null;
+  // Where the kitchen must ask the store for ingredients, its own shelf is empty
+  // by design - "how many can I sell" is what the supplying store still holds.
+  const availabilityLocationId = await (async () => {
+    if (!effectiveLocationId) return null;
+    const loc = await prisma.location.findFirst({ where: { id: effectiveLocationId, tenantId: tid }, select: { id: true, serveMode: true, requireStoreDispatch: true, dispatchFromLocationId: true } });
+    return loc && dispatchRequired(loc) ? (await supplyingStoreId(tid, loc)) ?? effectiveLocationId : effectiveLocationId;
+  })();
 
   const where: Prisma.MenuItemWhereInput = {
     tenantId: tid,
@@ -1720,7 +1748,7 @@ posRouter.get("/menu-items", async (req, res) => {
   // wrongly sum them). When there's genuinely no location context yet,
   // availableQuantity is forced to null (untracked) after the query, not
   // computed from this deliberately-empty result.
-  const stockWhere = { locationId: effectiveLocationId ?? "__no_location__" };
+  const stockWhere = { locationId: availabilityLocationId ?? "__no_location__" };
 
   const rows = await prisma.menuItem.findMany({
     where,
@@ -1735,6 +1763,8 @@ posRouter.get("/menu-items", async (req, res) => {
         select: {
           id: true, name: true, price: true, sku: true,
           stockQtyPerUnit: true,
+          recipe: { select: { ingredients: { select: { quantity: true, product: { select: { id: true, stocks: { where: stockWhere, select: { quantity: true } } } } } } } },
+          ingredientOverrides: { select: { quantity: true, isRemoved: true, product: { select: { id: true, stocks: { where: stockWhere, select: { quantity: true } } } } } },
           stockProduct: {
             select: {
               id: true,
@@ -1775,7 +1805,19 @@ posRouter.get("/menu-items", async (req, res) => {
       availableQuantity = perIngredient.every((n) => n !== null) ? Math.min(...(perIngredient as number[])) : null;
       availabilityUnitLabel = "servings";
     }
-    const variantsWithStock = variants.map(({ stockProduct, stockQtyPerUnit: variantPerUnit, ...variant }) => ({
+    // A variant made from its own recipe: servings = the scarcest effective ingredient.
+    const recipeAvailability = (v: (typeof variants)[number]): number | null => {
+      if (!v.recipe) return null;
+      const merged = new Map<string, { per: number; stock: number }>();
+      for (const ing of v.recipe.ingredients) merged.set(ing.product.id, { per: Number(ing.quantity), stock: Number(ing.product.stocks[0]?.quantity ?? 0) });
+      for (const o of v.ingredientOverrides) {
+        if (o.isRemoved) merged.delete(o.product.id);
+        else merged.set(o.product.id, { per: Number(o.quantity), stock: Number(o.product.stocks[0]?.quantity ?? 0) });
+      }
+      const counts = [...merged.values()].filter((m) => m.per > 0).map((m) => Math.floor(m.stock / m.per));
+      return counts.length ? Math.min(...counts) : null;
+    };
+    const variantsWithStock = variants.map(({ stockProduct, stockQtyPerUnit: variantPerUnit, recipe: variantRecipe, ingredientOverrides, ...variant }) => ({
       ...variant,
       stockQtyPerUnit: variantPerUnit,
       stockProduct: stockProduct
@@ -1786,8 +1828,8 @@ posRouter.get("/menu-items", async (req, res) => {
             packUnit: stockProduct.packUnit,
           }
         : null,
-      availableQuantity: stockProduct ? availabilityFor(Number(stockProduct.stocks[0]?.quantity ?? 0), variantPerUnit != null ? Number(variantPerUnit) : null) : null,
-      availabilityUnitLabel: stockProduct ? variant.name : null,
+      availableQuantity: stockProduct ? availabilityFor(Number(stockProduct.stocks[0]?.quantity ?? 0), variantPerUnit != null ? Number(variantPerUnit) : null) : recipeAvailability({ ...variant, recipe: variantRecipe, ingredientOverrides } as (typeof variants)[number]),
+      availabilityUnitLabel: stockProduct ? variant.name : variantRecipe ? "servings" : null,
     }));
     // A base item with no stock link of its own but stock-tracked variants
     // (e.g. spirits: the item carries no product/recipe, each pour size —
@@ -1990,7 +2032,7 @@ posRouter.get("/print-jobs/pending", async (req, res) => {
   if (!query.success) { res.status(400).json({ error: "A locationId is required" }); return; }
   const jobs = await prisma.printJob.findMany({
     where: { tenantId: tid, locationId: query.data.locationId, status: "PENDING" },
-    select: { id: true, orderId: true, createdAt: true, nudgedAt: true },
+    select: { id: true, orderId: true, kind: true, createdAt: true, nudgedAt: true },
     orderBy: { createdAt: "asc" },
     take: 20,
   });
@@ -2018,8 +2060,10 @@ posRouter.post("/print-jobs/:id/claim", async (req, res) => {
     data: { status: "CLAIMED", claimedBy: req.userId ?? null, claimedAt: new Date() },
   });
   if (!claimed.count) { res.status(409).json({ error: "Already claimed by another device, or not found" }); return; }
-  const job = await prisma.printJob.findUniqueOrThrow({ where: { id: req.params.id }, select: { id: true, orderId: true, status: true } });
-  res.status(200).json({ job });
+  const job = await prisma.printJob.findUniqueOrThrow({ where: { id: req.params.id }, select: { id: true, orderId: true, status: true, kind: true, dispatchRequestId: true } });
+  // A dispatch slip travels with the claim, so the printing device needs no store permissions of its own.
+  const slip = job.kind === "DISPATCH" && job.dispatchRequestId ? await dispatchSlipFor(tid, job.dispatchRequestId) : null;
+  res.status(200).json({ job, slip });
 });
 
 posRouter.post("/print-jobs/:id/complete", async (req, res) => {

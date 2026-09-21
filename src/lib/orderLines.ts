@@ -26,6 +26,9 @@ export async function mergeDuplicateOrderLines(
     if (item._count.returnRequests > 0) continue;
     if (item.addedAfterSend && !opts.includeFlagged) continue;
     const key = [
+      // Lines covered by different store-dispatch requests stay separate while the
+      // order is live, or the merged quantity would claim more was dispatched than was.
+      opts.includeFlagged ? "" : item.dispatchRequestId ?? "",
       item.menuItemId, item.variantId ?? "", String(item.unitPrice), String(item.taxRate ?? ""), item.taxMode ?? "", item.taxTreatment ?? "",
       item.addons.map((a) => `${a.addonId}:${a.quantity}:${String(a.unitPrice)}`).sort().join("|"),
     ].join("~");

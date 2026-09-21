@@ -31,8 +31,10 @@ const createSchema = z.object({
   // can. Both null = no stock impact (a free garnish, a service charge).
   stockProductId: nullableId.optional(),
   stockQtyPerUnit: nullableQty.optional(),
+  // Or a recipe, like a menu item: one unit consumes that recipe's ingredients.
+  recipeId: nullableId.optional(),
   isActive: z.boolean().default(true),
-});
+}).refine((v) => !(v.recipeId && v.stockProductId), { message: "Use a product or a recipe for an add-on's stock, not both", path: ["recipeId"] });
 const updateSchema = partialNoDefaults(createSchema);
 
 const tenantId = (req: { tenantId?: string }) => {
@@ -52,6 +54,8 @@ const addonFields = {
   stockProductId: true,
   stockQtyPerUnit: true,
   stockProduct: { select: { id: true, name: true } },
+  recipeId: true,
+  recipe: { select: { id: true, name: true } },
   isActive: true,
   createdAt: true,
   updatedAt: true,
@@ -69,6 +73,12 @@ async function assertCategory(tid: string, menuCategoryId: string | null | undef
   if (!menuCategoryId) return;
   const found = await prisma.menuCategory.findFirst({ where: { id: menuCategoryId, tenantId: tid }, select: { id: true } });
   if (!found) throw Object.assign(new Error("Selected category was not found"), { status: 400 });
+}
+
+async function assertRecipe(tid: string, recipeId: string | null | undefined) {
+  if (!recipeId) return;
+  const found = await prisma.recipe.findFirst({ where: { id: recipeId, tenantId: tid }, select: { id: true } });
+  if (!found) throw Object.assign(new Error("Selected recipe was not found"), { status: 400 });
 }
 
 async function assertProduct(tid: string, productId: string | null | undefined) {
@@ -123,6 +133,7 @@ addonsRouter.post("/", async (req, res, next) => {
     await assertSkuFree(tid, data.data.sku);
     await assertCategory(tid, data.data.menuCategoryId);
     await assertProduct(tid, data.data.stockProductId);
+    await assertRecipe(tid, data.data.recipeId);
     const addon = await prisma.addon.create({ data: { tenantId: tid, ...data.data }, select: addonFields });
     res.status(201).json({ addon });
   } catch (error) {
@@ -142,6 +153,11 @@ addonsRouter.patch("/:id", async (req, res, next) => {
     await assertSkuFree(tid, data.data.sku, existing.id);
     await assertCategory(tid, data.data.menuCategoryId);
     await assertProduct(tid, data.data.stockProductId);
+    await assertRecipe(tid, data.data.recipeId);
+    const current = await prisma.addon.findUniqueOrThrow({ where: { id: existing.id }, select: { recipeId: true, stockProductId: true } });
+    const finalRecipe = data.data.recipeId !== undefined ? data.data.recipeId : current.recipeId;
+    const finalProduct = data.data.stockProductId !== undefined ? data.data.stockProductId : current.stockProductId;
+    if (finalRecipe && finalProduct) { res.status(400).json({ error: "Use a product or a recipe for an add-on's stock, not both" }); return; }
     const addon = await prisma.addon.update({ where: { id: existing.id }, data: data.data, select: addonFields });
     res.json({ addon });
   } catch (error) {

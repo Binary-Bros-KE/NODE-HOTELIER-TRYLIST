@@ -40,6 +40,8 @@ const createSchema = z.object({
   serveMode: z.enum(SERVE_MODES).default("KITCHEN"),
   // Kitchen must get its ingredients dispatched by a store before starting a ticket.
   requireStoreDispatch: z.boolean().default(false),
+  // Print the store's dispatch slip automatically when an order is posted (else the storekeeper prints it).
+  dispatchAutoPrint: z.boolean().default(true),
   dispatchFromLocationId: z.string().cuid().nullable().optional(),
   // Printed on the matching document for orders/invoices/quotations from
   // this location — e.g. a branch-specific thank-you note or return policy.
@@ -77,6 +79,7 @@ const locationFields = {
   canSellProducts: true,
   serveMode: true,
   requireStoreDispatch: true,
+  dispatchAutoPrint: true,
   dispatchFromLocationId: true,
   receiptHeader: true,
   receiptFooter: true,

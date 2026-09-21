@@ -107,6 +107,9 @@ const variantFields = {
   stockProductId: true,
   stockQtyPerUnit: true,
   stockProduct: stockProductSelect,
+  recipeId: true,
+  recipe: { select: { id: true, name: true, ingredients: { select: { quantity: true, product: { select: { id: true, name: true, unit: true } } } } } },
+  ingredientOverrides: { select: { productId: true, quantity: true, isRemoved: true, product: { select: { id: true, name: true, unit: true } } } },
   isActive: true,
   sortOrder: true,
   createdAt: true,
@@ -135,6 +138,18 @@ async function assertProduct(tid: string, productId: string | null | undefined) 
   if (!productId) return;
   const found = await prisma.product.findFirst({ where: { id: productId, tenantId: tid }, select: { id: true } });
   if (!found) throw Object.assign(new Error("Selected product was not found"), { status: 400 });
+}
+
+/** Validates a variant's recipe and override products, and returns the override rows to store. */
+async function checkVariantRecipe(tid: string, recipeId: string | null | undefined, overrides: { productId: string; quantity: number; isRemoved: boolean }[] | undefined) {
+  await assertRecipe(tid, recipeId);
+  if (!overrides?.length) return [];
+  if (!recipeId) throw Object.assign(new Error("Choose a recipe before changing its ingredients"), { status: 400 });
+  const ids = [...new Set(overrides.map((o) => o.productId))];
+  if (ids.length !== overrides.length) throw Object.assign(new Error("Each ingredient can only be changed once"), { status: 400 });
+  const found = await prisma.product.count({ where: { id: { in: ids }, tenantId: tid } });
+  if (found !== ids.length) throw Object.assign(new Error("An ingredient was not found"), { status: 400 });
+  return overrides.map((o) => ({ productId: o.productId, quantity: o.isRemoved ? 0 : o.quantity, isRemoved: o.isRemoved }));
 }
 
 async function assertRecipe(tid: string, recipeId: string | null | undefined) {
@@ -279,9 +294,18 @@ const variantCreateSchema = z.object({
   // consumes 25 of the whisky product, a Bottle 750.
   stockProductId: nullableId.optional(),
   stockQtyPerUnit: nullableQty.optional(),
+  // Or: made from a recipe (any recipe) with explicit per-ingredient changes -
+  // a different quantity, an ingredient removed, or an extra added - for just
+  // this size. Instead of a product link, never both.
+  recipeId: nullableId.optional(),
+  ingredientOverrides: z.array(z.object({
+    productId: z.string().trim().min(1),
+    quantity: z.coerce.number().min(0).max(9_999_999).default(0),
+    isRemoved: z.boolean().default(false),
+  })).max(80).optional(),
   isActive: z.boolean().default(true),
   sortOrder: z.coerce.number().int().min(0).max(99999).optional(),
-});
+}).refine((v) => !(v.recipeId && v.stockProductId), { message: "Use a product or a recipe for a variant's stock, not both", path: ["recipeId"] });
 const variantUpdateSchema = partialNoDefaults(variantCreateSchema);
 const variantReorderSchema = z.object({ orderedIds: z.array(z.string().trim().min(1)).min(1) });
 
@@ -318,12 +342,18 @@ menuItemsRouter.post("/:menuItemId/variants", async (req, res, next) => {
     await assertMenuItem(tid, req.params.menuItemId);
     await assertVariantSkuFree(tid, data.data.sku);
     await assertProduct(tid, data.data.stockProductId);
+    const overrideRows = await checkVariantRecipe(tid, data.data.recipeId, data.data.ingredientOverrides);
     let { sortOrder } = data.data;
     if (sortOrder === undefined) {
       const last = await prisma.menuItemVariant.findFirst({ where: { tenantId: tid, menuItemId: req.params.menuItemId }, orderBy: { sortOrder: "desc" }, select: { sortOrder: true } });
       sortOrder = (last?.sortOrder ?? -1) + 1;
     }
-    const variant = await prisma.menuItemVariant.create({ data: { tenantId: tid, menuItemId: req.params.menuItemId, ...data.data, sortOrder }, select: variantFields });
+    const { ingredientOverrides: _ignored, ...variantData } = data.data;
+    void _ignored;
+    const variant = await prisma.menuItemVariant.create({
+      data: { tenantId: tid, menuItemId: req.params.menuItemId, ...variantData, sortOrder, ingredientOverrides: { create: overrideRows } },
+      select: variantFields,
+    });
     res.status(201).json({ variant });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "This item already has a variant with that name" }); return; }
@@ -341,7 +371,21 @@ menuItemsRouter.patch("/:menuItemId/variants/:id", async (req, res, next) => {
     if (!exists) { res.status(404).json({ error: "Variant not found" }); return; }
     await assertVariantSkuFree(tid, data.data.sku, req.params.id);
     await assertProduct(tid, data.data.stockProductId);
-    await prisma.menuItemVariant.update({ where: { id: req.params.id }, data: data.data });
+    // The recipe a variant ends up with (the one sent, or the one it already has) decides whether overrides make sense.
+    const current = await prisma.menuItemVariant.findUniqueOrThrow({ where: { id: req.params.id }, select: { recipeId: true, stockProductId: true } });
+    const finalRecipeId = data.data.recipeId !== undefined ? data.data.recipeId : current.recipeId;
+    const finalProductId = data.data.stockProductId !== undefined ? data.data.stockProductId : current.stockProductId;
+    if (finalRecipeId && finalProductId) { res.status(400).json({ error: "Use a product or a recipe for a variant's stock, not both" }); return; }
+    const overrideRows = await checkVariantRecipe(tid, finalRecipeId, data.data.ingredientOverrides);
+    const { ingredientOverrides, ...variantData } = data.data;
+    await prisma.$transaction(async (tx) => {
+      await tx.menuItemVariant.update({ where: { id: req.params.id }, data: variantData });
+      // Overrides are replaced as a set when sent, and dropped when the variant stops using a recipe.
+      if (ingredientOverrides !== undefined || !finalRecipeId) {
+        await tx.menuItemVariantIngredient.deleteMany({ where: { variantId: req.params.id } });
+        if (finalRecipeId && overrideRows.length) await tx.menuItemVariantIngredient.createMany({ data: overrideRows.map((row) => ({ ...row, variantId: req.params.id })) });
+      }
+    });
     const variant = await prisma.menuItemVariant.findUniqueOrThrow({ where: { id: req.params.id }, select: variantFields });
     res.json({ variant });
   } catch (error) {
