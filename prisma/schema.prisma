@@ -448,6 +448,7 @@ model Tenant {
   printJobs              PrintJob[]
   menuLedgerEntries      MenuLedgerEntry[]
   reservationGroups      ReservationGroup[]
+  serviceVariants        ServiceVariant[]
 }
 
 enum CustomerType {
@@ -664,6 +665,7 @@ model ServiceCategory {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   services  Service[]
+  addons    Addon[]
 
   @@unique([tenantId, name])
 }
@@ -689,32 +691,86 @@ model UnitOfMeasure {
   @@unique([tenantId, systemKey])
 }
 
+// A size/option of a service with its own price (Swedish massage 30 / 60 min,
+// car wash Saloon / SUV / Van). Mirrors MenuItemVariant: optional duration, cost,
+// and stock (one product, or a recipe with per-ingredient overrides).
+model ServiceVariant {
+  id                  String                     @id @default(cuid())
+  tenantId            String
+  tenant              Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  serviceId           String
+  service             Service                    @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  name                String
+  sku                 String?
+  price               Decimal                    @db.Decimal(12, 2)
+  durationMinutes     Int?
+  cost                Decimal?                   @db.Decimal(12, 2)
+  stockProductId      String?
+  stockProduct        Product?                   @relation("ServiceVariantStock", fields: [stockProductId], references: [id], onDelete: SetNull)
+  stockQtyPerUnit     Decimal?                   @db.Decimal(12, 3)
+  recipeId            String?
+  recipe              Recipe?                    @relation("ServiceVariantRecipe", fields: [recipeId], references: [id], onDelete: SetNull)
+  ingredientOverrides ServiceVariantIngredient[]
+  isActive            Boolean                    @default(true)
+  sortOrder           Int                        @default(0)
+  createdAt           DateTime                   @default(now())
+  updatedAt           DateTime                   @updatedAt
+  orderItems          PosOrderItem[]
+
+  @@unique([tenantId, serviceId, name])
+  @@index([tenantId, serviceId])
+}
+
+model ServiceVariantIngredient {
+  id        String         @id @default(cuid())
+  variantId String
+  variant   ServiceVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product        @relation("ServiceVariantIngredientProduct", fields: [productId], references: [id], onDelete: Restrict)
+  quantity  Decimal        @default(0) @db.Decimal(12, 3)
+  isRemoved Boolean        @default(false)
+
+  @@unique([variantId, productId])
+  @@index([productId])
+}
+
 model Service {
-  id           String          @id @default(cuid())
-  tenantId     String
-  tenant       Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  name         String
-  categoryId   String
-  category     ServiceCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  unitId       String
-  unit         UnitOfMeasure   @relation(fields: [unitId], references: [id], onDelete: Restrict)
-  price        Decimal         @db.Decimal(12, 2)
+  id              String           @id @default(cuid())
+  tenantId        String
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name            String
+  categoryId      String
+  category        ServiceCategory  @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  unitId          String
+  unit            UnitOfMeasure    @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  price           Decimal          @db.Decimal(12, 2)
   // What it costs the business to deliver one unit (labour, materials not
   // tracked as stock...). Optional: null = not costed (reports treat it as 0).
-  cost         Decimal?        @db.Decimal(12, 2)
+  cost            Decimal?         @db.Decimal(12, 2)
   // Per-service tax override, same convention as MenuItem: all null = inherit
   // the tenant's BusinessProfile default (rate + mode + treatment).
-  taxRate      Decimal?        @db.Decimal(5, 2)
-  taxMode      TaxMode?
-  taxTreatment TaxTreatment?
-  description  String?
-  isActive     Boolean         @default(true)
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  taxRate         Decimal?         @db.Decimal(5, 2)
+  taxMode         TaxMode?
+  taxTreatment    TaxTreatment?
+  // How long one unit takes (a 60 minute massage, an hour in the pool). Optional;
+  // a variant's own duration wins. Drives the active-service timer.
+  durationMinutes Int?
+  // Stock consumed per unit sold: one product (qty per unit) or a recipe, the same
+  // options a menu item has (a bottle of lotion per massage). Both null = none.
+  productId       String?
+  product         Product?         @relation("ServiceProduct", fields: [productId], references: [id], onDelete: SetNull)
+  stockQtyPerUnit Decimal?         @db.Decimal(12, 3)
+  recipeId        String?
+  recipe          Recipe?          @relation("ServiceRecipe", fields: [recipeId], references: [id], onDelete: SetNull)
+  variants        ServiceVariant[]
+  description     String?
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
   // Empty = unallocated = sellable at every location (the default) —
   // identical convention to MenuItem.locations.
-  locations    Location[]
-  orderItems   PosOrderItem[]
+  locations       Location[]
+  orderItems      PosOrderItem[]
 
   @@unique([tenantId, name])
   @@index([tenantId, categoryId])
@@ -837,6 +893,13 @@ model StockDispatchItem {
   dispatchedQty Decimal?             @db.Decimal(12, 3)
 
   @@index([requestId])
+}
+
+// Which till an add-on belongs to. Menu add-ons show only in the food POS,
+// service add-ons only in the Services POS.
+enum AddonScope {
+  MENU
+  SERVICE
 }
 
 enum LostFoundStatus {
@@ -1813,6 +1876,9 @@ model Product {
   stockTransferItems         StockTransferItem[]
   stockDispatchItems         StockDispatchItem[]
   variantIngredientOverrides MenuItemVariantIngredient[] @relation("VariantIngredientProduct")
+  services                   Service[]                   @relation("ServiceProduct")
+  serviceVariantsStocked     ServiceVariant[]            @relation("ServiceVariantStock")
+  serviceVariantIngredients  ServiceVariantIngredient[]  @relation("ServiceVariantIngredientProduct")
   stockReceiptItems          StockReceiptItem[]
 
   @@unique([tenantId, sku])
@@ -2413,49 +2479,58 @@ model PrintJob {
 // channel (enforced at the API layer, same convention as FolioLineItem.source
 // — no DB-level CHECK constraint for it either).
 model PosOrderItem {
-  id                String                  @id @default(cuid())
-  orderId           String
-  menuItemId        String?
+  id                  String                  @id @default(cuid())
+  orderId             String
+  menuItemId          String?
   // The specific size/option chosen for this line, when the menu item has
   // variants (Pizza: Large). Null = base item, no variants. unitPrice is
   // always the price actually charged — the variant's when set, else the
   // item's base price.
-  variantId         String?
-  productId         String?
-  serviceId         String?
-  quantity          Int                     @default(1)
-  unitPrice         Decimal                 @db.Decimal(12, 2)
+  variantId           String?
+  productId           String?
+  serviceId           String?
+  quantity            Int                     @default(1)
+  unitPrice           Decimal                 @db.Decimal(12, 2)
   // Tax as resolved at the moment of sale — item override else the tenant
   // default. Snapshotted so a later change to either never re-taxes a
   // historical order. Null on pre-existing rows: callers fall back to the
   // current BusinessProfile.
-  taxRate           Decimal?                @db.Decimal(5, 2)
-  taxMode           TaxMode?
-  taxTreatment      TaxTreatment?
+  taxRate             Decimal?                @db.Decimal(5, 2)
+  taxMode             TaxMode?
+  taxTreatment        TaxTreatment?
   // What one unit cost the business at the moment of sale (service lines:
   // the service's cost then). Null = not costed. Snapshotted like the tax.
-  unitCost          Decimal?                @db.Decimal(12, 2)
+  unitCost            Decimal?                @db.Decimal(12, 2)
+  // Price override at the till (services): the list price at sale time, who changed
+  // it and why. unitPrice stays the price actually charged, so receipts and totals
+  // never need to know an override happened. Null listPrice = sold at list.
+  listPrice           Decimal?                @db.Decimal(12, 2)
+  priceOverrideReason String?
+  priceOverriddenBy   String?
   // True when this line was added (or its quantity bumped) after the order
   // had already moved past OPEN — kitchen/bar already engaged with the
   // ticket once and wouldn't otherwise notice. Cleared once acknowledged
   // (see /kitchen/orders/:id/ack-updates), which drops the order out of the
   // "Updated orders" queue.
-  addedAfterSend    Boolean                 @default(false)
+  addedAfterSend      Boolean                 @default(false)
   // The store dispatch request that covers this line's ingredients (only for
   // locations that require store dispatch). Null = not requested yet.
-  dispatchRequestId String?
-  dispatchRequest   StockDispatchRequest?   @relation(fields: [dispatchRequestId], references: [id], onDelete: SetNull)
-  createdAt         DateTime                @default(now())
-  order             PosOrder                @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  menuItem          MenuItem?               @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
-  variant           MenuItemVariant?        @relation(fields: [variantId], references: [id], onDelete: Restrict)
-  product           Product?                @relation(fields: [productId], references: [id], onDelete: Restrict)
-  service           Service?                @relation(fields: [serviceId], references: [id], onDelete: Restrict)
-  addons            PosOrderItemAddon[]
-  returnRequests    PosOrderReturnRequest[]
+  dispatchRequestId   String?
+  dispatchRequest     StockDispatchRequest?   @relation(fields: [dispatchRequestId], references: [id], onDelete: SetNull)
+  createdAt           DateTime                @default(now())
+  order               PosOrder                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem            MenuItem?               @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  variant             MenuItemVariant?        @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  serviceVariantId    String?
+  serviceVariant      ServiceVariant?         @relation(fields: [serviceVariantId], references: [id], onDelete: Restrict)
+  product             Product?                @relation(fields: [productId], references: [id], onDelete: Restrict)
+  service             Service?                @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  addons              PosOrderItemAddon[]
+  returnRequests      PosOrderReturnRequest[]
 
   @@index([orderId])
   @@index([variantId])
+  @@index([serviceVariantId])
   @@index([dispatchRequestId])
 }
 
@@ -2486,14 +2561,18 @@ model PosOrderReturnRequest {
 // filters on it (defaulting to the menu item's own category), otherwise
 // shows everything. No per-item links, no groups, no selection rules.
 model Addon {
-  id              String              @id @default(cuid())
-  tenantId        String
-  menuCategoryId  String?
-  name            String
-  description     String?
-  price           Decimal             @db.Decimal(12, 2)
-  sku             String?
-  imageUrl        String?
+  id                String              @id @default(cuid())
+  tenantId          String
+  scope             AddonScope          @default(MENU)
+  menuCategoryId    String?
+  // Service add-ons: limited to one service category (null = offered on every service).
+  serviceCategoryId String?
+  serviceCategory   ServiceCategory?    @relation(fields: [serviceCategoryId], references: [id], onDelete: SetNull)
+  name              String
+  description       String?
+  price             Decimal             @db.Decimal(12, 2)
+  sku               String?
+  imageUrl          String?
   // Optional stock link, same convention as MenuItemVariant's own
   // stockProductId/stockQtyPerUnit: when set, one unit of this add-on
   // consumes stockQtyPerUnit (in the product's pack unit) of that product —
@@ -2501,19 +2580,19 @@ model Addon {
   // add-on consuming 25ml of the same spirit as its parent variant. Without
   // this link an add-on has no stock impact at all (a free garnish, a
   // service charge line, etc.).
-  stockProductId  String?
-  stockProduct    Product?            @relation("AddonStock", fields: [stockProductId], references: [id], onDelete: SetNull)
-  stockQtyPerUnit Decimal?            @db.Decimal(12, 3)
+  stockProductId    String?
+  stockProduct      Product?            @relation("AddonStock", fields: [stockProductId], references: [id], onDelete: SetNull)
+  stockQtyPerUnit   Decimal?            @db.Decimal(12, 3)
   // Or a recipe (like a menu item): one unit of the add-on consumes that
   // recipe's ingredients. Used instead of stockProductId, never both.
-  recipeId        String?
-  recipe          Recipe?             @relation("AddonRecipe", fields: [recipeId], references: [id], onDelete: SetNull)
-  isActive        Boolean             @default(true)
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  menuCategory    MenuCategory?       @relation(fields: [menuCategoryId], references: [id], onDelete: SetNull)
-  orderItems      PosOrderItemAddon[]
+  recipeId          String?
+  recipe            Recipe?             @relation("AddonRecipe", fields: [recipeId], references: [id], onDelete: SetNull)
+  isActive          Boolean             @default(true)
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  tenant            Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  menuCategory      MenuCategory?       @relation(fields: [menuCategoryId], references: [id], onDelete: SetNull)
+  orderItems        PosOrderItemAddon[]
 
   @@unique([tenantId, name])
   @@unique([tenantId, sku])
@@ -2552,6 +2631,8 @@ model Recipe {
   menuItems        MenuItem[]
   variants         MenuItemVariant[]  @relation("VariantRecipe")
   addons           Addon[]            @relation("AddonRecipe")
+  services         Service[]          @relation("ServiceRecipe")
+  serviceVariants  ServiceVariant[]   @relation("ServiceVariantRecipe")
 
   @@unique([tenantId, name])
   @@index([tenantId])

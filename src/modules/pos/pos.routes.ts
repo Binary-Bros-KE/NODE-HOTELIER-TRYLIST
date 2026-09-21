@@ -11,7 +11,7 @@ import { resolveEffectiveLocation, employeeLocationId } from "../../lib/location
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
 import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger.js";
 import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
-import { computeStockRequirements, addonStockInclude, addonStockSelect, variantStockInclude, variantStockSelect, type OrderItemForStock } from "../../lib/stockRequirements.js";
+import { computeStockRequirements, addonStockInclude, addonStockSelect, serviceStockSelect, serviceVariantStockSelect, variantStockInclude, variantStockSelect, type OrderItemForStock } from "../../lib/stockRequirements.js";
 import { DispatchError, dispatchRequired, orderDispatchInfo, supplyingStoreId } from "../../lib/dispatch.js";
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
 import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, settleServedAdditions } from "../../lib/orderStock.js";
@@ -135,7 +135,7 @@ async function resolveMenuLines(tid: string, lines: OrderLineInput[], taxDefault
     prisma.menuItem.findMany({ where: { id: { in: menuItemIds }, tenantId: tid, isAvailable: true }, include: menuLineInclude }),
     addonIds.length
       ? prisma.addon.findMany({
-          where: { id: { in: addonIds }, tenantId: tid, isActive: true },
+          where: { id: { in: addonIds }, tenantId: tid, isActive: true, scope: "MENU" },
           select: addonStockSelect,
         })
       : Promise.resolve([]),
@@ -221,7 +221,15 @@ const retailOrderSchema = z.discriminatedUnion("channel", [
     customerId: z.string().trim().min(1).optional(),
     notes: z.string().trim().max(500).optional(),
     discount: z.coerce.number().min(0).default(0),
-    items: z.array(z.object({ serviceId: z.string().trim().min(1), quantity: z.coerce.number().int().min(1).max(999) })).min(1),
+    items: z.array(z.object({
+      serviceId: z.string().trim().min(1),
+      variantId: z.string().trim().min(1).optional(),
+      quantity: z.coerce.number().int().min(1).max(999),
+      addons: z.array(z.object({ addonId: z.string().trim().min(1), quantity: z.coerce.number().int().min(1).max(20).default(1) })).default([]),
+      // Price override at the till: the price to charge instead of the list price, with why.
+      unitPrice: z.coerce.number().min(0).max(9_999_999).optional(),
+      overrideReason: z.string().trim().max(200).optional(),
+    })).min(1),
   }),
 ]);
 
@@ -242,7 +250,9 @@ export const orderInclude = {
     menuItem: { include: { product: true, recipe: { include: { ingredients: { include: { product: true } } } } } },
     variant: { select: variantStockSelect },
     product: { select: { id: true, name: true, unit: true } },
-    service: { select: { id: true, name: true, unit: { select: { name: true } } } },
+    // A service line carries what it consumes (its own product/recipe, like a menu item) and its variant.
+    service: { select: { ...serviceStockSelect, unit: { select: { name: true } } } },
+    serviceVariant: { select: serviceVariantStockSelect },
     addons: { include: { addon: { include: addonStockInclude } } },
     returnRequests: { orderBy: { requestedAt: "desc" } },
     dispatchRequest: { select: { status: true } },
@@ -500,6 +510,8 @@ posRouter.get("/orders", async (req, res) => {
     // employee restricted to their own orders can't use this to browse
     // someone else's regardless of what they pass here.
     employeeId: z.string().cuid().optional(),
+    // Only sales where a line was sold at a price other than its list price (till override audit).
+    overridden: z.enum(["true"]).optional(),
     // Cap the rows returned (most recent first) so a long-lived POS screen
     // doesn't drag in thousands of historical orders. Omitted = no cap.
     limit: z.coerce.number().int().min(1).max(500).optional(),
@@ -519,6 +531,7 @@ posRouter.get("/orders", async (req, res) => {
         tenantId: tid,
         ...(query.data.status ? { status: query.data.status } : {}),
         ...(query.data.channel ? { channel: query.data.channel } : {}),
+        ...(query.data.overridden ? { items: { some: { listPrice: { not: null } } } } : {}),
         ...(effectiveLocationId ? { locationId: effectiveLocationId } : {}),
         ...(canSeeAll
           ? (query.data.employeeId ? { createdBy: query.data.employeeId } : {})
@@ -1126,10 +1139,10 @@ posRouter.patch("/orders/:id/ack-updates", async (req, res) => {
 
 posRouter.delete("/orders/:id/revert", async (req, res) => {
   const tid = tenantIdFor(req);
-  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { payments: true } });
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   // A service sale is created already SERVED and paid in a second step; if that step fails the
-  // till withdraws it (no payment yet, no stock was taken for services).
+  // till withdraws it (no payment yet) and puts back whatever stock it consumed.
   const unpaidServiceSale = order.channel === "SERVICES" && order.status === "SERVED" && order.payments.length === 0;
   if (!unpaidServiceSale && (!["OPEN", "PREPARING", "READY"].includes(order.status) || order.servedAt)) {
     res.status(409).json({ error: "Only orders that have not been served can be reverted" });
@@ -1141,10 +1154,20 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
   }
   const canRevert = order.createdBy === req.userId || await canSeeAllOrders(tid, req.userId);
   if (!canRevert) { res.status(403).json({ error: "You can only revert your own undeducted orders" }); return; }
-  await prisma.$transaction(async (tx) => {
-    await tx.posOrder.delete({ where: { id: order.id } });
-    if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
-  });
+  try {
+    await prisma.$transaction(async (tx) => {
+      if (unpaidServiceSale) {
+        const consumed = computeStockRequirements(order.items);
+        const stockLocationId = consumed.size > 0 ? await resolveStockLocationId(tid, order.locationId) : null;
+        if (stockLocationId) await applyStockDelta(tx, tid, stockLocationId, consumed, new Map(), order.orderNumber, req);
+      }
+      await tx.posOrder.delete({ where: { id: order.id } });
+      if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
+    throw error;
+  }
   res.status(204).send();
 });
 
@@ -1687,9 +1710,18 @@ posRouter.post("/orders/:id/print-jobs", async (req, res) => {
  * its menu category so the client can filter. Managed via /api/addons. */
 posRouter.get("/addons", async (req, res) => res.json({
   addons: await prisma.addon.findMany({
-    where: { tenantId: tenantIdFor(req), isActive: true },
+    where: { tenantId: tenantIdFor(req), isActive: true, scope: "MENU" },
     select: { id: true, name: true, description: true, price: true, imageUrl: true, menuCategoryId: true, menuCategory: { select: { id: true, name: true } } },
     orderBy: [{ menuCategory: { name: "asc" } }, { name: "asc" }],
+  }),
+}));
+
+/** The add-ons the Services POS offers (Hot stones, Engine wash...), each tied to a service category or open to every service. */
+posRouter.get("/service-addons", async (req, res) => res.json({
+  addons: await prisma.addon.findMany({
+    where: { tenantId: tenantIdFor(req), isActive: true, scope: "SERVICE" },
+    select: { id: true, name: true, description: true, price: true, serviceCategoryId: true, serviceCategory: { select: { id: true, name: true } } },
+    orderBy: [{ serviceCategory: { name: "asc" } }, { name: "asc" }],
   }),
 }));
 
@@ -1907,7 +1939,12 @@ posRouter.get("/service-items", async (req, res) => {
   const [items, taxDefaults] = await Promise.all([
     prisma.service.findMany({
       where,
-      include: { category: true, unit: true, locations: { select: { id: true, name: true } } },
+      include: {
+        category: true,
+        unit: true,
+        locations: { select: { id: true, name: true } },
+        variants: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }], select: { id: true, name: true, price: true, durationMinutes: true, sku: true } },
+      },
       orderBy: { name: "asc" },
     }),
     taxSettingsFor(tid),
@@ -1983,24 +2020,47 @@ posRouter.post("/retail-orders", async (req, res) => {
           };
         });
       } else {
-        const serviceIds = parsed.data.items.map((item) => item.serviceId);
-        const services = await tx.service.findMany({ where: { id: { in: serviceIds }, tenantId: tid, isActive: true }, include: { locations: { select: { id: true } } } });
-        if (services.length !== new Set(serviceIds).size) throw Object.assign(new Error("Every item must be an active service from this property"), { status: 400 });
+        const serviceIds = [...new Set(parsed.data.items.map((item) => item.serviceId))];
+        const addonIds = [...new Set(parsed.data.items.flatMap((item) => item.addons.map((a) => a.addonId)))];
+        const [services, serviceAddons] = await Promise.all([
+          tx.service.findMany({ where: { id: { in: serviceIds }, tenantId: tid, isActive: true }, include: { locations: { select: { id: true } }, variants: { where: { isActive: true } } } }),
+          addonIds.length ? tx.addon.findMany({ where: { id: { in: addonIds }, tenantId: tid, isActive: true, scope: "SERVICE" }, select: { id: true, name: true, price: true, serviceCategoryId: true } }) : Promise.resolve([]),
+        ]);
+        if (services.length !== serviceIds.length) throw Object.assign(new Error("Every item must be an active service from this property"), { status: 400 });
+        if (serviceAddons.length !== addonIds.length) throw Object.assign(new Error("Every add-on must be an active service add-on from this property"), { status: 400 });
         // A service allocated to specific locations may only be sold there (empty = everywhere).
         const notHere = services.find((s) => s.locations.length > 0 && (!effectiveLocationId || !s.locations.some((l) => l.id === effectiveLocationId)));
         if (notHere) throw Object.assign(new Error(`"${notHere.name}" isn't sold at this location`), { status: 409 });
         const byId = new Map(services.map((s) => [s.id, s]));
+        const addonById = new Map(serviceAddons.map((a) => [a.id, a]));
         itemsCreate = parsed.data.items.map((item) => {
           const service = byId.get(item.serviceId)!;
+          // Sizes/options: required once a service has any active ones.
+          if (service.variants.length > 0 && !item.variantId) throw Object.assign(new Error(`Choose an option for "${service.name}"`), { status: 400 });
+          const variant = item.variantId ? service.variants.find((v) => v.id === item.variantId) : undefined;
+          if (item.variantId && !variant) throw Object.assign(new Error(`That option isn't available for "${service.name}"`), { status: 400 });
+          const addonIdsOnLine = item.addons.map((a) => a.addonId);
+          if (new Set(addonIdsOnLine).size !== addonIdsOnLine.length) throw Object.assign(new Error("Each add-on can only appear once per line"), { status: 400 });
+          for (const line of item.addons) {
+            const addon = addonById.get(line.addonId)!;
+            if (addon.serviceCategoryId && addon.serviceCategoryId !== service.categoryId) throw Object.assign(new Error(`"${addon.name}" isn't offered with "${service.name}"`), { status: 400 });
+          }
+          const listPrice = variant?.price ?? service.price;
+          // Override: charge another price, but keep the list price and the reason on the line.
+          const overridden = item.unitPrice !== undefined && Math.abs(item.unitPrice - Number(listPrice)) > 0.004;
+          if (overridden && !(item.overrideReason && item.overrideReason.length >= 3)) throw Object.assign(new Error(`Give a reason for changing the price of "${service.name}"`), { status: 400 });
           return {
             serviceId: item.serviceId,
+            serviceVariantId: variant?.id,
             quantity: item.quantity,
-            unitPrice: service.price,
+            unitPrice: overridden ? item.unitPrice! : listPrice,
+            ...(overridden ? { listPrice, priceOverrideReason: item.overrideReason, priceOverriddenBy: req.userId } : {}),
             // The service's own tax (else the property default), frozen on the line like a menu item.
             taxRate: service.taxRate ?? retailFallbackTax.taxRate,
             taxMode: service.taxMode ?? retailFallbackTax.taxMode,
             taxTreatment: service.taxTreatment ?? retailFallbackTax.taxTreatment,
-            unitCost: service.cost,
+            unitCost: variant?.cost ?? service.cost,
+            addons: { create: item.addons.map((line) => ({ addonId: line.addonId, quantity: line.quantity, unitPrice: addonById.get(line.addonId)!.price })) },
           };
         });
       }
@@ -2040,10 +2100,21 @@ posRouter.post("/retail-orders", async (req, res) => {
           }
         }
       }
+      if (channel === "SERVICES") {
+        // A service that uses a product or recipe (lotion, wash chemicals) consumes it now,
+        // from the location it's sold at - the same maths and ledger as a menu item.
+        const requirements = computeStockRequirements(created.items);
+        if (requirements.size > 0) {
+          const stockLocationId = await resolveStockLocationId(tid, effectiveLocationId);
+          if (!stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this sale"), { status: 400 });
+          await deductStockForOrder(tx, tid, requirements, stockLocationId, created.orderNumber, req);
+        }
+      }
       return created;
     });
     res.status(201).json({ order: withFinancials(order, tax) });
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     throw error;
   }

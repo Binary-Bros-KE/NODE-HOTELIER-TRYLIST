@@ -15,14 +15,19 @@ type VariantForStock = {
   ingredientOverrides?: { product: StockRef; quantity: Prisma.Decimal | number; isRemoved: boolean }[];
 };
 type AddonForStock = { stockProductId: string | null; stockQtyPerUnit: QtyLike; stockProduct: StockRef | null; recipe?: RecipeLike };
+type BaseForStock = {
+  product: StockRef | null;
+  stockQtyPerUnit?: QtyLike;
+  recipe: RecipeLike;
+};
 export type OrderItemForStock = {
   quantity: number;
+  // A line is a food line (menuItem + optional variant) or a service line
+  // (service + optional serviceVariant); both consume stock the same way.
   variant?: VariantForStock | null;
-  menuItem: {
-    product: StockRef | null;
-    stockQtyPerUnit?: QtyLike;
-    recipe: RecipeLike;
-  } | null;
+  menuItem?: BaseForStock | null;
+  service?: BaseForStock | null;
+  serviceVariant?: VariantForStock | null;
   addons?: { quantity: number; addon: AddonForStock }[];
 };
 
@@ -45,6 +50,23 @@ export const addonStockSelect = {
   stockProduct: stockRefSelect,
   recipe: recipeIngredientsSelect,
 } satisfies Prisma.AddonSelect;
+/** A service loaded for stock maths: its own product / recipe, like a menu item. */
+export const serviceStockSelect = {
+  id: true, name: true, productId: true, stockQtyPerUnit: true,
+  product: stockRefSelect,
+  recipe: recipeIngredientsSelect,
+} satisfies Prisma.ServiceSelect;
+export const serviceVariantStockSelect = {
+  id: true, name: true, stockProductId: true, stockQtyPerUnit: true,
+  stockProduct: stockRefSelect,
+  recipe: recipeIngredientsSelect,
+  ingredientOverrides: { select: { quantity: true, isRemoved: true, product: stockRefSelect } },
+} satisfies Prisma.ServiceVariantSelect;
+export const serviceVariantStockInclude = {
+  stockProduct: stockRefSelect,
+  recipe: recipeIngredientsSelect,
+  ingredientOverrides: { select: { quantity: true, isRemoved: true, product: stockRefSelect } },
+} satisfies Prisma.ServiceVariantInclude;
 export const addonStockInclude = { stockProduct: stockRefSelect, recipe: recipeIngredientsSelect } satisfies Prisma.AddonInclude;
 
 /**
@@ -81,16 +103,17 @@ export function computeStockRequirements(items: OrderItemForStock[]): Map<string
     requirements.set(item.id, { quantity: (current?.quantity ?? 0) + quantity, name: item.name });
   };
   for (const orderItem of items) {
-    const v = orderItem.variant;
+    const v = orderItem.variant ?? orderItem.serviceVariant ?? null;
+    const base = orderItem.menuItem ?? orderItem.service ?? null;
     let ingredients: { item: StockRef; quantity: number }[] | null = null;
     if (v?.stockProductId && v.stockProduct) {
       ingredients = [{ item: v.stockProduct, quantity: Number(v.stockQtyPerUnit ?? 1) }];
     } else if (v?.recipe) {
       ingredients = variantRecipeIngredients(v);
-    } else if (orderItem.menuItem?.recipe?.ingredients.length) {
-      ingredients = orderItem.menuItem.recipe.ingredients.map((ingredient) => ({ item: ingredient.product, quantity: Number(ingredient.quantity) }));
-    } else if (orderItem.menuItem?.product) {
-      ingredients = [{ item: orderItem.menuItem.product, quantity: Number(orderItem.menuItem.stockQtyPerUnit ?? 1) }];
+    } else if (base?.recipe?.ingredients.length) {
+      ingredients = base.recipe.ingredients.map((ingredient) => ({ item: ingredient.product, quantity: Number(ingredient.quantity) }));
+    } else if (base?.product) {
+      ingredients = [{ item: base.product, quantity: Number(base.stockQtyPerUnit ?? 1) }];
     }
     if (ingredients) {
       for (const ingredient of ingredients) add(ingredient.item, ingredient.quantity * orderItem.quantity);

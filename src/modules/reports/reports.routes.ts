@@ -128,19 +128,27 @@ type Moneyish = Prisma.Decimal | number | null;
  * the above) — never silently treated as zero, so it can be surfaced as a
  * caveat instead of quietly inflating Net Revenue. */
 type CostProduct = { id: string; unitCost: Moneyish; packSize: Moneyish };
+type VariantCost = {
+  stockQtyPerUnit: Moneyish;
+  stockProduct: { unitCost: Moneyish; packSize: Moneyish } | null;
+  // A variant made from its own recipe (with overrides) instead of one product.
+  recipe?: { ingredients: { quantity: Moneyish; product: CostProduct }[] } | null;
+  ingredientOverrides?: { quantity: Moneyish; isRemoved: boolean; product: CostProduct }[];
+};
 type CostableItem = {
   quantity: number;
   product: { unitCost: Moneyish; packSize: Moneyish } | null;
-  variant: {
-    stockQtyPerUnit: Moneyish;
-    stockProduct: { unitCost: Moneyish; packSize: Moneyish } | null;
-    // A variant made from its own recipe (with overrides) instead of one product.
-    recipe?: { ingredients: { quantity: Moneyish; product: CostProduct }[] } | null;
-    ingredientOverrides?: { quantity: Moneyish; isRemoved: boolean; product: CostProduct }[];
-  } | null;
-  // Service lines: the cost per unit frozen at sale (null = not costed, treated as 0 as before).
+  variant: VariantCost | null;
+  // Service lines: the cost per unit frozen at sale (null = not costed, treated as 0 as before),
+  // plus whatever stock the service (or its option) consumes, costed like a menu item's.
   unitCost?: Moneyish;
-  service: { id: string } | null;
+  serviceVariant?: VariantCost | null;
+  service: {
+    id: string;
+    stockQtyPerUnit?: Moneyish;
+    product?: { unitCost: Moneyish; packSize: Moneyish } | null;
+    recipe?: { ingredients: { quantity: Moneyish; product: { unitCost: Moneyish; packSize: Moneyish } }[] } | null;
+  } | null;
   menuItem: {
     stockQtyPerUnit: Moneyish;
     product: { unitCost: Moneyish; packSize: Moneyish } | null;
@@ -174,7 +182,19 @@ function resolveItemCost(item: CostableItem): number | null {
     const perUnit = Number(item.menuItem.stockQtyPerUnit ?? 1);
     return stockValue(perUnit * item.quantity, item.menuItem.product.unitCost, item.menuItem.product.packSize);
   }
-  if (item.service) return item.unitCost != null ? Number(item.unitCost) * item.quantity : 0;
+  if (item.service) {
+    const explicit = item.unitCost != null ? Number(item.unitCost) * item.quantity : 0;
+    // Consumed stock is costed by the menu-item rules (the option's own product/recipe, else the service's).
+    const consumed = resolveItemCost({
+      ...item,
+      product: null,
+      service: null,
+      unitCost: undefined,
+      variant: item.serviceVariant ?? null,
+      menuItem: { stockQtyPerUnit: item.service.stockQtyPerUnit ?? null, product: item.service.product ?? null, recipe: item.service.recipe ?? null },
+    });
+    return explicit + (consumed ?? 0);
+  }
   return null;
 }
 
@@ -189,7 +209,21 @@ const salesQuerySchema = z.object({
 const orderItemInclude = {
   addons: { select: { quantity: true, unitPrice: true } },
   product: { select: { id: true, name: true, unit: true, unitCost: true, packSize: true } },
-  service: { select: { id: true, name: true } },
+  service: {
+    select: {
+      id: true, name: true, stockQtyPerUnit: true,
+      product: { select: { unitCost: true, packSize: true } },
+      recipe: { select: { ingredients: { select: { quantity: true, product: { select: { unitCost: true, packSize: true } } } } } },
+    },
+  },
+  serviceVariant: {
+    select: {
+      id: true, name: true, stockQtyPerUnit: true,
+      stockProduct: { select: { unitCost: true, packSize: true } },
+      recipe: { select: { ingredients: { select: { quantity: true, product: { select: { id: true, unitCost: true, packSize: true } } } } } },
+      ingredientOverrides: { select: { quantity: true, isRemoved: true, product: { select: { id: true, unitCost: true, packSize: true } } } },
+    },
+  },
   variant: {
     select: {
       id: true, name: true, stockQtyPerUnit: true,

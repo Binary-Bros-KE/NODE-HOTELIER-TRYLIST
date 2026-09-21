@@ -24,8 +24,12 @@ const createSchema = z.object({
   price: z.coerce.number().min(0, "Price cannot be negative").max(9_999_999),
   sku: optionalText(60),
   imageUrl: optionalText(2000),
+  // Which till it belongs to: the food POS (MENU) or the Services POS (SERVICE).
+  scope: z.enum(["MENU", "SERVICE"]).default("MENU"),
   // null = uncategorised (shows only under "All" in the POS picker).
   menuCategoryId: z.preprocess(blankToNull, z.string().cuid().nullable()).optional(),
+  // SERVICE add-ons: limited to one service category, or null = offered on every service.
+  serviceCategoryId: z.preprocess(blankToNull, z.string().cuid().nullable()).optional(),
   // Optional stock link: selling one unit of this add-on consumes
   // stockQtyPerUnit of stockProductId — e.g. "Extra Red Bull" consuming 1
   // can. Both null = no stock impact (a free garnish, a service charge).
@@ -49,8 +53,11 @@ const addonFields = {
   price: true,
   sku: true,
   imageUrl: true,
+  scope: true,
   menuCategoryId: true,
   menuCategory: { select: { id: true, name: true } },
+  serviceCategoryId: true,
+  serviceCategory: { select: { id: true, name: true } },
   stockProductId: true,
   stockQtyPerUnit: true,
   stockProduct: { select: { id: true, name: true } },
@@ -61,7 +68,7 @@ const addonFields = {
   updatedAt: true,
   _count: { select: { orderItems: true } },
 } as const;
-const orderBy: Prisma.AddonOrderByWithRelationInput[] = [{ isActive: "desc" }, { menuCategory: { name: "asc" } }, { name: "asc" }];
+const orderBy: Prisma.AddonOrderByWithRelationInput[] = [{ isActive: "desc" }, { menuCategory: { name: "asc" } }, { serviceCategory: { name: "asc" } }, { name: "asc" }];
 
 async function assertSkuFree(tid: string, sku: string | undefined, exceptId?: string) {
   if (!sku) return;
@@ -73,6 +80,18 @@ async function assertCategory(tid: string, menuCategoryId: string | null | undef
   if (!menuCategoryId) return;
   const found = await prisma.menuCategory.findFirst({ where: { id: menuCategoryId, tenantId: tid }, select: { id: true } });
   if (!found) throw Object.assign(new Error("Selected category was not found"), { status: 400 });
+}
+
+async function assertServiceCategory(tid: string, serviceCategoryId: string | null | undefined) {
+  if (!serviceCategoryId) return;
+  const found = await prisma.serviceCategory.findFirst({ where: { id: serviceCategoryId, tenantId: tid }, select: { id: true } });
+  if (!found) throw Object.assign(new Error("Selected service category was not found"), { status: 400 });
+}
+
+/** A menu add-on can't carry a service category and vice versa - they belong to different tills. */
+function assertScopeMatchesCategory(scope: "MENU" | "SERVICE", menuCategoryId: string | null | undefined, serviceCategoryId: string | null | undefined) {
+  if (scope === "MENU" && serviceCategoryId) throw Object.assign(new Error("A menu add-on can't be tied to a service category"), { status: 400 });
+  if (scope === "SERVICE" && menuCategoryId) throw Object.assign(new Error("A service add-on can't be tied to a menu category"), { status: 400 });
 }
 
 async function assertRecipe(tid: string, recipeId: string | null | undefined) {
@@ -93,14 +112,17 @@ addonsRouter.get("/", async (req, res, next) => {
       search: optionalText(80),
       active: z.enum(["true", "false"]).optional(),
       categoryId: z.string().trim().optional(),
+      // Each till manages its own catalog; menu add-ons stay the default.
+      scope: z.enum(["MENU", "SERVICE"]).default("MENU"),
     }).safeParse(req.query);
     if (!query.success) { res.status(400).json({ error: "Invalid filters", details: query.error.flatten() }); return; }
-    const { search, active, categoryId } = query.data;
+    const { search, active, categoryId, scope } = query.data;
     const addons = await prisma.addon.findMany({
       where: {
         tenantId: tenantId(req),
+        scope,
         ...(active ? { isActive: active === "true" } : {}),
-        ...(categoryId ? { menuCategoryId: categoryId } : {}),
+        ...(categoryId ? (scope === "SERVICE" ? { serviceCategoryId: categoryId } : { menuCategoryId: categoryId }) : {}),
         ...(search ? { OR: [
           { name: { contains: search, mode: "insensitive" } },
           { sku: { contains: search, mode: "insensitive" } },
@@ -131,7 +153,9 @@ addonsRouter.post("/", async (req, res, next) => {
   const tid = tenantId(req);
   try {
     await assertSkuFree(tid, data.data.sku);
+    assertScopeMatchesCategory(data.data.scope, data.data.menuCategoryId, data.data.serviceCategoryId);
     await assertCategory(tid, data.data.menuCategoryId);
+    await assertServiceCategory(tid, data.data.serviceCategoryId);
     await assertProduct(tid, data.data.stockProductId);
     await assertRecipe(tid, data.data.recipeId);
     const addon = await prisma.addon.create({ data: { tenantId: tid, ...data.data }, select: addonFields });
@@ -148,9 +172,13 @@ addonsRouter.patch("/:id", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid add-on", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
-    const existing = await prisma.addon.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
+    const existing = await prisma.addon.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, scope: true } });
     if (!existing) { res.status(404).json({ error: "Add-on not found" }); return; }
+    // An add-on belongs to one till for life (its history and pricing hang off it).
+    if (data.data.scope !== undefined && data.data.scope !== existing.scope) { res.status(400).json({ error: "An add-on can't move between the menu and services" }); return; }
+    assertScopeMatchesCategory(existing.scope, data.data.menuCategoryId, data.data.serviceCategoryId);
     await assertSkuFree(tid, data.data.sku, existing.id);
+    await assertServiceCategory(tid, data.data.serviceCategoryId);
     await assertCategory(tid, data.data.menuCategoryId);
     await assertProduct(tid, data.data.stockProductId);
     await assertRecipe(tid, data.data.recipeId);
