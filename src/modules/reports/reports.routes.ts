@@ -138,6 +138,8 @@ type CostableItem = {
     recipe?: { ingredients: { quantity: Moneyish; product: CostProduct }[] } | null;
     ingredientOverrides?: { quantity: Moneyish; isRemoved: boolean; product: CostProduct }[];
   } | null;
+  // Service lines: the cost per unit frozen at sale (null = not costed, treated as 0 as before).
+  unitCost?: Moneyish;
   service: { id: string } | null;
   menuItem: {
     stockQtyPerUnit: Moneyish;
@@ -172,7 +174,7 @@ function resolveItemCost(item: CostableItem): number | null {
     const perUnit = Number(item.menuItem.stockQtyPerUnit ?? 1);
     return stockValue(perUnit * item.quantity, item.menuItem.product.unitCost, item.menuItem.product.packSize);
   }
-  if (item.service) return 0;
+  if (item.service) return item.unitCost != null ? Number(item.unitCost) * item.quantity : 0;
   return null;
 }
 

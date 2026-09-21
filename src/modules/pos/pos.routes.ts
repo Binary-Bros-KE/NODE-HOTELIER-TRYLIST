@@ -1128,7 +1128,10 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { payments: true } });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
-  if (!["OPEN", "PREPARING", "READY"].includes(order.status) || order.servedAt) {
+  // A service sale is created already SERVED and paid in a second step; if that step fails the
+  // till withdraws it (no payment yet, no stock was taken for services).
+  const unpaidServiceSale = order.channel === "SERVICES" && order.status === "SERVED" && order.payments.length === 0;
+  if (!unpaidServiceSale && (!["OPEN", "PREPARING", "READY"].includes(order.status) || order.servedAt)) {
     res.status(409).json({ error: "Only orders that have not been served can be reverted" });
     return;
   }
@@ -1901,12 +1904,24 @@ posRouter.get("/service-items", async (req, res) => {
     isActive: true,
     ...(locationCount > 0 ? { OR: [{ locations: { none: {} } }, ...(effectiveLocationId ? [{ locations: { some: { id: effectiveLocationId } } }] : [])] } : {}),
   };
-  const items = await prisma.service.findMany({
-    where,
-    include: { category: true, unit: true, locations: { select: { id: true, name: true } } },
-    orderBy: { name: "asc" },
+  const [items, taxDefaults] = await Promise.all([
+    prisma.service.findMany({
+      where,
+      include: { category: true, unit: true, locations: { select: { id: true, name: true } } },
+      orderBy: { name: "asc" },
+    }),
+    taxSettingsFor(tid),
+  ]);
+  // Same resolution as menu items: the service's own override, else the property default -
+  // the till previews exactly what the server will snapshot on the sale.
+  res.status(200).json({
+    items: items.map((item) => ({
+      ...item,
+      taxRate: item.taxRate ?? taxDefaults?.taxRate ?? null,
+      taxMode: item.taxMode ?? taxDefaults?.taxMode ?? null,
+      taxTreatment: item.taxTreatment ?? taxDefaults?.taxTreatment ?? null,
+    })),
   });
-  res.status(200).json({ items });
 });
 
 /** Rings up a retail (Products) or service sale. Neither has a kitchen step,
@@ -1969,10 +1984,25 @@ posRouter.post("/retail-orders", async (req, res) => {
         });
       } else {
         const serviceIds = parsed.data.items.map((item) => item.serviceId);
-        const services = await tx.service.findMany({ where: { id: { in: serviceIds }, tenantId: tid, isActive: true } });
+        const services = await tx.service.findMany({ where: { id: { in: serviceIds }, tenantId: tid, isActive: true }, include: { locations: { select: { id: true } } } });
         if (services.length !== new Set(serviceIds).size) throw Object.assign(new Error("Every item must be an active service from this property"), { status: 400 });
-        const prices = new Map(services.map((s) => [s.id, s.price]));
-        itemsCreate = parsed.data.items.map((item) => ({ serviceId: item.serviceId, quantity: item.quantity, unitPrice: prices.get(item.serviceId)!, ...retailFallbackTax }));
+        // A service allocated to specific locations may only be sold there (empty = everywhere).
+        const notHere = services.find((s) => s.locations.length > 0 && (!effectiveLocationId || !s.locations.some((l) => l.id === effectiveLocationId)));
+        if (notHere) throw Object.assign(new Error(`"${notHere.name}" isn't sold at this location`), { status: 409 });
+        const byId = new Map(services.map((s) => [s.id, s]));
+        itemsCreate = parsed.data.items.map((item) => {
+          const service = byId.get(item.serviceId)!;
+          return {
+            serviceId: item.serviceId,
+            quantity: item.quantity,
+            unitPrice: service.price,
+            // The service's own tax (else the property default), frozen on the line like a menu item.
+            taxRate: service.taxRate ?? retailFallbackTax.taxRate,
+            taxMode: service.taxMode ?? retailFallbackTax.taxMode,
+            taxTreatment: service.taxTreatment ?? retailFallbackTax.taxTreatment,
+            unitCost: service.cost,
+          };
+        });
       }
 
       const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });

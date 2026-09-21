@@ -8,12 +8,22 @@ export const servicesRouter = Router();
 
 const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 const optionalText = (max: number) => z.preprocess(blankToUndefined, z.string().trim().max(max).optional());
+const blankToNull = (v: unknown) => (typeof v === "string" && v.trim() === "" ? null : v);
+// null = "not set": cost not costed, tax inherited from the business default.
+const nullableCost = z.preprocess(blankToNull, z.coerce.number().min(0).max(9_999_999).nullable());
+const nullableRate = z.preprocess(blankToNull, z.coerce.number().min(0).max(100).nullable());
+const nullableEnum = <T extends readonly [string, ...string[]]>(values: T) => z.preprocess(blankToNull, z.enum(values).nullable());
 
 const createSchema = z.object({
   name: z.string().trim().min(1).max(120),
   categoryId: z.string().cuid(),
   unitId: z.string().cuid(),
   price: z.coerce.number().nonnegative(),
+  cost: nullableCost.optional(),
+  // Same tax model as menu items: all null = business default; else an override.
+  taxRate: nullableRate.optional(),
+  taxMode: nullableEnum(["INCLUSIVE", "EXCLUSIVE"] as const).optional(),
+  taxTreatment: nullableEnum(["STANDARD", "ZERO_RATED", "EXEMPT"] as const).optional(),
   description: optionalText(500),
   isActive: z.boolean().default(true),
   // Empty = unallocated = sellable at every location (the default) —
@@ -90,8 +100,17 @@ servicesRouter.patch("/:id", async (req, res, next) => {
   }
 });
 
-servicesRouter.delete("/:id", async (req, res) => {
-  const deleted = await prisma.service.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } });
-  if (!deleted.count) { res.status(404).json({ error: "Service not found" }); return; }
-  res.status(204).send();
+servicesRouter.delete("/:id", async (req, res, next) => {
+  const tid = tenantId(req);
+  try {
+    // Sold services are part of receipts and reports - they can only be deactivated.
+    // Checked up front: the driver adapter doesn't surface a foreign-key violation as a Prisma known error.
+    const sold = await prisma.posOrderItem.count({ where: { serviceId: req.params.id, order: { tenantId: tid } } });
+    if (sold > 0) { res.status(409).json({ error: "This service has been sold, so it can't be deleted. Deactivate it instead." }); return; }
+    const deleted = await prisma.service.deleteMany({ where: { id: req.params.id, tenantId: tid } });
+    if (!deleted.count) { res.status(404).json({ error: "Service not found" }); return; }
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
 });
