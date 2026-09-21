@@ -11,6 +11,8 @@ import { resolveEffectiveLocation, employeeLocationId } from "../../lib/location
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
 import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger.js";
 import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
+import { computeStockRequirements, type OrderItemForStock } from "../../lib/stockRequirements.js";
+import { dispatchRequired } from "../../lib/dispatch.js";
 
 // POS configuration, stores, and stock all remain scoped to the tenant supplied
 // by the authenticated request context (currently x-tenant-id during scaffolding).
@@ -596,7 +598,10 @@ posRouter.post("/orders", async (req, res) => {
     res.status(400).json({ error: "No location is configured to hold stock for this order" });
     return;
   }
-  if (!instantServe && orderStockLocationId) {
+  // Where the kitchen must request its ingredients from the store, its own
+  // shelves are empty until the storekeeper dispatches - availability is
+  // checked against the store at dispatch time instead.
+  if (!instantServe && orderStockLocationId && !dispatchRequired(location)) {
     try {
       await prisma.$transaction((tx) => assertStockAvailable(tx, tid, orderStockRequirements, orderStockLocationId));
     } catch (error) {
@@ -707,6 +712,23 @@ posRouter.post("/orders/:id/items", async (req, res) => {
   // actually new"), each addition here becomes its own flagged row so the
   // "Updated orders" queue shows exactly what's new, nothing more.
   const flagAsUpdate = order.status !== "OPEN";
+
+  // Catch a stock shortfall now, while the waiter can still swap the item -
+  // not at Serve, after the kitchen has already cooked it. (A SERVED order
+  // deducts immediately below, guarded; a store-dispatch location is checked
+  // against the store when the kitchen requests the ingredients.)
+  if (order.status !== "SERVED" && !dispatchRequired(order.location)) {
+    const addedRequirements = computeStockRequirements(resolvedLinesForStock(resolvedLines, menuItemsById, addonsById));
+    const addedStockLocationId = addedRequirements.size > 0 ? await resolveStockLocationId(tid, order.locationId) : null;
+    if (addedStockLocationId) {
+      try {
+        await prisma.$transaction((tx) => assertStockAvailable(tx, tid, addedRequirements, addedStockLocationId));
+      } catch (error) {
+        if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+        throw error;
+      }
+    }
+  }
 
   try {
     const updated = await prisma.$transaction(async (tx) => {
@@ -952,19 +974,6 @@ async function resolveStockLocationId(tid: string, orderLocationId: string | nul
   return store?.id ?? null;
 }
 
-type StockRef = { id: string; name: string };
-type QtyLike = Prisma.Decimal | number | null;
-type OrderItemForStock = {
-  quantity: number;
-  variant?: { stockProductId: string | null; stockQtyPerUnit: QtyLike; stockProduct: StockRef | null } | null;
-  menuItem: {
-    product: StockRef | null;
-    stockQtyPerUnit?: QtyLike;
-    recipe: { ingredients: { product: StockRef; quantity: Prisma.Decimal | number }[] } | null;
-  } | null;
-  addons?: { quantity: number; addon: { stockProductId: string | null; stockQtyPerUnit: QtyLike; stockProduct: StockRef | null } }[];
-};
-
 function resolvedLinesForStock(
   lines: ResolvedLine[],
   menuItemsById: Map<string, Prisma.MenuItemGetPayload<{ include: typeof menuLineInclude }>>,
@@ -980,42 +989,6 @@ function resolvedLinesForStock(
       addons: line.addons.map((a) => ({ quantity: a.quantity, addon: addonsById.get(a.addonId)! })),
     };
   });
-}
-
-/** Totals up how much of each product a set of order items actually needs.
- * Priority per line for the item itself: a variant's own product+serving
- * (Tot/Double/Bottle) → the menu item's recipe ingredients → the menu item's
- * directly-linked product times its stockQtyPerUnit (defaulting to 1 = a
- * whole unit). Each add-on on the line is independent of that choice and,
- * when it carries its own stock link, adds its own requirement on top (an
- * "Extra Red Bull" consumes a can regardless of what the parent drink
- * consumes) — see the pricing math in orderTotals.ts's lineSubtotal, which
- * the same addon.quantity × orderItem.quantity multiplication mirrors. */
-function computeStockRequirements(items: OrderItemForStock[]): Map<string, { quantity: number; name: string }> {
-  const requirements = new Map<string, { quantity: number; name: string }>();
-  const add = (item: StockRef, quantity: number) => {
-    const current = requirements.get(item.id);
-    requirements.set(item.id, { quantity: (current?.quantity ?? 0) + quantity, name: item.name });
-  };
-  for (const orderItem of items) {
-    const v = orderItem.variant;
-    let ingredients: { item: StockRef; quantity: number }[] | null = null;
-    if (v?.stockProductId && v.stockProduct) {
-      ingredients = [{ item: v.stockProduct, quantity: Number(v.stockQtyPerUnit ?? 1) }];
-    } else if (orderItem.menuItem?.recipe?.ingredients.length) {
-      ingredients = orderItem.menuItem.recipe.ingredients.map((ingredient) => ({ item: ingredient.product, quantity: Number(ingredient.quantity) }));
-    } else if (orderItem.menuItem?.product) {
-      ingredients = [{ item: orderItem.menuItem.product, quantity: Number(orderItem.menuItem.stockQtyPerUnit ?? 1) }];
-    }
-    if (ingredients) {
-      for (const ingredient of ingredients) add(ingredient.item, ingredient.quantity * orderItem.quantity);
-    }
-    for (const orderAddon of orderItem.addons ?? []) {
-      if (!orderAddon.addon.stockProductId || !orderAddon.addon.stockProduct) continue;
-      add(orderAddon.addon.stockProduct, Number(orderAddon.addon.stockQtyPerUnit ?? 1) * orderAddon.quantity * orderItem.quantity);
-    }
-  }
-  return requirements;
 }
 
 /** Decrements ProductStock for each requirement and logs a matching DISPATCH
@@ -1256,6 +1229,8 @@ posRouter.post("/orders/:id/cancel/approve", requirePermission("POS_APPROVE_CANC
         data: { status: "REJECTED", decidedBy: req.userId ?? null, decidedAt: new Date(), decisionNote: "Order was returned in full" },
       });
       await tx.posOrder.update({ where: { id: order.id }, data: { status: "CANCELLED", cancelDecidedBy: req.userId ?? null, cancelDecidedAt: new Date() } });
+      // A cancelled order no longer needs ingredients: withdraw any request still waiting at the store.
+      await tx.stockDispatchRequest.updateMany({ where: { orderId: order.id, status: "REQUESTED" }, data: { status: "CANCELLED", respondedAt: new Date(), respondedBy: req.userId ?? null } });
       if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });

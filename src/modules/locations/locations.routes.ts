@@ -38,6 +38,9 @@ const createSchema = z.object({
   canSellServices: z.boolean().default(true),
   canSellProducts: z.boolean().default(true),
   serveMode: z.enum(SERVE_MODES).default("KITCHEN"),
+  // Kitchen must get its ingredients dispatched by a store before starting a ticket.
+  requireStoreDispatch: z.boolean().default(false),
+  dispatchFromLocationId: z.string().cuid().nullable().optional(),
   // Printed on the matching document for orders/invoices/quotations from
   // this location — e.g. a branch-specific thank-you note or return policy.
   receiptHeader: optionalDocText,
@@ -73,6 +76,8 @@ const locationFields = {
   canSellServices: true,
   canSellProducts: true,
   serveMode: true,
+  requireStoreDispatch: true,
+  dispatchFromLocationId: true,
   receiptHeader: true,
   receiptFooter: true,
   invoiceHeader: true,
@@ -95,12 +100,21 @@ locationsRouter.get("/", async (req, res) => {
   res.json({ locations });
 });
 
+/** The store that supplies a kitchen must be another location in the same property. */
+async function assertSupplyingStore(id: string | null | undefined, tid: string, selfId?: string) {
+  if (!id) return;
+  if (id === selfId) throw Object.assign(new Error("A location cannot be supplied by itself"), { status: 400 });
+  const store = await prisma.location.findFirst({ where: { id, tenantId: tid }, select: { id: true } });
+  if (!store) throw Object.assign(new Error("Choose a store from this property to supply the kitchen"), { status: 400 });
+}
+
 locationsRouter.post("/", async (req, res, next) => {
   const data = createSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid location", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
     await assertManagerInTenant(data.data.managerId, tid);
+    await assertSupplyingStore(data.data.dispatchFromLocationId, tid);
     const location = await prisma.location.create({ data: { tenantId: tid, ...data.data }, select: locationFields });
     res.status(201).json({ location });
   } catch (error) {
@@ -116,6 +130,7 @@ locationsRouter.patch("/:id", async (req, res, next) => {
   const tid = tenantId(req);
   try {
     if (data.data.managerId !== undefined) await assertManagerInTenant(data.data.managerId, tid);
+    await assertSupplyingStore(data.data.dispatchFromLocationId, tid, req.params.id);
     const updated = await prisma.location.updateMany({ where: { id: req.params.id, tenantId: tid }, data: data.data });
     if (!updated.count) { res.status(404).json({ error: "Location not found" }); return; }
     const location = await prisma.location.findUniqueOrThrow({ where: { id: req.params.id }, select: locationFields });

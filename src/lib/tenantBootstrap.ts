@@ -47,7 +47,7 @@ export const ALL_PERMISSIONS = [
   "POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION",
   "SHIFT_MANAGE", "ATTENDANCE_MANAGE", "SHIFT_EXEMPT",
   "REQUISITION_CREATE", "REQUISITION_APPROVE",
-  "SHIFT_REVIEW", "SALARY_MANAGE",
+  "SHIFT_REVIEW", "SALARY_MANAGE", "STORE_DISPATCH",
 ] as const;
 
 // Who raises a requisition (product + quantity only) vs. who approves it
@@ -73,7 +73,7 @@ export const SYSTEM_ROLES = [
   { name: "Waiter", description: "Point of sale, tables, and orders.", allowedSections: ["OVERVIEW", "SALES"], permissions: [] },
   { name: "Barman", description: "Runs the counter — sees and serves orders waiters send in, approves returns.", allowedSections: ["OVERVIEW", "SALES"], permissions: [...BARMAN_PERMISSIONS, ...REQUISITION_RAISER_PERMISSIONS] },
   { name: "Housekeeping", description: "Room tasks and cleanliness tracking.", allowedSections: ["OVERVIEW", "HOUSEKEEPING"], permissions: [] },
-  { name: "Storekeeper", description: "Inventory, stock, and supplier records.", allowedSections: ["OVERVIEW", "INVENTORY"], permissions: REQUISITION_RAISER_PERMISSIONS },
+  { name: "Storekeeper", description: "Inventory, stock, and supplier records.", allowedSections: ["OVERVIEW", "INVENTORY"], permissions: [...REQUISITION_RAISER_PERMISSIONS, "STORE_DISPATCH"] },
   { name: "Accountant", description: "Finance, expenses, and reports.", allowedSections: ["OVERVIEW", "FINANCE", "REPORTS"], permissions: [...REQUISITION_APPROVER_PERMISSIONS, "SHIFT_REVIEW", "SALARY_MANAGE"] },
 ] as const;
 

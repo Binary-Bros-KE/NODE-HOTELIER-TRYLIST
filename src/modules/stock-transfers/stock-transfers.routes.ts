@@ -4,7 +4,8 @@ import { z } from "zod";
 
 import { prisma } from "../../lib/prisma.js";
 import { nextStockTransferNo } from "../../lib/sequence.js";
-import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
+import { InsufficientStockError } from "../../lib/stockLedger.js";
+import { performStockTransfer } from "../../lib/stockTransfer.js";
 
 // An internal move of stock between two locations — the Store page's
 // "Distribute Stock" flow. Every line freezes the balance at both ends the
@@ -109,34 +110,11 @@ stockTransfersRouter.post("/", async (req, res, next) => {
     const transferNote = note ?? `Transfer ${fromLocation.name} → ${toLocation.name}`;
 
     const transfer = await prisma.$transaction(async (tx) => {
-      const created = await tx.stockTransfer.create({
-        data: { tenantId: tid, transferNo, fromLocationId, toLocationId, note: note ?? null, createdBy: req.userId },
+      const created = await performStockTransfer(tx, {
+        tenantId: tid, transferNo, fromLocationId, toLocationId, note: note ?? null, ledgerNote: transferNote,
+        performedBy: req.userId,
+        items: items.map((item) => ({ productId: item.productId, quantity: item.quantity, name: productName.get(item.productId) })),
       });
-      for (const item of items) {
-        // OUT first — the guarded side, so an insufficient balance fails
-        // before anything is credited to the destination.
-        const out = await recordStockMovement(tx, {
-          tenantId: tid, productId: item.productId, locationId: fromLocationId, type: "TRANSFER_OUT",
-          quantity: -item.quantity, note: transferNote, sourceType: "STOCK_TRANSFER", sourceRefId: created.id,
-          performedBy: req.userId ?? null, label: productName.get(item.productId) ?? "stock",
-        });
-        const into = await recordStockMovement(tx, {
-          tenantId: tid, productId: item.productId, locationId: toLocationId, type: "TRANSFER_IN",
-          quantity: item.quantity, note: transferNote, sourceType: "STOCK_TRANSFER", sourceRefId: created.id,
-          performedBy: req.userId ?? null,
-        });
-        await tx.stockTransferItem.create({
-          data: {
-            transferId: created.id,
-            productId: item.productId,
-            quantity: item.quantity,
-            fromQtyBefore: out.balanceBefore ?? 0,
-            fromQtyAfter: out.balanceAfter ?? 0,
-            toQtyBefore: into.balanceBefore ?? 0,
-            toQtyAfter: into.balanceAfter ?? 0,
-          },
-        });
-      }
       return tx.stockTransfer.findUniqueOrThrow({ where: { id: created.id }, include: transferInclude });
     });
     res.status(201).json({ transfer });
