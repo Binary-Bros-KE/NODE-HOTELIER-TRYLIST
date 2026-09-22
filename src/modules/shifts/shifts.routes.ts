@@ -79,7 +79,7 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       orderBy: { createdAt: "asc" },
     }),
     prisma.posOrder.findMany({
-      where: { tenantId: tid, createdBy: employeeId, source: { not: "POS_ORDER" }, createdAt: { gte: from, lte: to } },
+      where: { tenantId: tid, createdBy: employeeId, createdAt: { gte: from, lte: to } },
       select: {
         id: true,
         orderNumber: true,
@@ -96,7 +96,7 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       orderBy: { createdAt: "asc" },
     }),
     prisma.folioLineItem.findMany({
-      where: { tenantId: tid, createdBy: employeeId, createdAt: { gte: from, lte: to } },
+      where: { tenantId: tid, createdBy: employeeId, source: { not: "POS_ORDER" }, createdAt: { gte: from, lte: to } },
       select: {
         id: true,
         source: true,
