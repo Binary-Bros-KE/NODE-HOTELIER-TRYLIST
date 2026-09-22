@@ -174,6 +174,31 @@ function nextStatus(type: "QUOTATION" | "INVOICE", total: number, paid: number, 
   return current === "ISSUED" || current === "OVERDUE" ? current : "ISSUED";
 }
 
+async function syncTemporalStatuses(tid: string) {
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.commercialDocument.updateMany({
+      where: {
+        tenantId: tid,
+        type: "INVOICE",
+        status: { in: ["ISSUED", "PARTIALLY_PAID"] },
+        balance: { gt: 0 },
+        dueAt: { lt: now },
+      },
+      data: { status: "OVERDUE" },
+    }),
+    prisma.commercialDocument.updateMany({
+      where: {
+        tenantId: tid,
+        type: "QUOTATION",
+        status: { in: ["DRAFT", "SENT"] },
+        expiresAt: { lt: now },
+      },
+      data: { status: "EXPIRED" },
+    }),
+  ]);
+}
+
 async function headerFooter(type: "QUOTATION" | "INVOICE", locationId: string | null | undefined) {
   if (!locationId) return { headerText: null, footerText: null };
   const location = await prisma.location.findUnique({ where: { id: locationId }, select: { invoiceHeader: true, invoiceFooter: true, quotationHeader: true, quotationFooter: true } });
@@ -215,6 +240,7 @@ commercialDocumentsRouter.get("/", async (req, res) => {
     search: z.string().trim().optional(),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid query", details: query.error.flatten() }); return; }
+  await syncTemporalStatuses(tid);
   const { type, status, search } = query.data;
   const where = {
     tenantId: tid,
@@ -388,6 +414,7 @@ commercialDocumentsRouter.get("/source-options", async (req, res) => {
 commercialDocumentsRouter.get("/source-links", async (req, res) => {
   const parsed = sourceLinksQuery.safeParse(req.query);
   if (!parsed.success) { res.status(400).json({ error: "Invalid source query", details: parsed.error.flatten() }); return; }
+  await syncTemporalStatuses(tenantId(req));
   const documents = await prisma.commercialDocument.findMany({
     where: { tenantId: tenantId(req), source: parsed.data.source, sourceRefId: parsed.data.sourceRefId },
     include,
@@ -565,6 +592,7 @@ commercialDocumentsRouter.post("/from-order", async (req, res) => {
 });
 
 commercialDocumentsRouter.get("/:id", async (req, res) => {
+  await syncTemporalStatuses(tenantId(req));
   const document = await prisma.commercialDocument.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include });
   if (!document) { res.status(404).json({ error: "Document not found" }); return; }
   res.json({ document });
@@ -712,8 +740,10 @@ commercialDocumentsRouter.post("/:id/status", async (req, res) => {
 
 commercialDocumentsRouter.post("/:id/convert-to-invoice", async (req, res) => {
   const tid = tenantId(req);
+  await syncTemporalStatuses(tid);
   const quote = await prisma.commercialDocument.findFirst({ where: { id: req.params.id, tenantId: tid, type: "QUOTATION" }, include });
   if (!quote) { res.status(404).json({ error: "Quotation not found" }); return; }
+  if (quote.status !== "ACCEPTED") { res.status(409).json({ error: "Only accepted quotations can be converted to invoices" }); return; }
   if (!quote.customerId) { res.status(400).json({ error: "Attach a customer before converting this quotation to an invoice" }); return; }
   const existing = quote.convertedDocuments.find((d) => d.type === "INVOICE");
   if (existing) { res.status(409).json({ error: `Already converted to ${existing.documentNo}` }); return; }
@@ -762,6 +792,7 @@ commercialDocumentsRouter.post("/:id/payments", async (req, res) => {
   const parsed = paymentSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid payment", details: parsed.error.flatten() }); return; }
   const tid = tenantId(req);
+  await syncTemporalStatuses(tid);
   const document = await prisma.commercialDocument.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { customer: true } });
   if (!document) { res.status(404).json({ error: "Document not found" }); return; }
   if (["CANCELLED", "VOID", "REJECTED", "EXPIRED"].includes(document.status)) { res.status(409).json({ error: "This document cannot receive payments" }); return; }
