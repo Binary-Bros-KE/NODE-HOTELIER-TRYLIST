@@ -1,8 +1,17 @@
 import type { Prisma } from "@prisma/client";
 
+import { prisma } from "./prisma.js";
 import { DispatchError, dispatchRequired, orderDispatchInfo } from "./dispatch.js";
 import { recordStockMovement, InsufficientStockError } from "./stockLedger.js";
 import { computeStockRequirements, type OrderItemForStock } from "./stockRequirements.js";
+
+/** Falls back to the tenant's warehouse (type STORE) when a sale has no
+ * location of its own — e.g. a property that isn't using locations at all. */
+export async function resolveStockLocationId(tid: string, orderLocationId: string | null): Promise<string | null> {
+  if (orderLocationId) return orderLocationId;
+  const store = await prisma.location.findFirst({ where: { tenantId: tid, type: "STORE" }, orderBy: { createdAt: "asc" }, select: { id: true } });
+  return store?.id ?? null;
+}
 
 /** Decrements ProductStock for each requirement and logs a matching SALE
  * movement — the actual moment ingredients leave the building. Throws (never

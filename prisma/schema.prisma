@@ -432,7 +432,6 @@ model Tenant {
   stockTransfers         StockTransfer[]
   supplierPayments       SupplierPayment[]
   supplierBalanceEntries SupplierBalanceEntry[]
-  serviceCenterServices  ServiceCenterService[]
   serviceProviders       ServiceProvider[]
   providerSchedules      ProviderSchedule[]
   membershipPlans        MembershipPlan[]
@@ -716,6 +715,7 @@ model ServiceVariant {
   createdAt           DateTime                   @default(now())
   updatedAt           DateTime                   @updatedAt
   orderItems          PosOrderItem[]
+  appointments        Appointment[]              @relation("AppointmentServiceVariant")
 
   @@unique([tenantId, serviceId, name])
   @@index([tenantId, serviceId])
@@ -771,6 +771,7 @@ model Service {
   // identical convention to MenuItem.locations.
   locations       Location[]
   orderItems      PosOrderItem[]
+  appointments    Appointment[]    @relation("AppointmentService")
 
   @@unique([tenantId, name])
   @@index([tenantId, categoryId])
@@ -2084,6 +2085,7 @@ model Location {
   dispatchRequestsFrom   StockDispatchRequest[] @relation("DispatchFrom")
   dispatchRequestsTo     StockDispatchRequest[] @relation("DispatchTo")
   printJobs              PrintJob[]
+  appointments           Appointment[]
 
   @@unique([tenantId, name])
 }
@@ -2289,6 +2291,7 @@ model PosOrder {
   creditEntries              CustomerCreditEntry[]
   returnRequests             PosOrderReturnRequest[]
   printJobs                  PrintJob[]
+  appointment                Appointment?
 
   @@unique([tenantId, orderNumber])
   @@index([tenantId, status, createdAt])
@@ -3125,23 +3128,6 @@ model PlatformSession {
   @@index([adminId])
 }
 
-model ServiceCenterService {
-  id              String        @id @default(cuid())
-  tenantId        String
-  name            String
-  description     String?
-  durationMinutes Int
-  price           Decimal       @db.Decimal(12, 2)
-  isActive        Boolean       @default(true)
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  appointments    Appointment[]
-
-  @@unique([tenantId, name])
-  @@index([tenantId, isActive])
-}
-
 model ServiceProvider {
   id           String             @id @default(cuid())
   tenantId     String
@@ -3229,28 +3215,48 @@ model MembershipPayment {
 }
 
 model Appointment {
-  id              String               @id @default(cuid())
-  tenantId        String
-  customerId      String
-  serviceId       String
-  providerId      String
-  membershipId    String?
-  paymentMethodId String?
-  startsAt        DateTime
-  endsAt          DateTime
-  status          AppointmentStatus    @default(BOOKED)
-  amount          Decimal              @db.Decimal(12, 2)
-  paymentStatus   PaymentStatus        @default(PENDING)
-  notes           String?
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
-  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer        Customer             @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  service         ServiceCenterService @relation(fields: [serviceId], references: [id], onDelete: Restrict)
-  provider        ServiceProvider      @relation(fields: [providerId], references: [id], onDelete: Restrict)
-  membership      Membership?          @relation(fields: [membershipId], references: [id], onDelete: SetNull)
-  paymentMethod   PaymentMethod?       @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+  id               String            @id @default(cuid())
+  tenantId         String
+  customerId       String
+  // The booked service, from the same catalog the till sells from - so a
+  // completed appointment gets real tax, stock consumption and a receipt,
+  // exactly like a walk-in sale of the same service.
+  serviceId        String
+  // A size/duration option of that service (a variant's own price/duration wins).
+  serviceVariantId String?
+  providerId       String
+  membershipId     String?
+  paymentMethodId  String?
+  // Which selling point this happens at - optional, same "unallocated = any
+  // location" convention as Service.locations; only matters when the chosen
+  // service is itself restricted to specific locations.
+  locationId       String?
+  startsAt         DateTime
+  endsAt           DateTime
+  status           AppointmentStatus @default(BOOKED)
+  // The estimated price shown while booking (service/variant price, less any
+  // membership discount). Once completed, the real charged amount lives on
+  // the linked PosOrder/PosOrderItem — this field stops being touched then.
+  amount           Decimal           @db.Decimal(12, 2)
+  paymentStatus    PaymentStatus     @default(PENDING)
+  // Set when the appointment is completed: the real POS sale it became (tax,
+  // stock, receipt, reports all flow from this order like any other sale).
+  // Once set, the appointment is finalized — see the routes for what that blocks.
+  orderId          String?           @unique
+  notes            String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer         Customer          @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  service          Service           @relation("AppointmentService", fields: [serviceId], references: [id], onDelete: Restrict)
+  serviceVariant   ServiceVariant?   @relation("AppointmentServiceVariant", fields: [serviceVariantId], references: [id], onDelete: SetNull)
+  provider         ServiceProvider   @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  membership       Membership?       @relation(fields: [membershipId], references: [id], onDelete: SetNull)
+  paymentMethod    PaymentMethod?    @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+  location         Location?         @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  order            PosOrder?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, startsAt, status])
   @@index([tenantId, providerId, startsAt])
+  @@index([tenantId, serviceId])
 }

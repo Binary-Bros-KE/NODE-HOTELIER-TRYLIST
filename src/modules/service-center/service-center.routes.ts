@@ -3,6 +3,12 @@ import { z } from "zod";
 
 import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
+import { orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.js";
+import { resolveServiceLines } from "../../lib/serviceSale.js";
+import { computeStockRequirements } from "../../lib/stockRequirements.js";
+import { deductStockForOrder, resolveStockLocationId } from "../../lib/orderStock.js";
+
+const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 
 export const serviceCenterRouter = Router();
 serviceCenterRouter.use(requireModule("SERVICE_CENTER"));
@@ -31,7 +37,9 @@ const membershipPlanSchema = z.object({
 });
 const membershipPaymentSchema = z.object({
   membershipId: z.string().cuid(),
-  paymentMethodId: z.string().cuid(),
+  // Not .cuid(): the system payment methods (Cash, M-Pesa...) are seeded with plain
+  // UUIDs, same convention as every other paymentMethodId field in the codebase.
+  paymentMethodId: z.string().trim().min(1),
   amount: z.coerce.number().positive().max(100_000_000),
   status: paymentStatus.default("PAID"),
   reference: z.string().trim().max(120).nullable().optional(),
@@ -53,9 +61,14 @@ const scheduleSchema = z.object({
 const appointmentSchema = z.object({
   customerId: z.string().cuid(),
   serviceId: z.string().cuid(),
+  // Which size/duration option of the service, when it has any (same convention as the till).
+  serviceVariantId: z.string().cuid().nullable().optional(),
   providerId: z.string().cuid(),
   membershipId: z.string().cuid().nullable().optional(),
-  paymentMethodId: z.string().cuid().nullable().optional(),
+  // Not .cuid(): system payment methods are seeded with plain UUIDs.
+  paymentMethodId: z.string().trim().min(1).nullable().optional(),
+  // Optional: only matters when the chosen service is itself restricted to specific locations.
+  locationId: z.string().cuid().nullable().optional(),
   startsAt: z.coerce.date(),
   status: appointmentStatus.default("BOOKED"),
   paymentStatus: paymentStatus.default("PENDING"),
@@ -65,7 +78,17 @@ const tenantId = (req: { tenantId?: string }) => {
   if (!req.tenantId) throw new Error("Tenant context is required");
   return req.tenantId;
 };
-const include = { customer: true, service: true, provider: true, membership: { include: { plan: true } }, paymentMethod: true } as const;
+const include = {
+  customer: true,
+  service: { include: { variants: { where: { isActive: true } }, locations: { select: { id: true } } } },
+  serviceVariant: true,
+  provider: true,
+  membership: { include: { plan: true } },
+  paymentMethod: true,
+  location: { select: { id: true, name: true } },
+  // Once completed, the real sale (tax, payment status, receipt) lives here — see /appointments/:id/complete.
+  order: { select: { id: true, orderNumber: true, status: true } },
+} as const;
 const membershipInclude = {
   customer: true,
   plan: true,
@@ -455,7 +478,7 @@ serviceCenterRouter.get("/appointments/:id", async (req, res) => {
 async function resolveAppointment(tid: string, data: z.infer<typeof appointmentSchema>, excludeId?: string) {
   const [customer, service, provider, membership, paymentMethod] = await Promise.all([
     prisma.customer.findFirst({ where: { id: data.customerId, tenantId: tid } }),
-    prisma.serviceCenterService.findFirst({ where: { id: data.serviceId, tenantId: tid, isActive: true } }),
+    prisma.service.findFirst({ where: { id: data.serviceId, tenantId: tid, isActive: true }, include: { variants: { where: { isActive: true } }, locations: { select: { id: true } } } }),
     prisma.serviceProvider.findFirst({ where: { id: data.providerId, tenantId: tid, isActive: true } }),
     data.membershipId ? prisma.membership.findFirst({ where: { id: data.membershipId, tenantId: tid, customerId: data.customerId, status: "ACTIVE", startsAt: { lte: data.startsAt }, endsAt: { gte: data.startsAt } }, include: { plan: true } }) : null,
     data.paymentMethodId ? prisma.paymentMethod.findFirst({ where: { id: data.paymentMethodId, tenantId: tid, isActive: true } }) : null,
@@ -463,13 +486,26 @@ async function resolveAppointment(tid: string, data: z.infer<typeof appointmentS
   if (!customer || !service || !provider) return { error: "Choose a valid customer, service, and provider" } as const;
   if (data.membershipId && !membership) return { error: "The selected membership is not active for this customer and appointment date" } as const;
   if (data.paymentMethodId && !paymentMethod) return { error: "Choose an active payment method" } as const;
-  const endsAt = new Date(data.startsAt.getTime() + service.durationMinutes * 60_000);
+  // A service with options (sizes/durations) needs one chosen — same rule the till uses.
+  const variant = data.serviceVariantId ? service.variants.find((v) => v.id === data.serviceVariantId) : undefined;
+  if (service.variants.length > 0 && !variant) return { error: `Choose an option for "${service.name}"` } as const;
+  if (data.serviceVariantId && !variant) return { error: "That option isn't available for this service" } as const;
+  // A service allocated to specific locations may only be booked there (empty = everywhere).
+  if (service.locations.length > 0 && (!data.locationId || !service.locations.some((l) => l.id === data.locationId))) {
+    return { error: `"${service.name}" isn't offered at that location — choose one it's offered at` } as const;
+  }
+  const durationMinutes = variant?.durationMinutes ?? service.durationMinutes;
+  if (!durationMinutes) return { error: `"${service.name}" has no duration set — add one under Services before booking it` } as const;
+  const endsAt = new Date(data.startsAt.getTime() + durationMinutes * 60_000);
   const schedule = await prisma.providerSchedule.findFirst({ where: { tenantId: tid, providerId: provider.id, isAvailable: true, startsAt: { lte: data.startsAt }, endsAt: { gte: endsAt } } });
   if (!schedule) return { error: `${provider.name} is not scheduled for this time` } as const;
   const conflict = await prisma.appointment.findFirst({ where: { tenantId: tid, providerId: provider.id, status: { notIn: ["CANCELLED", "NO_SHOW"] }, startsAt: { lt: endsAt }, endsAt: { gt: data.startsAt }, ...(excludeId ? { id: { not: excludeId } } : {}) } });
   if (conflict) return { error: `${provider.name} already has an appointment during this time` } as const;
+  const listPrice = Number(variant?.price ?? service.price);
   const discount = membership ? Number(membership.plan.discountPercent) : 0;
-  return { customer, service, provider, membership, paymentMethod, endsAt, amount: Number(service.price) * (1 - discount / 100) } as const;
+  // An estimate shown while booking - the real charged amount is fixed at completion (lib/serviceSale.ts),
+  // since prices (and which membership is active) can move between booking and the appointment happening.
+  return { customer, service, variant, provider, membership, paymentMethod, endsAt, amount: round2(listPrice * (1 - discount / 100)) } as const;
 }
 
 serviceCenterRouter.post("/appointments", async (req, res) => {
@@ -485,6 +521,7 @@ serviceCenterRouter.post("/appointments", async (req, res) => {
 serviceCenterRouter.patch("/appointments/:id", async (req, res) => {
   const current = await prisma.appointment.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) } });
   if (!current) { res.status(404).json({ error: "Appointment not found" }); return; }
+  if (current.orderId) { res.status(409).json({ error: "This appointment has already been completed and sold — see Receipts to change the sale." }); return; }
   const parsed = appointmentSchema.partial().safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid appointment", details: parsed.error.flatten() }); return; }
   const merged = appointmentSchema.parse({ ...current, ...parsed.data });
@@ -495,21 +532,82 @@ serviceCenterRouter.patch("/appointments/:id", async (req, res) => {
 });
 
 serviceCenterRouter.delete("/appointments/:id", async (req, res) => {
-  const deleted = await prisma.appointment.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } });
-  if (!deleted.count) { res.status(404).json({ error: "Appointment not found" }); return; }
+  const tid = tenantId(req);
+  const current = await prisma.appointment.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, orderId: true } });
+  if (!current) { res.status(404).json({ error: "Appointment not found" }); return; }
+  if (current.orderId) { res.status(409).json({ error: "This appointment has been completed and sold — cancel or return the sale in Receipts instead." }); return; }
+  await prisma.appointment.delete({ where: { id: current.id } });
   res.status(204).send();
+});
+
+/** Turns a due appointment into a real sale: the service (with its option and any
+ * membership discount, expressed the same way a till price override is - kept as an
+ * audited line, not silently folded into the total) is rung up as a SERVICES order,
+ * its stock is consumed, and the order is left SERVED - ready to be paid the same way
+ * any other service sale is (cash, room, credit) via the usual payment routes, or
+ * immediately if the appointment already had a payment method chosen. */
+serviceCenterRouter.post("/appointments/:id/complete", async (req, res) => {
+  const tid = tenantId(req);
+  const appt = await prisma.appointment.findFirst({
+    where: { id: req.params.id, tenantId: tid },
+    include: { service: true, serviceVariant: true, membership: { include: { plan: true } } },
+  });
+  if (!appt) { res.status(404).json({ error: "Appointment not found" }); return; }
+  if (appt.orderId) { res.status(409).json({ error: "This appointment has already been completed" }); return; }
+  if (["CANCELLED", "NO_SHOW"].includes(appt.status)) { res.status(409).json({ error: `This appointment was ${appt.status === "NO_SHOW" ? "a no-show" : "cancelled"} — it can't be completed` }); return; }
+  try {
+    const tax = await taxSettingsFor(tid);
+    const fallbackTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
+    const listPrice = Number(appt.serviceVariant?.price ?? appt.service.price);
+    const discountPercent = appt.membership ? Number(appt.membership.plan.discountPercent) : 0;
+    const overridePrice = discountPercent > 0 ? round2(listPrice * (1 - discountPercent / 100)) : undefined;
+    const order = await prisma.$transaction(async (tx) => {
+      const itemsCreate = await resolveServiceLines(
+        tx, tid,
+        [{
+          serviceId: appt.serviceId, variantId: appt.serviceVariantId ?? undefined, quantity: 1, addons: [],
+          ...(overridePrice !== undefined ? { unitPrice: overridePrice, overrideReason: `Membership: ${appt.membership!.plan.name} (${discountPercent}% off)` } : {}),
+        }],
+        appt.locationId, req.userId, fallbackTax,
+      );
+      const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
+      const created = await tx.posOrder.create({
+        data: {
+          tenantId: tid, orderNumber: (last?.orderNumber ?? 0) + 1, channel: "SERVICES", status: "SERVED", servedAt: new Date(),
+          locationId: appt.locationId, customerId: appt.customerId, createdBy: req.userId,
+          notes: `${appt.service.name}${req.body?.notes ? ` — ${req.body.notes}` : ""}`.slice(0, 500),
+          discount: 0, items: { create: itemsCreate },
+        },
+        include: orderInclude,
+      });
+      const requirements = computeStockRequirements(created.items);
+      if (requirements.size > 0) {
+        const stockLocationId = await resolveStockLocationId(tid, appt.locationId);
+        if (!stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this service"), { status: 400 });
+        await deductStockForOrder(tx, tid, requirements, stockLocationId, created.orderNumber, req);
+      }
+      await tx.appointment.update({ where: { id: appt.id }, data: { status: "COMPLETED", orderId: created.id, amount: created.items[0]!.unitPrice } });
+      return created;
+    });
+    res.status(200).json({ order: withFinancials(order, tax), appointment: await prisma.appointment.findUniqueOrThrow({ where: { id: appt.id }, include }) });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    throw error;
+  }
 });
 
 serviceCenterRouter.get("/appointment-options", async (req, res) => {
   const tid = tenantId(req);
-  const [customers, services, providers, schedules, memberships, paymentMethods, membershipPayments] = await Promise.all([
+  const [customers, services, providers, schedules, memberships, paymentMethods, membershipPayments, locations] = await Promise.all([
     prisma.customer.findMany({ where: { tenantId: tid }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
-    prisma.serviceCenterService.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
+    prisma.service.findMany({ where: { tenantId: tid, isActive: true }, include: { variants: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] }, locations: { select: { id: true } } }, orderBy: { name: "asc" } }),
     prisma.serviceProvider.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
     prisma.providerSchedule.findMany({ where: { tenantId: tid, isAvailable: true, endsAt: { gte: new Date() } }, include: { provider: true }, orderBy: { startsAt: "asc" } }),
     prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: true, plan: true }, orderBy: { endsAt: "desc" } }),
     prisma.paymentMethod.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
     prisma.membershipPayment.findMany({ where: { tenantId: tid }, include: { membership: { include: { customer: true, plan: true } }, paymentMethod: true }, orderBy: { createdAt: "desc" }, take: 100 }),
+    prisma.location.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
   ]);
-  res.json({ customers, services, providers, schedules, memberships, paymentMethods, membershipPayments });
+  res.json({ customers, services, providers, schedules, memberships, paymentMethods, membershipPayments, locations });
 });
