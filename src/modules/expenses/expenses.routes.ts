@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { nextExpenseNo, nextTransactionNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
+import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 // Day-to-day incidental spending recorded by staff (tape, fare, a
 // replacement part) — full CRUD on the category, but an expense itself is
@@ -48,11 +49,11 @@ const expenseInclude = {
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
 } as const;
 
-async function resolvePaymentMethod(tid: string, paymentMethodId: string, reference: string | undefined) {
+async function resolvePaymentMethod(tid: string, paymentMethodId: string, reference: string | undefined, options: { excludeTransactionId?: string } = {}) {
   const method = await prisma.paymentMethod.findFirst({ where: { id: paymentMethodId, tenantId: tid, isActive: true } });
   if (!method) throw Object.assign(new Error("Choose a valid, active payment method"), { status: 400 });
-  if (method.requiresReference && !reference) throw Object.assign(new Error(`${method.name} requires a reference number`), { status: 400 });
-  return method;
+  const cleanReference = await checkedPaymentReference(prisma, tid, method, reference, options);
+  return { method, reference: cleanReference };
 }
 
 async function assertCategoryInTenant(categoryId: string, tid: string) {
@@ -100,13 +101,13 @@ expensesRouter.post("/", async (req, res) => {
   if (!data.success) { res.status(400).json({ error: "Invalid expense", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   await assertCategoryInTenant(data.data.categoryId, tid);
-  await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+  const resolvedPayment = await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
   const category = await prisma.expenseCategory.findUniqueOrThrow({ where: { id: data.data.categoryId }, select: { name: true } });
   const expenseNo = await nextExpenseNo(tid);
   const transactionNo = await nextTransactionNo(tid);
   const expense = await prisma.$transaction(async (tx) => {
     const created = await tx.expense.create({
-      data: { tenantId: tid, expenseNo, createdBy: req.userId, ...data.data },
+      data: { tenantId: tid, expenseNo, createdBy: req.userId, ...data.data, reference: resolvedPayment.reference },
       include: expenseInclude,
     });
     await tx.transaction.create({
@@ -117,7 +118,7 @@ expensesRouter.post("/", async (req, res) => {
         source: "EXPENSE",
         amount: data.data.amount,
         paymentMethodId: data.data.paymentMethodId,
-        reference: data.data.reference,
+        reference: resolvedPayment.reference,
         locationId: data.data.locationId,
         employeeId: req.userId,
         description: `Expense — ${category.name}${data.data.description ? `: ${data.data.description}` : ""}`,
@@ -138,18 +139,20 @@ expensesRouter.patch("/:id", async (req, res) => {
   if (data.data.categoryId) await assertCategoryInTenant(data.data.categoryId, tid);
   const nextPaymentMethodId = data.data.paymentMethodId ?? existing.paymentMethodId;
   const nextReference = data.data.reference !== undefined ? data.data.reference : (existing.reference ?? undefined);
-  if (data.data.paymentMethodId || data.data.reference !== undefined) {
-    await resolvePaymentMethod(tid, nextPaymentMethodId, nextReference);
-  }
+  const existingTransaction = data.data.paymentMethodId || data.data.reference !== undefined
+    ? await prisma.transaction.findFirst({ where: { tenantId: tid, source: "EXPENSE", sourceRefId: existing.id }, select: { id: true } })
+    : null;
+  const resolvedPayment = data.data.paymentMethodId || data.data.reference !== undefined ? await resolvePaymentMethod(tid, nextPaymentMethodId, nextReference, { excludeTransactionId: existingTransaction?.id }) : null;
+  const updateData = resolvedPayment ? { ...data.data, reference: resolvedPayment.reference } : data.data;
   const expense = await prisma.$transaction(async (tx) => {
-    const updated = await tx.expense.update({ where: { id: existing.id }, data: data.data, include: expenseInclude });
+    const updated = await tx.expense.update({ where: { id: existing.id }, data: updateData, include: expenseInclude });
     if (data.data.amount !== undefined || data.data.paymentMethodId || data.data.reference !== undefined || data.data.locationId !== undefined) {
       await tx.transaction.updateMany({
         where: { tenantId: tid, source: "EXPENSE", sourceRefId: existing.id },
         data: {
           ...(data.data.amount !== undefined ? { amount: data.data.amount } : {}),
           ...(data.data.paymentMethodId ? { paymentMethodId: data.data.paymentMethodId } : {}),
-          ...(data.data.reference !== undefined ? { reference: data.data.reference } : {}),
+          ...(resolvedPayment ? { reference: resolvedPayment.reference } : {}),
           ...(data.data.locationId !== undefined ? { locationId: data.data.locationId } : {}),
         },
       });

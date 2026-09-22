@@ -7,6 +7,7 @@ import { orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.
 import { resolveServiceLines } from "../../lib/serviceSale.js";
 import { computeStockRequirements } from "../../lib/stockRequirements.js";
 import { deductStockForOrder, resolveStockLocationId } from "../../lib/orderStock.js";
+import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 
@@ -213,14 +214,26 @@ async function resolveMembershipPayment(tid: string, membershipId: string, payme
   return { membership, paymentMethod } as const;
 }
 
+async function resolveMembershipPaymentReference(tid: string, method: { name: string; requiresReference: boolean }, reference: string | null | undefined, excludeId?: string) {
+  const cleanReference = await checkedPaymentReference(prisma, tid, method, reference);
+  if (!cleanReference) return null;
+  const duplicate = await prisma.membershipPayment.findFirst({
+    where: { tenantId: tid, status: "PAID", reference: { equals: cleanReference, mode: "insensitive" }, ...(excludeId ? { id: { not: excludeId } } : {}) },
+    select: { id: true },
+  });
+  if (duplicate) throw Object.assign(new Error(`Transaction code ${cleanReference} has already been used on another membership payment`), { status: 400 });
+  return cleanReference;
+}
+
 serviceCenterRouter.post("/membership-payments", async (req, res) => {
   const parsed = membershipPaymentSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid membership payment", details: parsed.error.flatten() }); return; }
   const tid = tenantId(req);
   const resolved = await resolveMembershipPayment(tid, parsed.data.membershipId, parsed.data.paymentMethodId);
   if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
+  const reference = await resolveMembershipPaymentReference(tid, resolved.paymentMethod, parsed.data.reference);
   const paidAt = parsed.data.status === "PAID" ? (parsed.data.paidAt ?? new Date()) : parsed.data.paidAt;
-  const membershipPayment = await prisma.membershipPayment.create({ data: { tenantId: tid, ...parsed.data, paidAt }, include: membershipPaymentInclude });
+  const membershipPayment = await prisma.membershipPayment.create({ data: { tenantId: tid, ...parsed.data, reference, paidAt }, include: membershipPaymentInclude });
   res.status(201).json({ membershipPayment: withPaymentMembershipPlan(membershipPayment) });
 });
 
@@ -234,9 +247,11 @@ serviceCenterRouter.patch("/membership-payments/:id", async (req, res) => {
   const paymentMethodId = parsed.data.paymentMethodId ?? current.paymentMethodId;
   const resolved = await resolveMembershipPayment(tid, membershipId, paymentMethodId);
   if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
+  const nextReference = parsed.data.reference !== undefined ? parsed.data.reference : current.reference;
+  const reference = parsed.data.reference !== undefined || parsed.data.paymentMethodId !== undefined ? await resolveMembershipPaymentReference(tid, resolved.paymentMethod, nextReference, current.id) : current.reference;
   const nextStatus = parsed.data.status ?? current.status;
   const paidAt = parsed.data.paidAt !== undefined ? parsed.data.paidAt : nextStatus === "PAID" && !current.paidAt ? new Date() : current.paidAt;
-  const membershipPayment = await prisma.membershipPayment.update({ where: { id: current.id }, data: { ...parsed.data, paidAt }, include: membershipPaymentInclude });
+  const membershipPayment = await prisma.membershipPayment.update({ where: { id: current.id }, data: { ...parsed.data, reference, paidAt }, include: membershipPaymentInclude });
   res.json({ membershipPayment: withPaymentMembershipPlan(membershipPayment) });
 });
 

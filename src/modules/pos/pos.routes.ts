@@ -16,6 +16,7 @@ import { DispatchError, dispatchRequired, orderDispatchInfo, supplyingStoreId } 
 import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js";
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
 import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, resolveStockLocationId, settleServedAdditions } from "../../lib/orderStock.js";
+import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 // POS configuration, stores, and stock all remain scoped to the tenant supplied
 // by the authenticated request context (currently x-tenant-id during scaffolding).
@@ -229,8 +230,8 @@ const retailOrderSchema = z.discriminatedUnion("channel", [
 async function resolvePaymentMethod(tid: string, paymentMethodId: string, reference: string | undefined) {
   const method = await prisma.paymentMethod.findFirst({ where: { id: paymentMethodId, tenantId: tid, isActive: true } });
   if (!method) throw Object.assign(new Error("Choose a valid, active payment method"), { status: 400 });
-  if (method.requiresReference && !reference) throw Object.assign(new Error(`${method.name} requires a reference number`), { status: 400 });
-  return method;
+  const cleanReference = await checkedPaymentReference(prisma, tid, method, reference);
+  return { method, reference: cleanReference };
 }
 
 function tenantIdFor(request: { tenantId?: string }): string {
@@ -1539,10 +1540,10 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
         return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
       });
     } else {
-      await resolvePaymentMethod(tid, data.paymentMethodId, data.reference);
+      const resolvedPayment = await resolvePaymentMethod(tid, data.paymentMethodId, data.reference);
       const transactionNo = await nextTransactionNo(tid);
       updatedOrder = await prisma.$transaction(async (tx) => {
-        const payment = await tx.payment.create({ data: { tenantId: tid, orderId: order.id, paymentMethodId: data.paymentMethodId, amount: data.amount, reference: data.reference, receivedBy: req.userId } });
+        const payment = await tx.payment.create({ data: { tenantId: tid, orderId: order.id, paymentMethodId: data.paymentMethodId, amount: data.amount, reference: resolvedPayment.reference, receivedBy: req.userId } });
         await tx.transaction.create({
           data: {
             tenantId: tid,
@@ -1551,7 +1552,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
             source: "POS_SALE",
             amount: data.amount,
             paymentMethodId: data.paymentMethodId,
-            reference: data.reference,
+            reference: resolvedPayment.reference,
             customerId: order.customerId ?? order.reservation?.customerId ?? null,
             locationId: order.locationId,
             employeeId: req.userId,

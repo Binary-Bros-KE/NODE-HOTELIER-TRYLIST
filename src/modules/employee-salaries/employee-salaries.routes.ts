@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma.js";
 import { nextPayslipNo, nextTransactionNo } from "../../lib/sequence.js";
 import { nairobiParts } from "../../lib/shifts.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
+import { assertPaymentReferenceUnused, normalizePaymentReference } from "../../lib/paymentReferences.js";
 
 export const employeeSalariesRouter = Router();
 
@@ -147,6 +148,7 @@ async function createSalaryPayment(tx: Prisma.TransactionClient, tid: string, sa
   if (Number(salary.netPay) <= 0) throw Object.assign(new Error("Net pay must be above zero before completing salary"), { status: 400 });
   const existing = await tx.transaction.findFirst({ where: { tenantId: tid, source: "SALARY_PAYMENT", sourceRefId: salaryId }, select: { id: true } });
   if (existing) return;
+  const reference = salary.reference ? await assertPaymentReferenceUnused(tx, tid, salary.reference) : undefined;
   await tx.transaction.create({
     data: {
       tenantId: tid,
@@ -154,7 +156,7 @@ async function createSalaryPayment(tx: Prisma.TransactionClient, tid: string, sa
       direction: "OUT",
       source: "SALARY_PAYMENT",
       amount: salary.netPay,
-      reference: salary.reference,
+      reference,
       employeeId: by,
       description: `Salary payment ${salary.payslipNo} - ${salary.employee.firstName} ${salary.employee.lastName}`,
       sourceRefId: salary.id,
@@ -315,7 +317,7 @@ employeeSalariesRouter.post("/process", async (req, res, next) => {
         data: {
           basicSalary: toMoney(data.data.basicSalary),
           paymentMethod: data.data.paymentMethod ?? null,
-          reference: data.data.reference ?? null,
+          reference: normalizePaymentReference(data.data.reference) ?? null,
           notes: data.data.notes ?? null,
         },
       });
@@ -375,7 +377,7 @@ employeeSalariesRouter.post("/:id/complete", async (req, res, next) => {
     const transactionNo = await nextTransactionNo(tid);
     const salary = await prisma.$transaction(async (tx) => {
       await settleExcessDeductions(tx, tid, existing.id, data.data.carryOverDeductions, req.userId);
-      await tx.employeeSalary.update({ where: { id: existing.id }, data: { paymentMethod: data.data.paymentMethod, reference: data.data.reference ?? null, notes: data.data.notes ?? undefined, status: "COMPLETE", paidAt: new Date() } });
+      await tx.employeeSalary.update({ where: { id: existing.id }, data: { paymentMethod: data.data.paymentMethod, reference: normalizePaymentReference(data.data.reference) ?? null, notes: data.data.notes ?? undefined, status: "COMPLETE", paidAt: new Date() } });
       await createSalaryPayment(tx, tid, existing.id, transactionNo, req.userId);
       return tx.employeeSalary.findUniqueOrThrow({ where: { id: existing.id }, include: salaryInclude });
     });

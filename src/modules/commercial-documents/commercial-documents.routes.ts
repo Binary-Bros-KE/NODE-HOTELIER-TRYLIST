@@ -6,6 +6,7 @@ import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { resolveEffectiveLocation } from "../../lib/location.js";
 import { nextCommercialDocumentPaymentNo, nextInvoiceNo, nextQuotationNo, nextTransactionNo } from "../../lib/sequence.js";
 import { orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.js";
+import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 const docTypes = ["QUOTATION", "INVOICE"] as const;
 const docStatuses = ["DRAFT", "SENT", "ACCEPTED", "REJECTED", "EXPIRED", "CANCELLED", "CONVERTED", "ISSUED", "PARTIALLY_PAID", "PAID", "OVERDUE", "VOID"] as const;
@@ -799,7 +800,7 @@ commercialDocumentsRouter.post("/:id/payments", async (req, res) => {
   if (document.type === "INVOICE" && document.status === "DRAFT") { res.status(409).json({ error: "Issue this invoice before recording payment" }); return; }
   const method = await prisma.paymentMethod.findFirst({ where: { id: parsed.data.paymentMethodId, tenantId: tid, isActive: true } });
   if (!method) { res.status(400).json({ error: "Choose an active payment method" }); return; }
-  if (method.requiresReference && !parsed.data.reference) { res.status(400).json({ error: `${method.name} requires a reference code` }); return; }
+  const reference = await checkedPaymentReference(prisma, tid, method, parsed.data.reference);
   if (document.type === "INVOICE" && Number(document.balance) > 0 && parsed.data.amount > Number(document.balance) + 0.01) {
     res.status(400).json({ error: "Payment cannot exceed the invoice balance" }); return;
   }
@@ -807,7 +808,7 @@ commercialDocumentsRouter.post("/:id/payments", async (req, res) => {
   const transactionNo = await nextTransactionNo(tid);
   const updated = await prisma.$transaction(async (tx) => {
     const payment = await tx.commercialDocumentPayment.create({
-      data: { tenantId: tid, documentId: document.id, paymentNo, kind: parsed.data.kind, paymentMethodId: method.id, amount: parsed.data.amount, reference: parsed.data.reference ?? null, note: parsed.data.note ?? null, paidAt: parsed.data.paidAt ?? new Date(), createdBy: req.userId },
+      data: { tenantId: tid, documentId: document.id, paymentNo, kind: parsed.data.kind, paymentMethodId: method.id, amount: parsed.data.amount, reference: reference ?? null, note: parsed.data.note ?? null, paidAt: parsed.data.paidAt ?? new Date(), createdBy: req.userId },
     });
     const transaction = await tx.transaction.create({
       data: {
@@ -817,7 +818,7 @@ commercialDocumentsRouter.post("/:id/payments", async (req, res) => {
         source: "COMMERCIAL_DOCUMENT_PAYMENT",
         amount: parsed.data.amount,
         paymentMethodId: method.id,
-        reference: parsed.data.reference ?? null,
+        reference: reference ?? null,
         customerId: document.customerId,
         locationId: document.locationId,
         employeeId: req.userId,

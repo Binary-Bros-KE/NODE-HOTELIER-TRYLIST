@@ -11,6 +11,7 @@ import { partialNoDefaults } from "../../lib/zod.js";
 import { applyCustomerBalance, folioCreditOutstanding } from "../../lib/customerCredit.js";
 import { createRoomTask } from "../../lib/housekeeping.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
+import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 export const receptionRouter = Router();
 receptionRouter.use(requireModule("RESERVATIONS"));
@@ -115,8 +116,8 @@ const paymentSchema = z.object({ paymentMethodId: z.string().trim().min(1), amou
 async function resolvePaymentMethod(tid: string, paymentMethodId: string, reference: string | undefined) {
   const method = await prisma.paymentMethod.findFirst({ where: { id: paymentMethodId, tenantId: tid, isActive: true } });
   if (!method) throw Object.assign(new Error("Choose a valid, active payment method"), { status: 400 });
-  if (method.requiresReference && !reference) throw Object.assign(new Error(`${method.name} requires a reference number`), { status: 400 });
-  return method;
+  const cleanReference = await checkedPaymentReference(prisma, tid, method, reference);
+  return { method, reference: cleanReference };
 }
 
 function tenantId(req: { tenantId?: string }): string { if (!req.tenantId) throw new Error("Tenant context is required"); return req.tenantId; }
@@ -505,7 +506,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
   if (current.status !== "CHECKED_IN") { res.status(409).json({ error: "Only a checked-in stay can be checked out" }); return; }
   if (!current.folio) { res.status(500).json({ error: "This reservation has no folio on record" }); return; }
   if (data.data.amount > 0 && !data.data.paymentMethodId) { res.status(400).json({ error: "Choose a payment method" }); return; }
-  if (data.data.paymentMethodId) await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+  const resolvedPayment = data.data.paymentMethodId ? await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference) : null;
   const tax = await taxDefaults(tid);
   // A balance can't just vanish at checkout: it's either paid, or the stay is
   // completed on credit with a reason and an expected payment date (same rule
@@ -521,7 +522,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
   const actor = await resolveActor(tid, req);
   const reservation = await prisma.$transaction(async (tx) => {
     if (data.data.amount > 0) {
-      const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: current.folio!.id, kind: "SETTLEMENT", paymentMethodId: data.data.paymentMethodId!, amount: data.data.amount, reference: data.data.reference, createdBy: req.userId } });
+      const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: current.folio!.id, kind: "SETTLEMENT", paymentMethodId: data.data.paymentMethodId!, amount: data.data.amount, reference: resolvedPayment?.reference, createdBy: req.userId } });
       await tx.transaction.create({
         data: {
           tenantId: tid,
@@ -530,7 +531,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
           source: "FOLIO_SETTLEMENT",
           amount: data.data.amount,
           paymentMethodId: data.data.paymentMethodId!,
-          reference: data.data.reference,
+          reference: resolvedPayment?.reference,
           customerId: current.customerId,
           employeeId: req.userId,
           description: `Checkout settlement — ${current.reservationNo}`,
@@ -648,12 +649,12 @@ receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
   const tid = tenantId(req);
   const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { folio: true } });
   if (!reservation || !reservation.folio) { res.status(404).json({ error: "Reservation not found" }); return; }
-  await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+  const resolvedPayment = await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
   const transactionNo = await nextTransactionNo(tid);
   const actor = await resolveActor(tid, req);
   const payment = await prisma.$transaction(async (tx) => {
     const created = await tx.folioPayment.create({
-      data: { tenantId: tid, folioId: reservation.folio!.id, kind: "DEPOSIT", ...data.data, createdBy: req.userId },
+      data: { tenantId: tid, folioId: reservation.folio!.id, kind: "DEPOSIT", ...data.data, reference: resolvedPayment.reference, createdBy: req.userId },
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
     await tx.transaction.create({
@@ -664,7 +665,7 @@ receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
         source: "FOLIO_DEPOSIT",
         amount: data.data.amount,
         paymentMethodId: data.data.paymentMethodId,
-        reference: data.data.reference,
+        reference: resolvedPayment.reference,
         customerId: reservation.customerId,
         employeeId: req.userId,
         description: `Deposit — ${reservation.reservationNo}`,
@@ -718,7 +719,7 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
   const outstanding = (await folioCreditOutstanding(prisma, tid, [reservation.folio.id])).get(reservation.folio.id) ?? 0;
   if (outstanding <= 0.01) { res.status(409).json({ error: "This stay has no credit left to pay" }); return; }
   if (data.data.amount > outstanding + 0.01) { res.status(400).json({ error: `Amount exceeds the credit owing of ${outstanding.toFixed(2)}` }); return; }
-  await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+  const resolvedPayment = await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
   const transactionNo = await nextTransactionNo(tid);
   const actor = await resolveActor(tid, req);
   // The credit sits on whoever it was charged to — for a stay in a group, the
@@ -726,7 +727,7 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
   const creditOwner = (await prisma.customerCreditEntry.findFirst({ where: { tenantId: tid, folioId: reservation.folio.id, type: "CREDIT" }, select: { customerId: true } }))?.customerId ?? reservation.customerId;
   const payment = await prisma.$transaction(async (tx) => {
     const created = await tx.folioPayment.create({
-      data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", ...data.data, createdBy: req.userId },
+      data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", ...data.data, reference: resolvedPayment.reference, createdBy: req.userId },
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
     await tx.transaction.create({
@@ -737,7 +738,7 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
         source: "FOLIO_SETTLEMENT",
         amount: data.data.amount,
         paymentMethodId: data.data.paymentMethodId,
-        reference: data.data.reference,
+        reference: resolvedPayment.reference,
         customerId: creditOwner,
         employeeId: req.userId,
         description: `Credit payment — ${reservation.reservationNo}`,
@@ -1057,6 +1058,21 @@ function allocatePayments(rooms: { id: string; due: number }[], payments: { paym
   return { allocations, remaining };
 }
 
+async function resolvePaymentRows(tid: string, payments: { paymentMethodId: string; amount: number; reference?: string }[]) {
+  const seen = new Set<string>();
+  const resolved: { paymentMethodId: string; amount: number; reference?: string }[] = [];
+  for (const payment of payments) {
+    const checked = await resolvePaymentMethod(tid, payment.paymentMethodId, payment.reference);
+    if (checked.reference) {
+      const key = checked.reference.toUpperCase();
+      if (seen.has(key)) throw Object.assign(new Error(`Transaction code ${checked.reference} appears more than once in this payment`), { status: 400 });
+      seen.add(key);
+    }
+    resolved.push({ ...payment, reference: checked.reference });
+  }
+  return resolved;
+}
+
 /** Check the whole group (or the chosen rooms) out at once: payments — cash,
  * card, one company card, any mix — are spread across the rooms, and whatever
  * isn't paid is completed on credit against the billing customer, with a
@@ -1075,18 +1091,18 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
     if (targets.length === 0) { res.status(409).json({ error: "No checked-in rooms to check out" }); return; }
     if (targets.some((r) => !r.folio)) { res.status(500).json({ error: "A room in this group has no folio on record" }); return; }
 
-    for (const payment of data.data.payments) await resolvePaymentMethod(tid, payment.paymentMethodId, payment.reference);
+    const payments = await resolvePaymentRows(tid, data.data.payments);
     const groupTax = await taxDefaults(tid);
     const rooms = targets.map((r) => ({ id: r.id, due: Math.max(0, round2(folioTotals(r.folio, groupTax).balance)) }));
     const dueTotal = round2(rooms.reduce((sum, r) => sum + r.due, 0));
-    const paidTotal = round2(data.data.payments.reduce((sum, p) => sum + p.amount, 0));
+    const paidTotal = round2(payments.reduce((sum, p) => sum + p.amount, 0));
     if (paidTotal > dueTotal + 0.01) { res.status(400).json({ error: `Payments of ${paidTotal.toFixed(2)} exceed the balance due of ${dueTotal.toFixed(2)}` }); return; }
     const shortfall = round2(dueTotal - paidTotal);
     if (shortfall > 0.01 && ((data.data.creditReason ?? "").length < 3 || !data.data.creditExpectedAt)) {
       res.status(409).json({ error: `A balance of ${shortfall.toFixed(2)} remains — pay it, or complete on credit with a reason and an expected payment date`, code: "BALANCE_DUE", balance: shortfall });
       return;
     }
-    const { allocations, remaining } = allocatePayments(rooms, data.data.payments);
+    const { allocations, remaining } = allocatePayments(rooms, payments);
     const transactionNos: string[] = [];
     for (let i = 0; i < allocations.length; i++) transactionNos.push(await nextTransactionNo(tid));
     const actor = await resolveActor(tid, req);
@@ -1143,10 +1159,10 @@ receptionRouter.post("/groups/:id/credit-payments", async (req, res, next) => {
       .sort((a, b) => (a.reservation.folio!.creditExpectedAt?.getTime() ?? Infinity) - (b.reservation.folio!.creditExpectedAt?.getTime() ?? Infinity) || a.reservation.room.number.localeCompare(b.reservation.room.number, undefined, { numeric: true }));
     const owingTotal = round2(owing.reduce((sum, r) => sum + r.due, 0));
     if (owingTotal <= 0.01) { res.status(409).json({ error: "This group has no credit left to pay" }); return; }
-    const paidTotal = round2(data.data.payments.reduce((sum, p) => sum + p.amount, 0));
+    const payments = await resolvePaymentRows(tid, data.data.payments);
+    const paidTotal = round2(payments.reduce((sum, p) => sum + p.amount, 0));
     if (paidTotal > owingTotal + 0.01) { res.status(400).json({ error: `Payments of ${paidTotal.toFixed(2)} exceed the credit owing of ${owingTotal.toFixed(2)}` }); return; }
-    for (const payment of data.data.payments) await resolvePaymentMethod(tid, payment.paymentMethodId, payment.reference);
-    const { allocations } = allocatePayments(owing.map((r) => ({ id: r.reservation.id, due: r.due })), data.data.payments);
+    const { allocations } = allocatePayments(owing.map((r) => ({ id: r.reservation.id, due: r.due })), payments);
     const transactionNos: string[] = [];
     for (let i = 0; i < allocations.length; i++) transactionNos.push(await nextTransactionNo(tid));
     const actor = await resolveActor(tid, req);

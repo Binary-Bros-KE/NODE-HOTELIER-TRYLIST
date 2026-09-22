@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma.js";
 import { nextAssetNo, nextTransactionNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { UNITS_OF_MEASURE } from "../products/products.routes.js";
+import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 // Durable, owned equipment (chairs, plates, cutlery) bought through Store —
 // distinct from Product (never sold/consumed) and from Expense (the owner
@@ -68,8 +69,8 @@ const assetInclude = {
 async function resolvePaymentMethod(tid: string, paymentMethodId: string, reference: string | undefined) {
   const method = await prisma.paymentMethod.findFirst({ where: { id: paymentMethodId, tenantId: tid, isActive: true } });
   if (!method) throw Object.assign(new Error("Choose a valid, active payment method"), { status: 400 });
-  if (method.requiresReference && !reference) throw Object.assign(new Error(`${method.name} requires a reference number`), { status: 400 });
-  return method;
+  const cleanReference = await checkedPaymentReference(prisma, tid, method, reference);
+  return { method, reference: cleanReference };
 }
 
 assetsRouter.get("/", async (req, res) => {
@@ -122,7 +123,7 @@ assetsRouter.post("/", async (req, res, next) => {
       if (!location) { res.status(400).json({ error: "Choose a location from this property" }); return; }
     }
     if (hasPurchase && !paymentMethodId) { res.status(400).json({ error: "Choose a payment method for this purchase" }); return; }
-    if (paymentMethodId) await resolvePaymentMethod(tid, paymentMethodId, reference);
+    const resolvedPayment = paymentMethodId ? await resolvePaymentMethod(tid, paymentMethodId, reference) : null;
 
     const assetNo = await nextAssetNo(tid);
     const transactionNo = hasPurchase ? await nextTransactionNo(tid) : null;
@@ -130,7 +131,7 @@ assetsRouter.post("/", async (req, res, next) => {
       const created = await tx.asset.create({ data: { tenantId: tid, assetNo, categoryId, locationId, quantity, createdBy: req.userId, ...rest } });
       if (quantity > 0) {
         const movement = await tx.assetMovement.create({
-          data: { tenantId: tid, assetId: created.id, type: "RECEIPT", quantity, unitCost: rest.unitCost, paymentMethodId: hasPurchase ? paymentMethodId : undefined, reference: hasPurchase ? reference : undefined, note: "Opening quantity", performedBy: req.userId },
+          data: { tenantId: tid, assetId: created.id, type: "RECEIPT", quantity, unitCost: rest.unitCost, paymentMethodId: hasPurchase ? paymentMethodId : undefined, reference: hasPurchase ? resolvedPayment?.reference : undefined, note: "Opening quantity", performedBy: req.userId },
         });
         if (hasPurchase) {
           await tx.transaction.create({
@@ -141,7 +142,7 @@ assetsRouter.post("/", async (req, res, next) => {
               source: "ASSET_PURCHASE",
               amount: quantity * rest.unitCost!,
               paymentMethodId: paymentMethodId!,
-              reference,
+              reference: resolvedPayment?.reference,
               locationId,
               employeeId: req.userId,
               description: `Asset purchase — ${quantity} × ${rest.name}`,
@@ -220,12 +221,12 @@ assetsRouter.post("/:id/movements", async (req, res) => {
   if (hasPurchase && !paymentMethodId) { res.status(400).json({ error: "Choose a payment method for this purchase" }); return; }
 
   try {
-    if (paymentMethodId) await resolvePaymentMethod(tid, paymentMethodId, reference);
+    const resolvedPayment = paymentMethodId ? await resolvePaymentMethod(tid, paymentMethodId, reference) : null;
     const transactionNo = hasPurchase ? await nextTransactionNo(tid) : null;
     const result = await prisma.$transaction(async (tx) => {
       await tx.asset.update({ where: { id: asset.id }, data: { quantity: { increment: quantity }, ...(hasPurchase ? { unitCost } : {}) } });
       const movement = await tx.assetMovement.create({
-        data: { tenantId: tid, assetId: asset.id, type, quantity, unitCost, paymentMethodId: hasPurchase ? paymentMethodId : undefined, reference: hasPurchase ? reference : undefined, note, occurredAt, performedBy: req.userId },
+        data: { tenantId: tid, assetId: asset.id, type, quantity, unitCost, paymentMethodId: hasPurchase ? paymentMethodId : undefined, reference: hasPurchase ? resolvedPayment?.reference : undefined, note, occurredAt, performedBy: req.userId },
         include: { paymentMethod: { select: { id: true, name: true } }, employee: { select: { id: true, firstName: true, lastName: true } } },
       });
       if (hasPurchase) {
@@ -237,7 +238,7 @@ assetsRouter.post("/:id/movements", async (req, res) => {
             source: "ASSET_PURCHASE",
             amount: quantity * unitCost!,
             paymentMethodId: paymentMethodId!,
-            reference,
+            reference: resolvedPayment?.reference,
             locationId: asset.locationId,
             employeeId: req.userId,
             description: `Asset purchase — ${quantity} × ${asset.name}`,

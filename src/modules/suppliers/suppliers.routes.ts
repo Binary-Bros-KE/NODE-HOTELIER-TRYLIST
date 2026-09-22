@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { nextSupplierPaymentNo, nextTransactionNo } from "../../lib/sequence.js";
 import { recordSupplierBalanceEntry } from "../../lib/supplierBalance.js";
+import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 // Suppliers/vendors the property buys stock from. A plain definitional
 // lookup for now — Purchases / Goods Received will consume it later — so
@@ -137,8 +138,8 @@ const paymentInclude = {
 async function resolvePaymentMethod(tid: string, paymentMethodId: string, reference: string | undefined) {
   const method = await prisma.paymentMethod.findFirst({ where: { id: paymentMethodId, tenantId: tid, isActive: true } });
   if (!method) throw Object.assign(new Error("Choose a valid, active payment method"), { status: 400 });
-  if (method.requiresReference && !reference) throw Object.assign(new Error(`${method.name} requires a reference number`), { status: 400 });
-  return method;
+  const cleanReference = await checkedPaymentReference(prisma, tid, method, reference);
+  return { method, reference: cleanReference };
 }
 
 function paymentStatusFrom(paid: number, owed: number) {
@@ -201,7 +202,7 @@ suppliersRouter.post("/:id/payments", async (req, res, next) => {
   try {
     const supplier = await prisma.supplier.findFirst({ where: { id: req.params.id, tenantId: tid } });
     if (!supplier) { res.status(404).json({ error: "Supplier not found" }); return; }
-    await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+    const resolvedPayment = await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
     if (data.data.purchaseId) {
       const purchase = await prisma.purchase.findFirst({ where: { id: data.data.purchaseId, tenantId: tid, supplierId: supplier.id }, select: { id: true, status: true } });
       if (!purchase) { res.status(400).json({ error: "That purchase does not belong to this supplier" }); return; }
@@ -235,7 +236,7 @@ suppliersRouter.post("/:id/payments", async (req, res, next) => {
           purchaseId: data.data.purchaseId,
           amount: data.data.amount,
           paymentMethodId: data.data.paymentMethodId,
-          reference: data.data.reference,
+          reference: resolvedPayment.reference,
           note: data.data.note,
           createdBy: req.userId,
           ...(data.data.paidAt ? { paidAt: data.data.paidAt } : {}),
@@ -260,7 +261,7 @@ suppliersRouter.post("/:id/payments", async (req, res, next) => {
           source: "SUPPLIER_PAYMENT",
           amount: data.data.amount,
           paymentMethodId: data.data.paymentMethodId,
-          reference: data.data.reference,
+          reference: resolvedPayment.reference,
           supplierId: supplier.id,
           employeeId: req.userId,
           description: `Payment to ${supplier.name}`,

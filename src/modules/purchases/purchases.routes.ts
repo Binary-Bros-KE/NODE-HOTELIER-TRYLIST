@@ -7,6 +7,7 @@ import { partialNoDefaults } from "../../lib/zod.js";
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
 import { stockQuantityToCostUnits } from "../../lib/stockValuation.js";
 import { recordSupplierBalanceEntry } from "../../lib/supplierBalance.js";
+import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 // Mirrors the PurchaseStatus enum in schema.prisma — kept as a local literal
 // list to match how every other module validates enums (never importing the
@@ -187,8 +188,13 @@ async function assertMenuPriceUpdates(tid: string, items: { menuPriceUpdates?: {
 async function resolvePaymentMethod(tid: string, paymentMethodId: string, reference: string | undefined) {
   const method = await prisma.paymentMethod.findFirst({ where: { id: paymentMethodId, tenantId: tid, isActive: true } });
   if (!method) throw new HttpError(400, "Choose a valid, active payment method");
-  if (method.requiresReference && !reference) throw new HttpError(400, `${method.name} requires a reference number`);
-  return method;
+  try {
+    const cleanReference = await checkedPaymentReference(prisma, tid, method, reference);
+    return { method, reference: cleanReference };
+  } catch (error) {
+    if (error instanceof Error && "status" in error) throw new HttpError((error as Error & { status: number }).status, error.message);
+    throw error;
+  }
 }
 
 function paymentStatusFrom(paid: number, owed: number) {
@@ -657,7 +663,7 @@ purchasesRouter.post("/:id/payments", async (req, res, next) => {
       res.status(409).json({ error: "Receive goods before recording a payment for this purchase" });
       return;
     }
-    await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+    const resolvedPayment = await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
 
     const [owedAgg, paidAgg] = await Promise.all([
       prisma.supplierBalanceEntry.aggregate({ where: { purchaseId: purchase.id, type: "GOODS_RECEIPT" }, _sum: { amount: true } }),
@@ -690,7 +696,7 @@ purchasesRouter.post("/:id/payments", async (req, res, next) => {
           purchaseId: purchase.id,
           amount: data.data.amount,
           paymentMethodId: data.data.paymentMethodId,
-          reference: data.data.reference,
+          reference: resolvedPayment.reference,
           note: data.data.note,
           createdBy: req.userId,
           ...(data.data.paidAt ? { paidAt: data.data.paidAt } : {}),
@@ -718,7 +724,7 @@ purchasesRouter.post("/:id/payments", async (req, res, next) => {
           source: "SUPPLIER_PAYMENT",
           amount: data.data.amount,
           paymentMethodId: data.data.paymentMethodId,
-          reference: data.data.reference,
+          reference: resolvedPayment.reference,
           supplierId: purchase.supplierId,
           employeeId: req.userId,
           description: `Payment for ${purchase.purchaseNo}`,
