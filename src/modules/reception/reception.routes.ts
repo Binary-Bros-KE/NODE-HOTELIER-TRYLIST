@@ -95,7 +95,7 @@ const reservationUpdateSchema = z.object({
 });
 
 const cancelSchema = z.object({ cancellationReason: z.enum(CANCELLATION_REASONS), cancellationNotes: optionalText(500) });
-const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional() });
+const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional() }).default({});
 const extendSchema = z.object({ checkOut: z.coerce.date(), quantityOverride: z.coerce.number().positive().optional() });
 const optionalDate = z.preprocess(blankToUndefined, z.coerce.date().optional());
 // What a checkout can carry beyond a payment: if a balance is left, why it's
