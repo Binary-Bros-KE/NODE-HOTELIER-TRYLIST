@@ -206,6 +206,18 @@ const paymentSchema = z.discriminatedUnion("method", [
   z.object({ method: z.literal("ROOM"), reservationId: z.string().trim().min(1), amount: z.coerce.number().positive() }),
 ]);
 
+// One service line as the till sends it: the service, its option, add-ons and an optional price override.
+const serviceLineSchema = z.object({
+  serviceId: z.string().trim().min(1),
+  variantId: z.string().trim().min(1).optional(),
+  quantity: z.coerce.number().int().min(1).max(999),
+  addons: z.array(z.object({ addonId: z.string().trim().min(1), quantity: z.coerce.number().int().min(1).max(20).default(1) })).default([]),
+  // Price override at the till: the price to charge instead of the list price, with why.
+  unitPrice: z.coerce.number().min(0).max(9_999_999).optional(),
+  overrideReason: z.string().trim().max(200).optional(),
+});
+type ServiceLineInput = z.infer<typeof serviceLineSchema>;
+
 const retailOrderSchema = z.discriminatedUnion("channel", [
   z.object({
     channel: z.literal("PRODUCTS"),
@@ -221,15 +233,7 @@ const retailOrderSchema = z.discriminatedUnion("channel", [
     customerId: z.string().trim().min(1).optional(),
     notes: z.string().trim().max(500).optional(),
     discount: z.coerce.number().min(0).default(0),
-    items: z.array(z.object({
-      serviceId: z.string().trim().min(1),
-      variantId: z.string().trim().min(1).optional(),
-      quantity: z.coerce.number().int().min(1).max(999),
-      addons: z.array(z.object({ addonId: z.string().trim().min(1), quantity: z.coerce.number().int().min(1).max(20).default(1) })).default([]),
-      // Price override at the till: the price to charge instead of the list price, with why.
-      unitPrice: z.coerce.number().min(0).max(9_999_999).optional(),
-      overrideReason: z.string().trim().max(200).optional(),
-    })).min(1),
+    items: z.array(serviceLineSchema).min(1),
   }),
 ]);
 
@@ -265,7 +269,7 @@ export const orderInclude = {
   reservation: { select: { id: true, reservationNo: true, customerId: true, customer: { select: { firstName: true, lastName: true } }, room: { select: { number: true } } } },
   returnRequests: {
     include: {
-      orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } } } },
+      orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } }, service: { select: { name: true } }, serviceVariant: { select: { name: true } } } },
     },
     orderBy: { requestedAt: "desc" },
   },
@@ -1328,7 +1332,7 @@ posRouter.get("/return-requests", requirePermission("POS_APPROVE_CANCELLATION"),
       where: { tenantId: tid, ...(query.data.status ? { status: query.data.status } : {}) },
       include: {
         order: { include: orderInclude },
-        orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } } } },
+        orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } }, service: { select: { name: true } }, serviceVariant: { select: { name: true } } } },
       },
       orderBy: { requestedAt: "desc" },
       ...(query.data.limit ? { take: query.data.limit } : {}),
@@ -1384,7 +1388,7 @@ async function createReturnRequestsForOrder(args: {
       reason: args.reason,
       requestedBy: args.userId ?? null,
     },
-    include: { orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } } } } },
+    include: { orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } }, service: { select: { name: true } }, serviceVariant: { select: { name: true } } } } },
   })));
 }
 
@@ -1437,6 +1441,8 @@ posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CA
         include: {
           menuItem: { include: { product: true, recipe: { include: { ingredients: { include: { product: true } } } } } },
           variant: { select: variantStockSelect },
+          service: { select: serviceStockSelect },
+          serviceVariant: { select: serviceVariantStockSelect },
           addons: { include: { addon: { include: addonStockInclude } } },
         },
       },
@@ -1459,8 +1465,8 @@ posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CA
     const tax = await taxSettingsFor(tid);
     const updated = await prisma.$transaction(async (tx) => {
       const stockLocationId = await resolveStockLocationId(tid, request.order.locationId);
-      if (stockLocationId && request.orderItem.menuItem && !isUndeductedAddition(request.order, request.orderItem)) {
-        const returned = computeStockRequirements([{ quantity: request.quantity, menuItem: request.orderItem.menuItem, variant: request.orderItem.variant, addons: request.orderItem.addons }]);
+      if (stockLocationId && (request.orderItem.menuItem || request.orderItem.service) && !isUndeductedAddition(request.order, request.orderItem)) {
+        const returned = computeStockRequirements([{ quantity: request.quantity, menuItem: request.orderItem.menuItem, variant: request.orderItem.variant, service: request.orderItem.service, serviceVariant: request.orderItem.serviceVariant, addons: request.orderItem.addons }]);
         await applyStockDelta(tx, tid, stockLocationId, returned, new Map(), request.order.orderNumber, req);
       }
       await recordMenuLedger(tx, {
@@ -1961,6 +1967,63 @@ posRouter.get("/service-items", async (req, res) => {
   });
 });
 
+/** Validates service lines against the live catalogue (option required once a service has options, add-ons only from
+ * the service's own category, location allocation, price override needs a reason) and returns the order-item rows,
+ * each carrying the tax, cost and price snapshot it is sold under. Shared by "Pay now" sales, started tabs and lines
+ * added to a running tab. Throws { status } on the first problem. */
+async function resolveServiceLines(
+  tx: Prisma.TransactionClient,
+  tid: string,
+  inputs: ServiceLineInput[],
+  effectiveLocationId: string | null,
+  userId: string | undefined,
+  retailFallbackTax: { taxRate: Prisma.Decimal | number | null; taxMode: "INCLUSIVE" | "EXCLUSIVE" | null; taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT" | null },
+): Promise<Prisma.PosOrderItemUncheckedCreateWithoutOrderInput[]> {
+  const serviceIds = [...new Set(inputs.map((item) => item.serviceId))];
+  const addonIds = [...new Set(inputs.flatMap((item) => item.addons.map((a) => a.addonId)))];
+  const [services, serviceAddons] = await Promise.all([
+    tx.service.findMany({ where: { id: { in: serviceIds }, tenantId: tid, isActive: true }, include: { locations: { select: { id: true } }, variants: { where: { isActive: true } } } }),
+    addonIds.length ? tx.addon.findMany({ where: { id: { in: addonIds }, tenantId: tid, isActive: true, scope: "SERVICE" }, select: { id: true, name: true, price: true, serviceCategoryId: true } }) : Promise.resolve([]),
+  ]);
+  if (services.length !== serviceIds.length) throw Object.assign(new Error("Every item must be an active service from this property"), { status: 400 });
+  if (serviceAddons.length !== addonIds.length) throw Object.assign(new Error("Every add-on must be an active service add-on from this property"), { status: 400 });
+  // A service allocated to specific locations may only be sold there (empty = everywhere).
+  const notHere = services.find((s) => s.locations.length > 0 && (!effectiveLocationId || !s.locations.some((l) => l.id === effectiveLocationId)));
+  if (notHere) throw Object.assign(new Error(`"${notHere.name}" isn't sold at this location`), { status: 409 });
+  const byId = new Map(services.map((s) => [s.id, s]));
+  const addonById = new Map(serviceAddons.map((a) => [a.id, a]));
+  return inputs.map((item) => {
+    const service = byId.get(item.serviceId)!;
+    // Sizes/options: required once a service has any active ones.
+    if (service.variants.length > 0 && !item.variantId) throw Object.assign(new Error(`Choose an option for "${service.name}"`), { status: 400 });
+    const variant = item.variantId ? service.variants.find((v) => v.id === item.variantId) : undefined;
+    if (item.variantId && !variant) throw Object.assign(new Error(`That option isn't available for "${service.name}"`), { status: 400 });
+    const addonIdsOnLine = item.addons.map((a) => a.addonId);
+    if (new Set(addonIdsOnLine).size !== addonIdsOnLine.length) throw Object.assign(new Error("Each add-on can only appear once per line"), { status: 400 });
+    for (const line of item.addons) {
+      const addon = addonById.get(line.addonId)!;
+      if (addon.serviceCategoryId && addon.serviceCategoryId !== service.categoryId) throw Object.assign(new Error(`"${addon.name}" isn't offered with "${service.name}"`), { status: 400 });
+    }
+    const listPrice = variant?.price ?? service.price;
+    // Override: charge another price, but keep the list price and the reason on the line.
+    const overridden = item.unitPrice !== undefined && Math.abs(item.unitPrice - Number(listPrice)) > 0.004;
+    if (overridden && !(item.overrideReason && item.overrideReason.length >= 3)) throw Object.assign(new Error(`Give a reason for changing the price of "${service.name}"`), { status: 400 });
+    return {
+      serviceId: item.serviceId,
+      serviceVariantId: variant?.id,
+      quantity: item.quantity,
+      unitPrice: overridden ? item.unitPrice! : listPrice,
+      ...(overridden ? { listPrice, priceOverrideReason: item.overrideReason, priceOverriddenBy: userId } : {}),
+      // The service's own tax (else the property default), frozen on the line like a menu item.
+      taxRate: service.taxRate ?? retailFallbackTax.taxRate,
+      taxMode: service.taxMode ?? retailFallbackTax.taxMode,
+      taxTreatment: service.taxTreatment ?? retailFallbackTax.taxTreatment,
+      unitCost: variant?.cost ?? service.cost,
+      addons: { create: item.addons.map((line) => ({ addonId: line.addonId, quantity: line.quantity, unitPrice: addonById.get(line.addonId)!.price })) },
+    };
+  });
+}
+
 /** Rings up a retail (Products) or service sale. Neither has a kitchen step,
  * so the order is created directly as SERVED — payment is taken immediately
  * after via the same POST /orders/:id/payments used for food. */
@@ -1992,7 +2055,7 @@ posRouter.post("/retail-orders", async (req, res) => {
 
   try {
     const order = await prisma.$transaction(async (tx) => {
-      let itemsCreate: Prisma.PosOrderItemCreateWithoutOrderInput[];
+      let itemsCreate: Prisma.PosOrderItemUncheckedCreateWithoutOrderInput[];
       const productNames = new Map<string, string>();
       const productsById = new Map<string, SaleProductSnapshot>();
 
@@ -2020,49 +2083,7 @@ posRouter.post("/retail-orders", async (req, res) => {
           };
         });
       } else {
-        const serviceIds = [...new Set(parsed.data.items.map((item) => item.serviceId))];
-        const addonIds = [...new Set(parsed.data.items.flatMap((item) => item.addons.map((a) => a.addonId)))];
-        const [services, serviceAddons] = await Promise.all([
-          tx.service.findMany({ where: { id: { in: serviceIds }, tenantId: tid, isActive: true }, include: { locations: { select: { id: true } }, variants: { where: { isActive: true } } } }),
-          addonIds.length ? tx.addon.findMany({ where: { id: { in: addonIds }, tenantId: tid, isActive: true, scope: "SERVICE" }, select: { id: true, name: true, price: true, serviceCategoryId: true } }) : Promise.resolve([]),
-        ]);
-        if (services.length !== serviceIds.length) throw Object.assign(new Error("Every item must be an active service from this property"), { status: 400 });
-        if (serviceAddons.length !== addonIds.length) throw Object.assign(new Error("Every add-on must be an active service add-on from this property"), { status: 400 });
-        // A service allocated to specific locations may only be sold there (empty = everywhere).
-        const notHere = services.find((s) => s.locations.length > 0 && (!effectiveLocationId || !s.locations.some((l) => l.id === effectiveLocationId)));
-        if (notHere) throw Object.assign(new Error(`"${notHere.name}" isn't sold at this location`), { status: 409 });
-        const byId = new Map(services.map((s) => [s.id, s]));
-        const addonById = new Map(serviceAddons.map((a) => [a.id, a]));
-        itemsCreate = parsed.data.items.map((item) => {
-          const service = byId.get(item.serviceId)!;
-          // Sizes/options: required once a service has any active ones.
-          if (service.variants.length > 0 && !item.variantId) throw Object.assign(new Error(`Choose an option for "${service.name}"`), { status: 400 });
-          const variant = item.variantId ? service.variants.find((v) => v.id === item.variantId) : undefined;
-          if (item.variantId && !variant) throw Object.assign(new Error(`That option isn't available for "${service.name}"`), { status: 400 });
-          const addonIdsOnLine = item.addons.map((a) => a.addonId);
-          if (new Set(addonIdsOnLine).size !== addonIdsOnLine.length) throw Object.assign(new Error("Each add-on can only appear once per line"), { status: 400 });
-          for (const line of item.addons) {
-            const addon = addonById.get(line.addonId)!;
-            if (addon.serviceCategoryId && addon.serviceCategoryId !== service.categoryId) throw Object.assign(new Error(`"${addon.name}" isn't offered with "${service.name}"`), { status: 400 });
-          }
-          const listPrice = variant?.price ?? service.price;
-          // Override: charge another price, but keep the list price and the reason on the line.
-          const overridden = item.unitPrice !== undefined && Math.abs(item.unitPrice - Number(listPrice)) > 0.004;
-          if (overridden && !(item.overrideReason && item.overrideReason.length >= 3)) throw Object.assign(new Error(`Give a reason for changing the price of "${service.name}"`), { status: 400 });
-          return {
-            serviceId: item.serviceId,
-            serviceVariantId: variant?.id,
-            quantity: item.quantity,
-            unitPrice: overridden ? item.unitPrice! : listPrice,
-            ...(overridden ? { listPrice, priceOverrideReason: item.overrideReason, priceOverriddenBy: req.userId } : {}),
-            // The service's own tax (else the property default), frozen on the line like a menu item.
-            taxRate: service.taxRate ?? retailFallbackTax.taxRate,
-            taxMode: service.taxMode ?? retailFallbackTax.taxMode,
-            taxTreatment: service.taxTreatment ?? retailFallbackTax.taxTreatment,
-            unitCost: variant?.cost ?? service.cost,
-            addons: { create: item.addons.map((line) => ({ addonId: line.addonId, quantity: line.quantity, unitPrice: addonById.get(line.addonId)!.price })) },
-          };
-        });
+        itemsCreate = await resolveServiceLines(tx, tid, parsed.data.items, effectiveLocationId, req.userId, retailFallbackTax);
       }
 
       const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
@@ -2118,6 +2139,176 @@ posRouter.post("/retail-orders", async (req, res) => {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     throw error;
   }
+});
+
+// ── Active services ─────────────────────────────────────────────────────────
+// A service can be started now and paid at the end: the tab is a SERVICES order
+// kept OPEN (running), you can extend it or add more services to it, and completing
+// it marks it SERVED - the moment its stock is consumed - after which it is paid with
+// the same payments / settle (credit) routes as any other sale. Cancelling uses the
+// existing cancel-request / approval flow.
+
+const serviceOrderSchema = z.object({
+  locationId: z.string().trim().min(1).optional(),
+  customerId: z.string().trim().min(1).optional(),
+  // What to call the tab on the Active screen (Pool, Room 5, car KDA 123A). Kept as the order note.
+  label: z.string().trim().max(120).optional(),
+  items: z.array(serviceLineSchema).min(1),
+});
+const addServiceLinesSchema = z.object({ items: z.array(serviceLineSchema).min(1) });
+const extendServiceSchema = z.object({ itemId: z.string().trim().min(1), quantity: z.coerce.number().int().min(1).max(999) });
+
+const stockLineInclude = {
+  service: { select: serviceStockSelect },
+  serviceVariant: { select: serviceVariantStockSelect },
+  addons: { include: { addon: { include: addonStockInclude } } },
+} satisfies Prisma.PosOrderItemInclude;
+
+/** A service tab the caller may still change: a SERVICES order, still running, that they rang up. */
+async function loadRunningServiceTab(tid: string, id: string, req: { userId?: string }) {
+  const order = await prisma.posOrder.findFirst({ where: { id, tenantId: tid, channel: "SERVICES" }, include: orderInclude });
+  if (!order) throw Object.assign(new Error("Service not found"), { status: 404 });
+  if (!ownsOrder(order, req)) throw Object.assign(new Error("You can only change your own services"), { status: 403 });
+  if (order.status !== "OPEN") throw Object.assign(new Error("This service is no longer running"), { status: 409 });
+  return order;
+}
+
+/** Refuses when the stock the given lines will consume isn't there (checked when a service starts or grows, taken when it completes). */
+async function assertServiceStock(tx: Prisma.TransactionClient, tid: string, locationId: string | null, items: Parameters<typeof computeStockRequirements>[0]) {
+  const requirements = computeStockRequirements(items);
+  if (requirements.size === 0) return;
+  const stockLocationId = await resolveStockLocationId(tid, locationId);
+  if (!stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this service"), { status: 400 });
+  await assertStockAvailable(tx, tid, requirements, stockLocationId);
+}
+
+const respondServiceError = (res: import("express").Response, error: unknown) => {
+  if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+  if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
+  throw error;
+};
+
+/** Starts a service to be paid at the end. */
+posRouter.post("/service-orders", async (req, res) => {
+  const parsed = serviceOrderSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid service", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  const locationResult = await resolveEffectiveLocation(tid, req.userId, parsed.data.locationId);
+  if ("error" in locationResult) { res.status(400).json({ error: locationResult.error }); return; }
+  const { location } = locationResult;
+  if (location && !location.canSellServices) { res.status(409).json({ error: `${location.name} isn't set up to sell services` }); return; }
+  const effectiveLocationId = location?.id ?? null;
+  try {
+    const customerId = await resolveCustomerId(tid, parsed.data.customerId);
+    const tax = await taxSettingsFor(tid);
+    const fallbackTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
+    const order = await prisma.$transaction(async (tx) => {
+      const itemsCreate = await resolveServiceLines(tx, tid, parsed.data.items, effectiveLocationId, req.userId, fallbackTax);
+      const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
+      const created = await tx.posOrder.create({
+        data: { tenantId: tid, orderNumber: (last?.orderNumber ?? 0) + 1, channel: "SERVICES", status: "OPEN", locationId: effectiveLocationId, customerId, createdBy: req.userId, notes: parsed.data.label, discount: 0, items: { create: itemsCreate } },
+        include: orderInclude,
+      });
+      await assertServiceStock(tx, tid, effectiveLocationId, created.items);
+      return created;
+    });
+    res.status(201).json({ order: withFinancials(order, tax) });
+  } catch (error) { respondServiceError(res, error); }
+});
+
+/** Adds more services to a running tab. */
+posRouter.post("/orders/:id/service-lines", async (req, res) => {
+  const parsed = addServiceLinesSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid services", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  try {
+    const order = await loadRunningServiceTab(tid, req.params.id as string, req);
+    const tax = await taxSettingsFor(tid);
+    const fallbackTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
+    const updated = await prisma.$transaction(async (tx) => {
+      const rows = await resolveServiceLines(tx, tid, parsed.data.items, order.locationId, req.userId, fallbackTax);
+      const added = [];
+      for (const row of rows) added.push(await tx.posOrderItem.create({ data: { ...row, orderId: order.id }, include: stockLineInclude }));
+      await assertServiceStock(tx, tid, order.locationId, added);
+      return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+    });
+    res.status(201).json({ order: withFinancials(updated, tax) });
+  } catch (error) { respondServiceError(res, error); }
+});
+
+/** Extends a running service by more units (the pool for one more hour): same service, option and price as the line it extends. */
+posRouter.post("/orders/:id/extend", async (req, res) => {
+  const parsed = extendServiceSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid extension", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  try {
+    const order = await loadRunningServiceTab(tid, req.params.id as string, req);
+    const item = order.items.find((row) => row.id === parsed.data.itemId);
+    if (!item || !item.serviceId) throw Object.assign(new Error("That line isn't a service on this tab"), { status: 404 });
+    const tax = await taxSettingsFor(tid);
+    const updated = await prisma.$transaction(async (tx) => {
+      const added = await tx.posOrderItem.create({
+        data: {
+          orderId: order.id,
+          serviceId: item.serviceId,
+          serviceVariantId: item.serviceVariantId,
+          quantity: parsed.data.quantity,
+          // Everything is copied from the line being extended, so the extension is billed exactly like it.
+          unitPrice: item.unitPrice,
+          listPrice: item.listPrice,
+          priceOverrideReason: item.priceOverrideReason,
+          priceOverriddenBy: item.priceOverriddenBy,
+          taxRate: item.taxRate,
+          taxMode: item.taxMode,
+          taxTreatment: item.taxTreatment,
+          unitCost: item.unitCost,
+          extendsItemId: item.extendsItemId ?? item.id,
+        },
+        include: stockLineInclude,
+      });
+      await assertServiceStock(tx, tid, order.locationId, [added]);
+      return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+    });
+    res.status(201).json({ order: withFinancials(updated, tax) });
+  } catch (error) { respondServiceError(res, error); }
+});
+
+/** Removes a service (and its extensions) from a running tab; the last one can't go - cancel the tab instead. */
+posRouter.delete("/orders/:id/service-lines/:itemId", async (req, res) => {
+  const tid = tenantIdFor(req);
+  try {
+    const order = await loadRunningServiceTab(tid, req.params.id as string, req);
+    const item = order.items.find((row) => row.id === req.params.itemId);
+    if (!item) throw Object.assign(new Error("That line isn't on this tab"), { status: 404 });
+    const rootId = item.extendsItemId ?? item.id;
+    const doomed = order.items.filter((row) => row.id === rootId || row.extendsItemId === rootId).length;
+    if (order.items.length - doomed < 1) throw Object.assign(new Error("Cancel the service instead of removing its only line"), { status: 409 });
+    await prisma.posOrderItem.deleteMany({ where: { orderId: order.id, OR: [{ id: rootId }, { extendsItemId: rootId }] } });
+    const [updated, tax] = await Promise.all([prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude }), taxSettingsFor(tid)]);
+    res.status(200).json({ order: withFinancials(updated, tax) });
+  } catch (error) { respondServiceError(res, error); }
+});
+
+/** Ends a running service: it becomes SERVED (ready to be paid) and the stock it used leaves the shelf. */
+posRouter.post("/orders/:id/complete-service", async (req, res) => {
+  const tid = tenantIdFor(req);
+  try {
+    const order = await loadRunningServiceTab(tid, req.params.id as string, req);
+    const tax = await taxSettingsFor(tid);
+    const updated = await prisma.$transaction(async (tx) => {
+      // Claim first, conditionally: a double tap can't complete (and consume stock) twice.
+      const claimed = await tx.posOrder.updateMany({ where: { id: order.id, status: "OPEN" }, data: { status: "SERVED", servedAt: new Date() } });
+      if (claimed.count === 0) throw Object.assign(new Error("This service was already completed"), { status: 409 });
+      const requirements = computeStockRequirements(order.items);
+      if (requirements.size > 0) {
+        const stockLocationId = await resolveStockLocationId(tid, order.locationId);
+        if (!stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this service"), { status: 400 });
+        await deductStockForOrder(tx, tid, requirements, stockLocationId, order.orderNumber, req);
+      }
+      return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+    });
+    res.status(200).json({ order: withFinancials(updated, tax) });
+  } catch (error) { respondServiceError(res, error); }
 });
 
 // ============================================================================

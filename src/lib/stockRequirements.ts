@@ -52,12 +52,12 @@ export const addonStockSelect = {
 } satisfies Prisma.AddonSelect;
 /** A service loaded for stock maths: its own product / recipe, like a menu item. */
 export const serviceStockSelect = {
-  id: true, name: true, productId: true, stockQtyPerUnit: true,
+  id: true, name: true, productId: true, stockQtyPerUnit: true, durationMinutes: true,
   product: stockRefSelect,
   recipe: recipeIngredientsSelect,
 } satisfies Prisma.ServiceSelect;
 export const serviceVariantStockSelect = {
-  id: true, name: true, stockProductId: true, stockQtyPerUnit: true,
+  id: true, name: true, stockProductId: true, stockQtyPerUnit: true, durationMinutes: true,
   stockProduct: stockRefSelect,
   recipe: recipeIngredientsSelect,
   ingredientOverrides: { select: { quantity: true, isRemoved: true, product: stockRefSelect } },

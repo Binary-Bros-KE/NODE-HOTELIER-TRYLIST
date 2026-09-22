@@ -56,14 +56,14 @@ async function locationScope(req: Request): Promise<Prisma.PosOrderWhereInput> {
 }
 
 async function loadTicket(req: Request, status: string[]) {
-  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id as string, tenantId: tenantId(req), status: { in: status as never[] }, ...(await locationScope(req)) }, include: orderInclude });
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id as string, tenantId: tenantId(req), channel: "FOOD", status: { in: status as never[] }, ...(await locationScope(req)) }, include: orderInclude });
   if (!order) throw new DispatchError("Kitchen order not found", 404);
   return order;
 }
 
 /** Live queue created by POS, enriched with menu and linked product recipes. */
 kitchenRouter.get("/orders", handle(async (req, res) => {
-  const orders = await prisma.posOrder.findMany({ where: { tenantId: tenantId(req), status: { in: ["OPEN", "PREPARING"] }, ...(await locationScope(req)) }, include: orderInclude, orderBy: { createdAt: "asc" } });
+  const orders = await prisma.posOrder.findMany({ where: { tenantId: tenantId(req), channel: "FOOD", status: { in: ["OPEN", "PREPARING"] }, ...(await locationScope(req)) }, include: orderInclude, orderBy: { createdAt: "asc" } });
   res.json({ orders: orders.map(withDispatch) });
 }));
 
@@ -75,7 +75,7 @@ kitchenRouter.get("/orders", handle(async (req, res) => {
  * alone once it's moved past PREPARING. */
 kitchenRouter.get("/orders/updated", handle(async (req, res) => {
   const orders = await prisma.posOrder.findMany({
-    where: { tenantId: tenantId(req), status: { notIn: ["CANCELLED", "COMPLETED"] }, items: { some: { addedAfterSend: true } }, ...(await locationScope(req)) },
+    where: { tenantId: tenantId(req), channel: "FOOD", status: { notIn: ["CANCELLED", "COMPLETED"] }, items: { some: { addedAfterSend: true } }, ...(await locationScope(req)) },
     include: orderInclude,
     orderBy: { updatedAt: "desc" },
   });
