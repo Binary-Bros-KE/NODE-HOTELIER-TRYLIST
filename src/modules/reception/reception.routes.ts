@@ -23,7 +23,23 @@ const OPEN_RESERVATION_STATUSES = ["PENDING", "CONFIRMED", "CHECKED_IN"] as cons
 const MEAL_PLANS = ["ROOM_ONLY", "BED_AND_BREAKFAST", "HALF_BOARD", "FULL_BOARD"] as const;
 
 const CUSTOMER_TYPES = ["PERSONAL", "BUSINESS"] as const;
-const customerSchema = z.object({ customerType: z.enum(CUSTOMER_TYPES).default("PERSONAL"), firstName: z.string().trim().min(1), lastName: z.string().trim().min(1).optional(), email: z.email().optional(), phone: z.string().trim().min(5).max(30) });
+// Personal fields apply to any guest; the business fields only matter when
+// customerType is BUSINESS, but are accepted either way (same as the full
+// Customers screen) so a personal guest can still carry a company on file.
+const customerSchema = z.object({
+  customerType: z.enum(CUSTOMER_TYPES).default("PERSONAL"),
+  firstName: z.string().trim().min(1),
+  lastName: z.string().trim().min(1).optional(),
+  email: z.email().optional(),
+  phone: z.string().trim().min(5).max(30),
+  idNumber: optionalText(40),
+  businessName: optionalText(160),
+  registrationNumber: optionalText(80),
+  kraPin: optionalText(40),
+  contactPerson: optionalText(120),
+  billingPhone: optionalText(30),
+  billingEmail: z.preprocess(blankToUndefined, z.email().optional()),
+});
 
 // How a room is sold. PAID is the default; COMPLIMENTARY gives the room free
 // (its value stays on the folio, written off by a matching discount line). A
