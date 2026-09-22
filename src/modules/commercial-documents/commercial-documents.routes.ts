@@ -10,6 +10,7 @@ import { orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.
 const docTypes = ["QUOTATION", "INVOICE"] as const;
 const docStatuses = ["DRAFT", "SENT", "ACCEPTED", "REJECTED", "EXPIRED", "CANCELLED", "CONVERTED", "ISSUED", "PARTIALLY_PAID", "PAID", "OVERDUE", "VOID"] as const;
 const lineSources = ["CUSTOM", "ROOM", "ROOM_STAY", "FOLIO", "SERVICE", "SERVICE_MEMBERSHIP", "POS_ORDER"] as const;
+const docSources = ["MANUAL", "QUOTATION", "HOTEL_STAY", "SERVICE_SALE", "RESTAURANT_ORDER"] as const;
 const taxModes = ["INCLUSIVE", "EXCLUSIVE"] as const;
 const taxTreatments = ["STANDARD", "ZERO_RATED", "EXEMPT"] as const;
 const paymentKinds = ["DEPOSIT", "PAYMENT"] as const;
@@ -71,6 +72,10 @@ const sourceOrderSchema = z.object({
   dueAt: z.coerce.date().nullable().optional(),
   title: optionalText(140),
   intro: optionalText(2000),
+});
+const sourceLinksQuery = z.object({
+  source: z.enum(docSources),
+  sourceRefId: z.string().trim().min(1),
 });
 
 const include = {
@@ -378,6 +383,17 @@ commercialDocumentsRouter.get("/source-options", async (req, res) => {
   }));
 
   res.json({ roomRates: roomRateLines, services: serviceLines, folios, orders });
+});
+
+commercialDocumentsRouter.get("/source-links", async (req, res) => {
+  const parsed = sourceLinksQuery.safeParse(req.query);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid source query", details: parsed.error.flatten() }); return; }
+  const documents = await prisma.commercialDocument.findMany({
+    where: { tenantId: tenantId(req), source: parsed.data.source, sourceRefId: parsed.data.sourceRefId },
+    include,
+    orderBy: { createdAt: "desc" },
+  });
+  res.json({ documents });
 });
 
 commercialDocumentsRouter.post("/from-folio", async (req, res) => {
