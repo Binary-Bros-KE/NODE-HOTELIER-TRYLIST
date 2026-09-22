@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma.js";
 import { requireModule, requirePermission } from "../../middleware/tenantContext.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { resolveShiftFor, isWithinShift } from "../../lib/shifts.js";
+import { computeOrderFinancials, type TaxSettings } from "../../lib/orderTotals.js";
 
 export const shiftsRouter = Router();
 shiftsRouter.use(requireModule("HR"));
@@ -72,7 +73,8 @@ async function assertCanView(tid: string, actorId: string | undefined, target: {
 }
 
 async function shiftSummary(tid: string, employeeId: string, from: Date, to: Date) {
-  const [transactions, orders, folioLines, folioCredits, pending] = await Promise.all([
+  const [tax, transactions, orders, folioLines, folioCredits, pending] = await Promise.all([
+    prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { taxRate: true, taxMode: true, taxTreatment: true } }),
     prisma.transaction.findMany({
       where: { tenantId: tid, employeeId, createdAt: { gte: from, lte: to } },
       include: { paymentMethod: { select: { id: true, name: true } } },
@@ -88,10 +90,11 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
         saleType: true,
         complimentaryOrderRole: true,
         complimentaryRecipientName: true,
+        discount: true,
         createdAt: true,
         updatedAt: true,
         payments: { include: { paymentMethod: { select: { name: true } } } },
-        items: { select: { quantity: true, unitPrice: true } },
+        items: { select: { quantity: true, unitPrice: true, taxRate: true, taxMode: true, taxTreatment: true, addons: { select: { quantity: true, unitPrice: true } } } },
       },
       orderBy: { createdAt: "asc" },
     }),
@@ -103,6 +106,9 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
         label: true,
         amount: true,
         quantity: true,
+        taxRate: true,
+        taxMode: true,
+        taxTreatment: true,
         createdAt: true,
         folio: {
           select: {
@@ -134,20 +140,48 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
     bucket.count += 1;
     byPaymentMethod.set(key, bucket);
   }
-  const sales = orders.map((o) => ({
-    id: o.id,
-    orderNumber: o.orderNumber,
-    status: o.status,
-    paymentStatus: o.paymentStatus,
-    saleType: o.saleType,
-    complimentaryOrderRole: o.complimentaryOrderRole,
-    complimentaryRecipientName: o.complimentaryRecipientName,
-    createdAt: o.createdAt,
-    total: o.items.reduce((s, i) => s + Number(i.unitPrice) * i.quantity, 0),
-    paid: o.payments.reduce((s, p) => s + Number(p.amount), 0),
-  }));
-  const folioSales = folioLines.map((line) => {
+  const taxSettings = tax as TaxSettings;
+  const sales = orders.map((o) => {
+    const fin = computeOrderFinancials({
+      discount: o.discount,
+      saleType: o.saleType,
+      items: o.items.map((item) => ({
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        addons: item.addons,
+        taxRate: item.taxRate,
+        taxMode: item.taxMode,
+        taxTreatment: item.taxTreatment,
+      })),
+    }, taxSettings);
+    return {
+      id: o.id,
+      orderNumber: o.orderNumber,
+      status: o.status,
+      paymentStatus: o.paymentStatus,
+      saleType: o.saleType,
+      complimentaryOrderRole: o.complimentaryOrderRole,
+      complimentaryRecipientName: o.complimentaryRecipientName,
+      createdAt: o.createdAt,
+      total: fin.total,
+      complimentaryValue: fin.complimentaryValue,
+      paid: o.payments.reduce((s, p) => s + Number(p.amount), 0),
+    };
+  });
+  const folioFinancials = computeOrderFinancials({
+    discount: 0,
+    items: folioLines.map((line) => ({
+      quantity: Number(line.quantity),
+      unitPrice: line.amount,
+      addons: [],
+      taxRate: line.taxRate,
+      taxMode: line.taxMode,
+      taxTreatment: line.taxTreatment,
+    })),
+  }, taxSettings);
+  const folioSales = folioLines.map((line, index) => {
     const customer = line.folio.reservation.customer;
+    const gross = folioFinancials.taxLineItems.find((item) => item.index === index)?.gross ?? Number(line.amount) * Number(line.quantity);
     return {
       id: line.id,
       kind: "FOLIO" as const,
@@ -158,14 +192,14 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       roomNumber: line.folio.reservation.room.number,
       guestName: `${customer.firstName} ${customer.lastName ?? ""}`.trim(),
       createdAt: line.createdAt,
-      total: Number(line.amount) * Number(line.quantity),
+      total: gross,
       paid: 0,
     };
   });
   const totalSales = sales.reduce((s, o) => s + o.total, 0) + folioSales.reduce((s, line) => s + line.total, 0);
   const totalPaid = incomingTransactions.reduce((s, t) => s + Number(t.amount), 0);
   const complimentarySales = sales.filter((o) => o.saleType === "COMPLIMENTARY");
-  const complimentaryTotal = complimentarySales.reduce((s, o) => s + o.total, 0);
+  const complimentaryTotal = complimentarySales.reduce((s, o) => s + o.complimentaryValue, 0);
   const creditOrders = sales.filter((o) => o.saleType !== "COMPLIMENTARY" && o.total - o.paid > 0.01);
   const folioCreditSales = folioCredits.reduce((s, entry) => s + Number(entry.amount), 0);
   const creditSales = creditOrders.reduce((s, o) => s + (o.total - o.paid), 0) + folioCreditSales;
