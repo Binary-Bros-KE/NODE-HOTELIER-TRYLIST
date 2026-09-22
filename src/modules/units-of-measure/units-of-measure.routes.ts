@@ -8,7 +8,11 @@ import { ensureSystemUnits } from "../../lib/systemUnits.js";
 // needed — not scoped to Services specifically, so kept as its own module.
 export const unitsOfMeasureRouter = Router();
 
-const createSchema = z.object({ name: z.string().trim().min(1).max(40) });
+// How a unit's quantity gets worked out when it's used for room pricing —
+// see the schema comment on UnitMeasurementKind. Required on every new unit:
+// there's no such thing as a unit nobody knows how to measure by.
+const MEASUREMENT_KINDS = ["HOURS", "MINUTES", "DAYS", "HEADCOUNT", "EACH"] as const;
+const createSchema = z.object({ name: z.string().trim().min(1).max(40), measurementKind: z.enum(MEASUREMENT_KINDS) });
 const updateSchema = createSchema.partial();
 
 const tenantId = (req: { tenantId?: string }) => {
@@ -24,7 +28,7 @@ unitsOfMeasureRouter.get("/", async (req, res) => {
   await ensureSystemUnits(prisma, tenantId(req));
   const units = await prisma.unitOfMeasure.findMany({
     where: { tenantId: tenantId(req) },
-    select: { id: true, name: true, systemKey: true, createdAt: true, updatedAt: true, _count: { select: { services: true } } },
+    select: { id: true, name: true, systemKey: true, measurementKind: true, createdAt: true, updatedAt: true, _count: { select: { services: true } } },
     orderBy: { name: "asc" },
   });
   res.json({ units });

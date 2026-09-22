@@ -6,10 +6,11 @@ import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { nextCustomerNo, nextReservationNo, nextFolioNo, nextTransactionNo, nextGroupNo } from "../../lib/sequence.js";
 import { resolveActorLocationWithHint } from "../../lib/location.js";
-import { resolveRoomCharge, type RoomCharge } from "../../lib/roomCharge.js";
+import { resolveRoomCharge, type RoomCharge, type TaxFallback } from "../../lib/roomCharge.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { applyCustomerBalance, folioCreditOutstanding } from "../../lib/customerCredit.js";
 import { createRoomTask } from "../../lib/housekeeping.js";
+import { computeOrderFinancials } from "../../lib/orderTotals.js";
 
 export const receptionRouter = Router();
 receptionRouter.use(requireModule("RESERVATIONS"));
@@ -66,6 +67,11 @@ const reservationCreateFields = z.object({
   mealPlan: z.enum(MEAL_PLANS).default("ROOM_ONLY"),
   // Required (server-checked) when the room type is sold by rate variant.
   rateId: z.string().trim().min(1).optional(),
+  // The rate's auto-calculated quantity (elapsed hours/days, or headcount)
+  // is only ever a starting suggestion — this replaces it outright when set,
+  // e.g. rounding a 4.3-hour stay to 4 or 5, or a headcount rate to the
+  // actual number of attendees rather than just "adults".
+  quantityOverride: z.coerce.number().positive().optional(),
   notes: optionalText(500),
   // Walk-ins submit CHECKED_IN directly to skip the Pending→Confirmed hop.
   status: z.enum(["PENDING", "CONFIRMED", "CHECKED_IN"]).default("PENDING"),
@@ -89,8 +95,8 @@ const reservationUpdateSchema = z.object({
 });
 
 const cancelSchema = z.object({ cancellationReason: z.enum(CANCELLATION_REASONS), cancellationNotes: optionalText(500) });
-const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional(), rateId: z.string().trim().min(1).optional() });
-const extendSchema = z.object({ checkOut: z.coerce.date() });
+const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional() });
+const extendSchema = z.object({ checkOut: z.coerce.date(), quantityOverride: z.coerce.number().positive().optional() });
 const optionalDate = z.preprocess(blankToUndefined, z.coerce.date().optional());
 // What a checkout can carry beyond a payment: if a balance is left, why it's
 // being left and when it's expected (checkout on credit).
@@ -114,6 +120,13 @@ async function resolvePaymentMethod(tid: string, paymentMethodId: string, refere
 }
 
 function tenantId(req: { tenantId?: string }): string { if (!req.tenantId) throw new Error("Tenant context is required"); return req.tenantId; }
+
+/** The tenant's tax defaults, for resolving a room/service's own null tax
+ * fields at charge time (same convention as POS's taxSettingsFor). */
+async function taxDefaults(tid: string): Promise<TaxFallback> {
+  const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { taxRate: true, taxMode: true, taxTreatment: true } });
+  return profile ?? null;
+}
 function invalid(res: { status: (code: number) => { json: (value: unknown) => unknown } }, label: string, details: unknown) { return res.status(400).json({ error: `Invalid ${label}`, details }); }
 
 type ActorContext = { locationId: string | null; performedBy: string | undefined; name: string };
@@ -172,8 +185,14 @@ async function syncRoomAdjustment(tx: Prisma.TransactionClient, tid: string, res
   const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId }, include: { room: true, folio: { include: { lineItems: true } } } });
   if (!reservation.folio) return;
   await tx.folioLineItem.deleteMany({ where: { folioId: reservation.folio.id, source: "DISCOUNT", sourceRefId: { in: ROOM_ADJUSTMENT_REFS } } });
-  const roomTotal = round2(reservation.folio.lineItems.filter((l) => l.source === "ROOM").reduce((sum, l) => sum + Number(l.amount) * l.quantity, 0));
+  const roomLines = reservation.folio.lineItems.filter((l) => l.source === "ROOM");
+  const roomTotal = round2(roomLines.reduce((sum, l) => sum + Number(l.amount) * Number(l.quantity), 0));
   if (roomTotal <= 0) return;
+  // The write-off is netted at the same tax settings as the room charges it
+  // offsets (they're all the same room/type in the near-universal case), so
+  // folioTotals' per-line tax math cancels the discounted share correctly
+  // instead of treating it as its own separately-taxed line.
+  const roomTax = roomLines[0];
   let off = 0;
   let label = "";
   let ref = "ROOM_DISCOUNT";
@@ -187,7 +206,12 @@ async function syncRoomAdjustment(tx: Prisma.TransactionClient, tid: string, res
     label = `Room discount — ${reservation.discountType === "PERCENT" ? `${value}%` : `KSh ${value.toLocaleString("en-KE")}`}${reservation.discountReason ? ` (${reservation.discountReason})` : ""}`;
   }
   if (off <= 0) return;
-  await tx.folioLineItem.create({ data: { tenantId: tid, folioId: reservation.folio.id, source: "DISCOUNT", label, amount: -off, quantity: 1, sourceRefId: ref, createdBy: by } });
+  await tx.folioLineItem.create({
+    data: {
+      tenantId: tid, folioId: reservation.folio.id, source: "DISCOUNT", label, amount: -off, quantity: 1, sourceRefId: ref, createdBy: by,
+      taxRate: roomTax.taxRate, taxMode: roomTax.taxMode, taxTreatment: roomTax.taxTreatment,
+    },
+  });
 }
 
 /** Adds each settled stay's outstanding credit to its folio, for display. */
@@ -231,11 +255,34 @@ const reservationInclude = {
   },
 };
 
-function folioTotals(folio: { lineItems: { amount: unknown; quantity: number }[]; payments: { amount: unknown }[] } | null) {
-  if (!folio) return { charges: 0, paid: 0, balance: 0 };
-  const charges = folio.lineItems.reduce((sum, item) => sum + Number(item.amount) * item.quantity, 0);
+type FolioLineForTax = { amount: unknown; quantity: unknown; taxRate?: unknown; taxMode?: string | null; taxTreatment?: string | null };
+
+// Reuses the POS money engine: each folio line is its own "item" (ROOM,
+// SERVICE, AD_HOC positive; DISCOUNT negative), carrying its own resolved tax
+// snapshot, with the order-level discount left at 0 since folios already
+// model a discount as its own explicit line rather than an order-wide field.
+// `charges` (== fin.total) matches the old flat sum exactly for INCLUSIVE-tax
+// lines (the schema default) and only grows for EXCLUSIVE-tax lines, which is
+// the point: an exclusive-VAT room rate must add tax on top at the till.
+function folioTotals(folio: { lineItems: FolioLineForTax[]; payments: { amount: unknown }[] } | null, fallbackTax?: TaxFallback) {
+  if (!folio) return { charges: 0, paid: 0, balance: 0, tax: null };
+  const fin = computeOrderFinancials(
+    {
+      discount: 0,
+      items: folio.lineItems.map((item) => ({
+        quantity: Number(item.quantity),
+        unitPrice: Number(item.amount),
+        addons: [],
+        taxRate: item.taxRate as never,
+        taxMode: (item.taxMode ?? null) as never,
+        taxTreatment: (item.taxTreatment ?? null) as never,
+      })),
+    },
+    (fallbackTax as never) ?? null,
+  );
   const paid = folio.payments.reduce((sum, payment) => sum + Number(payment.amount), 0);
-  return { charges, paid, balance: charges - paid };
+  const charges = fin.total;
+  return { charges, paid, balance: round2(charges - paid), tax: fin };
 }
 
 // Checkout frees the room and opens an unassigned turnover task for the housekeeping supervisor.
@@ -275,14 +322,14 @@ receptionRouter.get("/reservations/:id", async (req, res) => {
   const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include: reservationInclude });
   if (!reservation) { res.status(404).json({ error: "Reservation not found" }); return; }
   const [withCredit] = await withCreditOutstanding(tenantId(req), [reservation]);
-  res.json({ reservation: withCredit, totals: folioTotals(reservation.folio) });
+  res.json({ reservation: withCredit, totals: folioTotals(reservation.folio, await taxDefaults(tenantId(req))) });
 });
 
 receptionRouter.post("/reservations", async (req, res) => {
   const data = reservationSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "reservation", data.error.flatten()); return; }
   const tid = tenantId(req);
-  const { status, roomSaleType, complimentaryReason, discountType, discountValue, discountReason, ...fields } = data.data;
+  const { status, roomSaleType, complimentaryReason, discountType, discountValue, discountReason, quantityOverride, ...fields } = data.data;
   const terms = normalizeTerms({ roomSaleType, complimentaryReason, discountType, discountValue, discountReason });
   const [customer, room, available, actor] = await Promise.all([
     prisma.customer.findFirst({ where: { id: fields.customerId, tenantId: tid } }),
@@ -293,7 +340,7 @@ receptionRouter.post("/reservations", async (req, res) => {
   if (!customer || !room) { res.status(400).json({ error: "Choose a clean, vacant room and a customer from this property" }); return; }
   if (!available) { res.status(409).json({ error: "This room is already booked for those dates" }); return; }
 
-  const charge = await resolveRoomCharge(prisma, room, { rateId: fields.rateId }, fields.checkIn, fields.checkOut);
+  const charge = await resolveRoomCharge(prisma, room, { rateId: fields.rateId, headcount: fields.adults + fields.children, quantityOverride }, fields.checkIn, fields.checkOut, await taxDefaults(tid));
   const reservation = await prisma.$transaction(async (tx) => {
     const reservationNo = await nextReservationNo(tid);
     const created = await tx.reservation.create({
@@ -312,6 +359,9 @@ receptionRouter.post("/reservations", async (req, res) => {
           label: charge.label,
           amount: charge.amount,
           quantity: charge.quantity,
+          taxRate: charge.taxRate,
+          taxMode: charge.taxMode,
+          taxTreatment: charge.taxTreatment,
           createdBy: req.userId,
         },
       });
@@ -357,7 +407,7 @@ receptionRouter.patch("/reservations/:id/check-in", async (req, res) => {
   if (!["PENDING", "CONFIRMED"].includes(current.status)) { res.status(409).json({ error: "Only a pending or confirmed reservation can be checked in" }); return; }
   const mealPlan = data.data.mealPlan ?? current.mealPlan;
   const rateId = data.data.rateId ?? current.rateId;
-  const charge = await resolveRoomCharge(prisma, current.room, { rateId, mealPlan: rateId ? undefined : mealPlan }, current.checkIn, current.checkOut);
+  const charge = await resolveRoomCharge(prisma, current.room, { rateId, mealPlan: rateId ? undefined : mealPlan, headcount: current.adults + current.children, quantityOverride: data.data.quantityOverride }, current.checkIn, current.checkOut, await taxDefaults(tid));
   const actor = await resolveActor(tid, req);
   const reservation = await prisma.$transaction(async (tx) => {
     await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_IN", mealPlan, rateId: charge.rateId, rateName: charge.rateName, updatedBy: req.userId } });
@@ -371,6 +421,9 @@ receptionRouter.patch("/reservations/:id/check-in", async (req, res) => {
           label: charge.label,
           amount: charge.amount,
           quantity: charge.quantity,
+          taxRate: charge.taxRate,
+          taxMode: charge.taxMode,
+          taxTreatment: charge.taxTreatment,
           createdBy: req.userId,
         },
       });
@@ -427,14 +480,14 @@ receptionRouter.patch("/reservations/:id/extend", async (req, res) => {
     res.status(409).json({ error: "This room is already booked for those extra nights" });
     return;
   }
-  const charge = await resolveRoomCharge(prisma, current.room, { rateId: current.rateId, mealPlan: current.rateId ? undefined : current.mealPlan }, current.checkOut, data.data.checkOut);
+  const charge = await resolveRoomCharge(prisma, current.room, { rateId: current.rateId, mealPlan: current.rateId ? undefined : current.mealPlan, quantityOverride: data.data.quantityOverride }, current.checkOut, data.data.checkOut, await taxDefaults(tid));
   const extraNights = charge.quantity;
   const unitWord = (charge.unitName ?? "night").toLowerCase().replace(/^per\s+/, "");
   const actor = await resolveActor(tid, req);
   const reservation = await prisma.$transaction(async (tx) => {
     await tx.reservation.update({ where: { id: current.id }, data: { checkOut: data.data.checkOut, updatedBy: req.userId } });
     if (current.folio) {
-      await tx.folioLineItem.create({ data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: `Extended stay (${extraNights} extra ${unitWord}${extraNights === 1 ? "" : "s"}${charge.rateName ? ` · ${charge.rateName}` : ""})`, amount: charge.amount, quantity: extraNights, createdBy: req.userId } });
+      await tx.folioLineItem.create({ data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: `Extended stay (${extraNights} extra ${unitWord}${extraNights === 1 ? "" : "s"}${charge.rateName ? ` · ${charge.rateName}` : ""})`, amount: charge.amount, quantity: extraNights, taxRate: charge.taxRate, taxMode: charge.taxMode, taxTreatment: charge.taxTreatment, createdBy: req.userId } });
       await syncRoomAdjustment(tx, tid, current.id, req.userId);
     }
     await logActivity(tx, tid, current.id, "EXTENDED", `Extended by ${extraNights} ${unitWord}${extraNights === 1 ? "" : "s"}`, actor);
@@ -453,10 +506,11 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
   if (!current.folio) { res.status(500).json({ error: "This reservation has no folio on record" }); return; }
   if (data.data.amount > 0 && !data.data.paymentMethodId) { res.status(400).json({ error: "Choose a payment method" }); return; }
   if (data.data.paymentMethodId) await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+  const tax = await taxDefaults(tid);
   // A balance can't just vanish at checkout: it's either paid, or the stay is
   // completed on credit with a reason and an expected payment date (same rule
   // as a POS order). The unpaid part then sits on the customer's balance.
-  const balanceBefore = folioTotals(current.folio).balance;
+  const balanceBefore = folioTotals(current.folio, tax).balance;
   if (data.data.amount > balanceBefore + 0.01) { res.status(400).json({ error: `Amount exceeds the balance due of ${round2(balanceBefore).toFixed(2)}` }); return; }
   const onCredit = round2(balanceBefore - data.data.amount);
   if (onCredit > 0.01 && ((data.data.creditReason ?? "").length < 3 || !data.data.creditExpectedAt)) {
@@ -498,7 +552,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
     await logActivity(tx, tid, current.id, "CHECKED_OUT", onCredit > 0.01 ? `Checked out on credit (${onCredit.toFixed(2)} owing)` : "Checked out", actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
-  res.json({ reservation, totals: folioTotals(reservation.folio) });
+  res.json({ reservation, totals: folioTotals(reservation.folio, tax) });
 });
 
 receptionRouter.post("/reservations/:id/guests", async (req, res) => {
@@ -537,11 +591,18 @@ receptionRouter.post("/reservations/:id/folio/charges", async (req, res) => {
 
   let label = data.data.label;
   let amount = data.data.amount;
+  const tax = await taxDefaults(tid);
+  let lineTax = { taxRate: tax?.taxRate != null ? Number(tax.taxRate) : null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
   if (data.data.source === "SERVICE") {
     const service = await prisma.service.findFirst({ where: { id: data.data.sourceRefId, tenantId: tid, isActive: true } });
     if (!service) { res.status(400).json({ error: "Choose a valid, active service" }); return; }
     label = service.name;
     amount = Number(service.price);
+    lineTax = {
+      taxRate: service.taxRate != null ? Number(service.taxRate) : lineTax.taxRate,
+      taxMode: service.taxMode ?? lineTax.taxMode,
+      taxTreatment: service.taxTreatment ?? lineTax.taxTreatment,
+    };
   }
   const actor = await resolveActor(tid, req);
   const lineItem = await prisma.$transaction(async (tx) => {
@@ -553,6 +614,9 @@ receptionRouter.post("/reservations/:id/folio/charges", async (req, res) => {
         label: label!,
         amount: amount!,
         quantity: data.data.quantity,
+        taxRate: lineTax.taxRate,
+        taxMode: lineTax.taxMode,
+        taxTreatment: lineTax.taxTreatment,
         sourceRefId: data.data.sourceRefId,
         createdBy: req.userId,
       },
@@ -617,7 +681,7 @@ receptionRouter.get("/reservations/:id/folio", async (req, res) => {
   const tid = tenantId(req);
   const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: reservationInclude });
   if (!reservation || !reservation.folio) { res.status(404).json({ error: "Reservation not found" }); return; }
-  res.json({ folio: reservation.folio, totals: folioTotals(reservation.folio) });
+  res.json({ folio: reservation.folio, totals: folioTotals(reservation.folio, await taxDefaults(tid)) });
 });
 
 /** Change how a room is sold — paid (with or without a discount) or
@@ -639,7 +703,7 @@ receptionRouter.patch("/reservations/:id/room-terms", async (req, res) => {
     await logActivity(tx, tid, current.id, "ROOM_TERMS_CHANGED", summary, actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
-  res.json({ reservation, totals: folioTotals(reservation.folio) });
+  res.json({ reservation, totals: folioTotals(reservation.folio, await taxDefaults(tid)) });
 });
 
 /** Receive payment against credit left when a stay was checked out on credit.
@@ -701,6 +765,7 @@ const groupRoomSchema = z.object({
   customerId: z.string().cuid().optional(),
   mealPlan: z.enum(MEAL_PLANS).default("ROOM_ONLY"),
   rateId: z.string().trim().min(1).optional(),
+  quantityOverride: z.coerce.number().positive().optional(),
   adults: z.coerce.number().int().min(1).default(1),
   children: z.coerce.number().int().min(0).default(0),
   // Everyone sleeping in the room, by name.
@@ -747,6 +812,7 @@ async function prepareGroupRooms(tid: string, defaults: { checkIn: Date; checkOu
   ]);
   const roomById = new Map(rooms.map((r) => [r.id, r]));
   const customerIds = new Set(customers.map((c) => c.id));
+  const tax = await taxDefaults(tid);
   const prepared: { row: GroupRoomInput; room: (typeof rooms)[number]; checkIn: Date; checkOut: Date; customerId: string; charge: RoomCharge }[] = [];
   for (const row of rows) {
     const room = roomById.get(row.roomId);
@@ -758,7 +824,7 @@ async function prepareGroupRooms(tid: string, defaults: { checkIn: Date; checkOu
     const customerId = row.customerId ?? billingCustomerId;
     if (!customerIds.has(customerId)) throw Object.assign(new Error(`Room ${room.number}: guest not found`), { status: 400 });
     if (!(await roomIsAvailable({ tenantId: tid, roomId: room.id, checkIn, checkOut }))) throw Object.assign(new Error(`Room ${room.number} is already booked for those dates`), { status: 409 });
-    const charge = await resolveRoomCharge(prisma, room, { rateId: row.rateId }, checkIn, checkOut);
+    const charge = await resolveRoomCharge(prisma, room, { rateId: row.rateId, headcount: row.adults + row.children, quantityOverride: row.quantityOverride }, checkIn, checkOut, tax);
     prepared.push({ row, room, checkIn, checkOut, customerId, charge });
   }
   return prepared;
@@ -793,7 +859,7 @@ async function bookGroupRooms(
     if (args.status === "CHECKED_IN") {
       await tx.room.update({ where: { id: room.id }, data: { status: "OCCUPIED" } });
       await tx.folioLineItem.create({
-        data: { tenantId: tid, folioId: folio.id, source: "ROOM", label: charge.label, amount: charge.amount, quantity: charge.quantity, createdBy: userId },
+        data: { tenantId: tid, folioId: folio.id, source: "ROOM", label: charge.label, amount: charge.amount, quantity: charge.quantity, taxRate: charge.taxRate, taxMode: charge.taxMode, taxTreatment: charge.taxTreatment, createdBy: userId },
       });
       await syncRoomAdjustment(tx, tid, created.id, userId);
       await logActivity(tx, tid, created.id, "CHECKED_IN", "Checked in", actor);
@@ -813,10 +879,11 @@ const groupReservationInclude = {
   },
 };
 
-async function groupSummary(tid: string, reservations: { status: string; adults: number; children: number; additionalGuests?: unknown[]; folio: { id: string; creditAmount: unknown; lineItems: { amount: unknown; quantity: number }[]; payments: { amount: unknown }[] } | null }[]) {
+async function groupSummary(tid: string, reservations: { status: string; adults: number; children: number; additionalGuests?: unknown[]; folio: { id: string; creditAmount: unknown; lineItems: FolioLineForTax[]; payments: { amount: unknown }[] } | null }[]) {
   const live = reservations.filter((r) => r.status !== "CANCELLED" && r.status !== "NO_SHOW");
+  const tax = await taxDefaults(tid);
   const totals = live.reduce((sum, r) => {
-    const t = folioTotals(r.folio);
+    const t = folioTotals(r.folio, tax);
     return { charges: sum.charges + t.charges, paid: sum.paid + t.paid, balance: sum.balance + t.balance };
   }, { charges: 0, paid: 0, balance: 0 });
   const outstanding = await folioCreditOutstanding(prisma, tid, live.flatMap((r) => (r.folio && Number(r.folio.creditAmount) > 0 ? [r.folio.id] : [])));
@@ -948,14 +1015,15 @@ receptionRouter.post("/groups/:id/check-in", async (req, res, next) => {
     });
     if (waiting.length === 0) { res.status(409).json({ error: "No waiting rooms to check in" }); return; }
     const actor = await resolveActor(tid, req);
+    const tax = await taxDefaults(tid);
     await prisma.$transaction(async (tx) => {
       for (const current of waiting) {
         await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_IN", updatedBy: req.userId } });
         await tx.room.update({ where: { id: current.roomId }, data: { status: "OCCUPIED" } });
         if (current.folio) {
-          const charge = await resolveRoomCharge(tx, current.room, { rateId: current.rateId, mealPlan: current.rateId ? undefined : current.mealPlan }, current.checkIn, current.checkOut);
+          const charge = await resolveRoomCharge(tx, current.room, { rateId: current.rateId, mealPlan: current.rateId ? undefined : current.mealPlan, headcount: current.adults + current.children }, current.checkIn, current.checkOut, tax);
           await tx.folioLineItem.create({
-            data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: charge.label, amount: charge.amount, quantity: charge.quantity, createdBy: req.userId },
+            data: { tenantId: tid, folioId: current.folio.id, source: "ROOM", label: charge.label, amount: charge.amount, quantity: charge.quantity, taxRate: charge.taxRate, taxMode: charge.taxMode, taxTreatment: charge.taxTreatment, createdBy: req.userId },
           });
           await syncRoomAdjustment(tx, tid, current.id, req.userId);
         }
@@ -1008,7 +1076,8 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
     if (targets.some((r) => !r.folio)) { res.status(500).json({ error: "A room in this group has no folio on record" }); return; }
 
     for (const payment of data.data.payments) await resolvePaymentMethod(tid, payment.paymentMethodId, payment.reference);
-    const rooms = targets.map((r) => ({ id: r.id, due: Math.max(0, round2(folioTotals(r.folio).balance)) }));
+    const groupTax = await taxDefaults(tid);
+    const rooms = targets.map((r) => ({ id: r.id, due: Math.max(0, round2(folioTotals(r.folio, groupTax).balance)) }));
     const dueTotal = round2(rooms.reduce((sum, r) => sum + r.due, 0));
     const paidTotal = round2(data.data.payments.reduce((sum, p) => sum + p.amount, 0));
     if (paidTotal > dueTotal + 0.01) { res.status(400).json({ error: `Payments of ${paidTotal.toFixed(2)} exceed the balance due of ${dueTotal.toFixed(2)}` }); return; }

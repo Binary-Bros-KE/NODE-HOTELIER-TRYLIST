@@ -559,7 +559,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const customerDebtTotal = round2(debtorCustomers.reduce((s, c) => s + Number(c.balance), 0));
     const folioBalances = openFolios
       .map((f) => {
-        const charges = f.lineItems.reduce((s, li) => s + Number(li.amount) * li.quantity, 0);
+        const charges = f.lineItems.reduce((s, li) => s + Number(li.amount) * Number(li.quantity), 0);
         const paid = f.payments.reduce((s, p) => s + Number(p.amount), 0);
         return {
           folioNo: f.folioNo,

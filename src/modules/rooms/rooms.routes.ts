@@ -14,6 +14,10 @@ roomsRouter.use(requireModule("ROOMS"));
 
 const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 const optionalText = (max: number) => z.preprocess(blankToUndefined, z.string().trim().max(max).optional());
+const blankToNull = (v: unknown) => (typeof v === "string" && v.trim() === "" ? null : v);
+// null = "not set": tax inherited from the business default — same convention as MenuItem/Service.
+const nullableRate = z.preprocess(blankToNull, z.coerce.number().min(0).max(100).nullable());
+const nullableEnum = <T extends readonly [string, ...string[]]>(values: T) => z.preprocess(blankToNull, z.enum(values).nullable());
 
 // A room type is sold either at one price (baseRate + priceUnitId) or by
 // rate variants, each with its own name, price and unit of measure. With
@@ -63,6 +67,11 @@ const roomTypeSchema = z.object({
   baseRate: z.coerce.number().nonnegative().optional(),
   priceUnitId: z.string().trim().min(1).optional(),
   amenities: z.array(z.string().trim().min(1).max(50)).max(20).default([]),
+  // Same tax model as MenuItem/Service: all null = inherit the tenant's
+  // BusinessProfile default; an override applies to every rate variant.
+  taxRate: nullableRate.optional(),
+  taxMode: nullableEnum(["INCLUSIVE", "EXCLUSIVE"] as const).optional(),
+  taxTreatment: nullableEnum(["STANDARD", "ZERO_RATED", "EXEMPT"] as const).optional(),
   isActive: z.boolean().default(true),
   rates: ratesSchema.optional(),
 });
@@ -73,6 +82,9 @@ const roomTypeUpdateSchema = z.object({
   baseRate: z.coerce.number().nonnegative().optional(),
   priceUnitId: z.string().trim().min(1).nullable().optional(),
   amenities: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
+  taxRate: nullableRate.optional(),
+  taxMode: nullableEnum(["INCLUSIVE", "EXCLUSIVE"] as const).optional(),
+  taxTreatment: nullableEnum(["STANDARD", "ZERO_RATED", "EXEMPT"] as const).optional(),
   isActive: z.boolean().optional(),
   rates: ratesSchema.optional(),
 });
@@ -94,8 +106,11 @@ const roomTypeFields = {
   capacity: true,
   baseRate: true,
   priceUnitId: true,
-  priceUnit: { select: { id: true, name: true, systemKey: true } },
+  priceUnit: { select: { id: true, name: true, systemKey: true, measurementKind: true } },
   amenities: true,
+  taxRate: true,
+  taxMode: true,
+  taxTreatment: true,
   isActive: true,
   createdAt: true,
   updatedAt: true,
@@ -103,15 +118,18 @@ const roomTypeFields = {
   updatedBy: true,
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
   updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
-  rates: { select: { id: true, name: true, price: true, unitId: true, unit: { select: { id: true, name: true, systemKey: true } } }, orderBy: { name: "asc" as const } },
+  rates: { select: { id: true, name: true, price: true, unitId: true, unit: { select: { id: true, name: true, systemKey: true, measurementKind: true } } }, orderBy: { name: "asc" as const } },
 } satisfies Prisma.RoomTypeSelect;
 
+// Any unit works for room pricing now, built-in or a tenant's own — the only
+// real requirement is that it declares HOW it's measured (measurementKind),
+// since that's what drives the check-in/check-out auto-calculation.
 async function assertUnits(tid: string, ids: (string | null | undefined)[]) {
   const wanted = [...new Set(ids.filter((id): id is string => !!id))];
   if (!wanted.length) return;
   await ensureSystemUnits(prisma, tid);
-  const found = await prisma.unitOfMeasure.count({ where: { tenantId: tid, id: { in: wanted }, systemKey: { not: null } } });
-  if (found !== wanted.length) throw Object.assign(new Error("Rooms are priced per Hour, Night or Day — choose one of those units"), { status: 400 });
+  const found = await prisma.unitOfMeasure.count({ where: { tenantId: tid, id: { in: wanted }, measurementKind: { not: null } } });
+  if (found !== wanted.length) throw Object.assign(new Error("Choose a unit that has a measurement type set (Hours, Minutes, Days, Headcount or Each) — set one on it under Units of Measure first"), { status: 400 });
 }
 
 roomsRouter.get("/types", async (req, res) => res.json({ types: await prisma.roomType.findMany({ where: { tenantId: tenantId(req) }, select: roomTypeFields, orderBy: [{ isActive: "desc" }, { name: "asc" }] }) }));
@@ -194,7 +212,7 @@ roomsRouter.get("/rooms", async (req, res) => {
   const rooms = await prisma.room.findMany({
     where: { tenantId: tenantId(req) },
     include: {
-      roomType: { include: { priceUnit: { select: { id: true, name: true, systemKey: true } }, rates: { select: { id: true, name: true, price: true, unit: { select: { id: true, name: true, systemKey: true } } }, orderBy: { name: "asc" } } } },
+      roomType: { include: { priceUnit: { select: { id: true, name: true, systemKey: true, measurementKind: true } }, rates: { select: { id: true, name: true, price: true, unit: { select: { id: true, name: true, systemKey: true, measurementKind: true } } }, orderBy: { name: "asc" } } } },
       createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
       updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
       _count: { select: { reservations: true } },
