@@ -72,14 +72,14 @@ async function assertCanView(tid: string, actorId: string | undefined, target: {
 }
 
 async function shiftSummary(tid: string, employeeId: string, from: Date, to: Date) {
-  const [transactions, orders, pending] = await Promise.all([
+  const [transactions, orders, folioLines, folioCredits, pending] = await Promise.all([
     prisma.transaction.findMany({
       where: { tenantId: tid, employeeId, createdAt: { gte: from, lte: to } },
       include: { paymentMethod: { select: { id: true, name: true } } },
       orderBy: { createdAt: "asc" },
     }),
     prisma.posOrder.findMany({
-      where: { tenantId: tid, createdBy: employeeId, createdAt: { gte: from, lte: to } },
+      where: { tenantId: tid, createdBy: employeeId, source: { not: "POS_ORDER" }, createdAt: { gte: from, lte: to } },
       select: {
         id: true,
         orderNumber: true,
@@ -95,11 +95,39 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       },
       orderBy: { createdAt: "asc" },
     }),
+    prisma.folioLineItem.findMany({
+      where: { tenantId: tid, createdBy: employeeId, createdAt: { gte: from, lte: to } },
+      select: {
+        id: true,
+        source: true,
+        label: true,
+        amount: true,
+        quantity: true,
+        createdAt: true,
+        folio: {
+          select: {
+            folioNo: true,
+            reservation: {
+              select: {
+                reservationNo: true,
+                customer: { select: { firstName: true, lastName: true } },
+                room: { select: { number: true } },
+              },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.customerCreditEntry.findMany({
+      where: { tenantId: tid, createdBy: employeeId, type: "CREDIT", folioId: { not: null }, createdAt: { gte: from, lte: to } },
+      select: { amount: true },
+    }),
     prisma.posOrder.count({ where: { tenantId: tid, createdBy: employeeId, status: { in: [...ACTIVE_ORDER_STATUSES] } } }),
   ]);
   const byPaymentMethod = new Map<string, { paymentMethodId: string | null; name: string; total: number; count: number }>();
-  const posSaleTransactions = transactions.filter((t) => t.source === "POS_SALE" && t.direction === "IN" && t.status === "COMPLETE");
-  for (const t of posSaleTransactions) {
+  const incomingTransactions = transactions.filter((t) => t.direction === "IN" && t.status === "COMPLETE");
+  for (const t of incomingTransactions) {
     const key = t.paymentMethodId ?? "unknown";
     const bucket = byPaymentMethod.get(key) ?? { paymentMethodId: t.paymentMethodId, name: t.paymentMethod?.name ?? "Unknown", total: 0, count: 0 };
     bucket.total += Number(t.amount);
@@ -118,12 +146,29 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
     total: o.items.reduce((s, i) => s + Number(i.unitPrice) * i.quantity, 0),
     paid: o.payments.reduce((s, p) => s + Number(p.amount), 0),
   }));
-  const totalSales = sales.reduce((s, o) => s + o.total, 0);
-  const totalPaid = posSaleTransactions.reduce((s, t) => s + Number(t.amount), 0);
+  const folioSales = folioLines.map((line) => {
+    const customer = line.folio.reservation.customer;
+    return {
+      id: line.id,
+      kind: "FOLIO" as const,
+      label: line.label,
+      source: line.source,
+      reservationNo: line.folio.reservation.reservationNo,
+      folioNo: line.folio.folioNo,
+      roomNumber: line.folio.reservation.room.number,
+      guestName: `${customer.firstName} ${customer.lastName ?? ""}`.trim(),
+      createdAt: line.createdAt,
+      total: Number(line.amount) * Number(line.quantity),
+      paid: 0,
+    };
+  });
+  const totalSales = sales.reduce((s, o) => s + o.total, 0) + folioSales.reduce((s, line) => s + line.total, 0);
+  const totalPaid = incomingTransactions.reduce((s, t) => s + Number(t.amount), 0);
   const complimentarySales = sales.filter((o) => o.saleType === "COMPLIMENTARY");
   const complimentaryTotal = complimentarySales.reduce((s, o) => s + o.total, 0);
   const creditOrders = sales.filter((o) => o.saleType !== "COMPLIMENTARY" && o.total - o.paid > 0.01);
-  const creditSales = creditOrders.reduce((s, o) => s + (o.total - o.paid), 0);
+  const folioCreditSales = folioCredits.reduce((s, entry) => s + Number(entry.amount), 0);
+  const creditSales = creditOrders.reduce((s, o) => s + (o.total - o.paid), 0) + folioCreditSales;
   // Credit and complimentary sales never post a Transaction (nothing was
   // collected), so they'd otherwise be invisible here — appended as their
   // own rows only when non-zero, same as any other unused payment method.
@@ -152,7 +197,10 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       description: t.description,
       createdAt: t.createdAt,
     })),
-    sales,
+    sales: [
+      ...sales.map((sale) => ({ ...sale, kind: "POS_ORDER" as const })),
+      ...folioSales,
+    ],
   };
 }
 
