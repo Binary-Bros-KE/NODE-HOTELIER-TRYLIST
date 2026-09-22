@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { resolveEffectiveLocation } from "../../lib/location.js";
 import { nextCommercialDocumentPaymentNo, nextInvoiceNo, nextQuotationNo, nextTransactionNo } from "../../lib/sequence.js";
+import { orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.js";
 
 const docTypes = ["QUOTATION", "INVOICE"] as const;
 const docStatuses = ["DRAFT", "SENT", "ACCEPTED", "REJECTED", "EXPIRED", "CANCELLED", "CONVERTED", "ISSUED", "PARTIALLY_PAID", "PAID", "OVERDUE", "VOID"] as const;
@@ -57,6 +58,19 @@ const paymentSchema = z.object({
   reference: z.string().trim().max(120).nullable().optional(),
   note: optionalText(500),
   paidAt: z.coerce.date().optional(),
+});
+const sourceFolioSchema = z.object({
+  reservationId: z.string().cuid().optional(),
+  folioId: z.string().cuid().optional(),
+  dueAt: z.coerce.date().nullable().optional(),
+  title: optionalText(140),
+  intro: optionalText(2000),
+}).refine((value) => value.reservationId || value.folioId, { message: "Choose a stay to invoice" });
+const sourceOrderSchema = z.object({
+  orderId: z.string().cuid(),
+  dueAt: z.coerce.date().nullable().optional(),
+  title: optionalText(140),
+  intro: optionalText(2000),
 });
 
 const include = {
@@ -117,6 +131,33 @@ function computeLines(lines: z.infer<typeof lineSchema>[], fallback: Awaited<Ret
     };
   });
   return { lines: computed, totals: financials };
+}
+
+function customerLabel(customer: { firstName: string; lastName: string | null; businessName?: string | null }) {
+  return customer.businessName || `${customer.firstName} ${customer.lastName ?? ""}`.trim();
+}
+
+function folioLineGross(line: { amount: unknown; quantity: unknown; taxRate?: any; taxMode?: any; taxTreatment?: any }, fallback: Awaited<ReturnType<typeof taxDefaults>>) {
+  const result = computeOrderFinancials({
+    discount: 0,
+    items: [{
+      quantity: Number(line.quantity) || 1,
+      unitPrice: Number(line.amount) || 0,
+      addons: [],
+      taxRate: line.taxRate ?? null,
+      taxMode: line.taxMode ?? null,
+      taxTreatment: line.taxTreatment ?? null,
+    }],
+  }, fallback);
+  return result.total;
+}
+
+function paymentSum(payments: { amount: unknown }[]) {
+  return round2(payments.reduce((sum, payment) => sum + Number(payment.amount), 0));
+}
+
+function sourcePaymentKind(kind?: string | null): "DEPOSIT" | "PAYMENT" {
+  return kind === "DEPOSIT" ? "DEPOSIT" : "PAYMENT";
 }
 
 function nextStatus(type: "QUOTATION" | "INVOICE", total: number, paid: number, dueAt: Date | null | undefined, current?: (typeof docStatuses)[number]): (typeof docStatuses)[number] {
@@ -206,6 +247,305 @@ commercialDocumentsRouter.get("/options", async (req, res) => {
     taxDefaults(tid),
   ]);
   res.json({ customers, locations, paymentMethods, tax });
+});
+
+commercialDocumentsRouter.get("/source-options", async (req, res) => {
+  const tid = tenantId(req);
+  const [fallback, roomTypes, services, reservations, rawOrders] = await Promise.all([
+    taxDefaults(tid),
+    prisma.roomType.findMany({
+      where: { tenantId: tid, isActive: true },
+      include: { priceUnit: true, rates: { include: { unit: true }, orderBy: { name: "asc" } } },
+      orderBy: { name: "asc" },
+    }),
+    prisma.service.findMany({
+      where: { tenantId: tid, isActive: true },
+      include: { unit: true, variants: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } },
+      orderBy: { name: "asc" },
+    }),
+    prisma.reservation.findMany({
+      where: { tenantId: tid, folio: { isNot: null }, status: { in: ["CHECKED_IN", "CHECKED_OUT"] } },
+      include: {
+        customer: true,
+        room: { include: { roomType: true } },
+        location: true,
+        folio: { include: { lineItems: true, payments: { include: { paymentMethod: { select: { id: true, name: true } } } } } },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 100,
+    }),
+    prisma.posOrder.findMany({
+      where: { tenantId: tid, status: "COMPLETED", customerId: { not: null } },
+      include: orderInclude,
+      orderBy: { updatedAt: "desc" },
+      take: 100,
+    }),
+  ]);
+
+  const roomRateLines = roomTypes.flatMap((roomType) => {
+    const tax = {
+      taxRate: roomType.taxRate ?? fallback.taxRate,
+      taxMode: roomType.taxMode ?? fallback.taxMode,
+      taxTreatment: roomType.taxTreatment ?? fallback.taxTreatment,
+    };
+    const base = Number(roomType.baseRate) > 0 ? [{
+      id: roomType.id,
+      kind: "room-type" as const,
+      label: roomType.name,
+      description: roomType.description,
+      price: Number(roomType.baseRate),
+      unitLabel: roomType.priceUnit?.name ?? "Night",
+      source: "ROOM" as const,
+      sourceRefId: roomType.id,
+      ...tax,
+    }] : [];
+    return [...base, ...roomType.rates.map((rate) => ({
+      id: rate.id,
+      kind: "room-rate" as const,
+      label: `${roomType.name} - ${rate.name}`,
+      description: roomType.description,
+      price: Number(rate.price),
+      unitLabel: rate.unit?.name ?? roomType.priceUnit?.name ?? "Night",
+      source: "ROOM" as const,
+      sourceRefId: rate.id,
+      ...tax,
+    }))];
+  });
+
+  const serviceLines = services.flatMap((service) => {
+    const tax = {
+      taxRate: service.taxRate ?? fallback.taxRate,
+      taxMode: service.taxMode ?? fallback.taxMode,
+      taxTreatment: service.taxTreatment ?? fallback.taxTreatment,
+    };
+    const base = [{
+      id: service.id,
+      kind: "service" as const,
+      label: service.name,
+      description: service.description,
+      price: Number(service.price),
+      unitLabel: service.unit.name,
+      source: "SERVICE" as const,
+      sourceRefId: service.id,
+      ...tax,
+    }];
+    return [...base, ...service.variants.map((variant) => ({
+      id: variant.id,
+      kind: "service-variant" as const,
+      label: `${service.name} - ${variant.name}`,
+      description: service.description,
+      price: Number(variant.price),
+      unitLabel: service.unit.name,
+      source: "SERVICE" as const,
+      sourceRefId: variant.id,
+      ...tax,
+    }))];
+  });
+
+  const folios = reservations.flatMap((reservation) => {
+    if (!reservation.folio) return [];
+    const charges = round2(reservation.folio.lineItems.reduce((sum, line) => sum + folioLineGross(line, fallback), 0));
+    const paid = paymentSum(reservation.folio.payments);
+    const balance = Math.max(0, round2(charges - paid));
+    if (balance <= 0.01) return [];
+    return [{
+      reservationId: reservation.id,
+      folioId: reservation.folio.id,
+      reservationNo: reservation.reservationNo,
+      folioNo: reservation.folio.folioNo,
+      customerName: customerLabel(reservation.customer),
+      locationName: reservation.location?.name ?? null,
+      roomLabel: `${reservation.room.number} - ${reservation.room.roomType.name}`,
+      checkIn: reservation.checkIn,
+      checkOut: reservation.checkOut,
+      total: charges,
+      paid,
+      balance,
+    }];
+  });
+
+  const tax = await taxSettingsFor(tid);
+  const orders = rawOrders.map((order) => withFinancials(order, tax)).filter((order) => order.total > 0.01).map((order) => ({
+    id: order.id,
+    orderNumber: order.orderNumber,
+    channel: order.channel,
+    customerName: order.customer ? customerLabel(order.customer) : "Customer",
+    locationName: order.location?.name ?? null,
+    total: order.total,
+    paid: order.paid,
+    balance: Math.max(0, round2(order.total - order.paid)),
+    createdAt: order.createdAt,
+  }));
+
+  res.json({ roomRates: roomRateLines, services: serviceLines, folios, orders });
+});
+
+commercialDocumentsRouter.post("/from-folio", async (req, res) => {
+  const parsed = sourceFolioSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid stay source", details: parsed.error.flatten() }); return; }
+  const tid = tenantId(req);
+  const reservation = await prisma.reservation.findFirst({
+    where: { tenantId: tid, ...(parsed.data.reservationId ? { id: parsed.data.reservationId } : { folio: { id: parsed.data.folioId } }) },
+    include: {
+      customer: true,
+      room: { include: { roomType: true } },
+      location: true,
+      folio: { include: { lineItems: { orderBy: { createdAt: "asc" } }, payments: true } },
+    },
+  });
+  if (!reservation?.folio) { res.status(404).json({ error: "Stay folio not found" }); return; }
+  const folio = reservation.folio;
+  const existing = await prisma.commercialDocument.findFirst({
+    where: { tenantId: tid, type: "INVOICE", source: "HOTEL_STAY", sourceRefId: folio.id, status: { notIn: ["CANCELLED", "VOID"] } },
+    select: { documentNo: true },
+  });
+  if (existing) { res.status(409).json({ error: `This stay already has invoice ${existing.documentNo}` }); return; }
+  if (folio.lineItems.length === 0) { res.status(400).json({ error: "This stay has no charges to invoice" }); return; }
+
+  const fallback = await taxDefaults(tid);
+  const lines = folio.lineItems.map((line) => ({
+    source: line.source === "ROOM" ? "ROOM_STAY" as const : line.source === "SERVICE" ? "SERVICE" as const : line.source === "POS_ORDER" ? "POS_ORDER" as const : "FOLIO" as const,
+    sourceRefId: line.id,
+    description: line.label,
+    details: line.source === "ROOM" ? `${reservation.room.number} - ${reservation.room.roomType.name}` : null,
+    quantity: Number(line.quantity) || 1,
+    unitLabel: null,
+    unitPrice: Number(line.amount) || 0,
+    discount: 0,
+    taxRate: Number(line.taxRate ?? fallback.taxRate),
+    taxMode: line.taxMode ?? fallback.taxMode,
+    taxTreatment: line.taxTreatment ?? fallback.taxTreatment,
+  }));
+  const computed = computeLines(lines, fallback);
+  const docNo = await nextInvoiceNo(tid);
+  const paymentNos = await Promise.all(folio.payments.map(() => nextCommercialDocumentPaymentNo(tid)));
+  const text = await headerFooter("INVOICE", reservation.locationId);
+
+  const document = await prisma.$transaction(async (tx) => {
+    const created = await tx.commercialDocument.create({
+      data: {
+        tenantId: tid,
+        documentNo: docNo,
+        type: "INVOICE",
+        status: "ISSUED",
+        source: "HOTEL_STAY",
+        sourceRefId: folio.id,
+        customerId: reservation.customerId,
+        locationId: reservation.locationId,
+        title: parsed.data.title ?? `Stay invoice ${reservation.reservationNo}`,
+        intro: parsed.data.intro ?? null,
+        headerText: text.headerText,
+        footerText: text.footerText,
+        issuedAt: new Date(),
+        dueAt: parsed.data.dueAt ?? folio.creditExpectedAt ?? null,
+        subtotal: computed.totals.subtotal,
+        discount: computed.totals.discount,
+        net: computed.totals.net,
+        taxAmount: computed.totals.taxAmount,
+        total: computed.totals.total,
+        balance: computed.totals.total,
+        createdBy: req.userId,
+        updatedBy: req.userId,
+        lines: { create: computed.lines.map((line) => ({ tenantId: tid, source: line.source, sourceRefId: line.sourceRefId, description: line.description, details: line.details, quantity: line.quantity, unitLabel: line.unitLabel, unitPrice: line.unitPrice, discount: line.discount, taxRate: line.taxRate, taxMode: line.taxMode, taxTreatment: line.taxTreatment, lineSubtotal: line.lineSubtotal, netAmount: line.netAmount, taxAmount: line.taxAmount, lineTotal: line.lineTotal, sortOrder: line.sortOrder })) },
+      },
+    });
+    for (const [index, payment] of folio.payments.entries()) {
+      await tx.commercialDocumentPayment.create({
+        data: {
+          tenantId: tid,
+          documentId: created.id,
+          paymentNo: paymentNos[index],
+          kind: sourcePaymentKind(payment.kind),
+          paymentMethodId: payment.paymentMethodId,
+          amount: payment.amount,
+          reference: payment.reference,
+          note: `Carried from folio ${folio.folioNo}`,
+          paidAt: payment.createdAt,
+          createdBy: req.userId,
+        },
+      });
+    }
+    return refreshDocumentTotals(tx as Tx, created.id);
+  });
+  res.status(201).json({ document });
+});
+
+commercialDocumentsRouter.post("/from-order", async (req, res) => {
+  const parsed = sourceOrderSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid order source", details: parsed.error.flatten() }); return; }
+  const tid = tenantId(req);
+  const order = await prisma.posOrder.findFirst({ where: { id: parsed.data.orderId, tenantId: tid }, include: orderInclude });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (order.status !== "COMPLETED") { res.status(400).json({ error: "Only completed orders can be invoiced" }); return; }
+  if (!order.customerId) { res.status(400).json({ error: "Attach a customer before generating an invoice" }); return; }
+  const existing = await prisma.commercialDocument.findFirst({
+    where: { tenantId: tid, type: "INVOICE", sourceRefId: order.id, source: { in: ["SERVICE_SALE", "RESTAURANT_ORDER"] }, status: { notIn: ["CANCELLED", "VOID"] } },
+    select: { documentNo: true },
+  });
+  if (existing) { res.status(409).json({ error: `This order already has invoice ${existing.documentNo}` }); return; }
+
+  const fallback = await taxDefaults(tid);
+  const source = order.channel === "SERVICES" ? "SERVICE_SALE" : "RESTAURANT_ORDER";
+  const lines = order.items.map((item) => {
+    const addonPrice = item.addons.reduce((sum, addon) => sum + Number(addon.unitPrice) * Number(addon.quantity), 0);
+    const baseName = item.menuItem?.name ?? item.product?.name ?? item.service?.name ?? "Sale item";
+    const variantName = item.variant?.name ?? item.serviceVariant?.name ?? null;
+    const addonNames = item.addons.map((addon) => `${addon.addon.name} x ${addon.quantity}`).join(", ");
+    return {
+      source: item.serviceId ? "SERVICE" as const : "POS_ORDER" as const,
+      sourceRefId: item.id,
+      description: variantName ? `${baseName} - ${variantName}` : baseName,
+      details: addonNames || null,
+      quantity: item.quantity,
+      unitLabel: item.service?.unit?.name ?? item.product?.unit ?? null,
+      unitPrice: Number(item.unitPrice) + addonPrice,
+      discount: 0,
+      taxRate: Number(item.taxRate ?? fallback.taxRate),
+      taxMode: item.taxMode ?? fallback.taxMode,
+      taxTreatment: item.taxTreatment ?? fallback.taxTreatment,
+    };
+  });
+  if (lines.length === 0) { res.status(400).json({ error: "This order has no items to invoice" }); return; }
+  const computed = computeLines(lines, fallback);
+  const docNo = await nextInvoiceNo(tid);
+  const paymentNos = await Promise.all(order.payments.map(() => nextCommercialDocumentPaymentNo(tid)));
+  const text = await headerFooter("INVOICE", order.locationId);
+  const document = await prisma.$transaction(async (tx) => {
+    const created = await tx.commercialDocument.create({
+      data: {
+        tenantId: tid,
+        documentNo: docNo,
+        type: "INVOICE",
+        status: "ISSUED",
+        source,
+        sourceRefId: order.id,
+        customerId: order.customerId,
+        locationId: order.locationId,
+        title: parsed.data.title ?? `Order #${order.orderNumber}`,
+        intro: parsed.data.intro ?? null,
+        headerText: text.headerText,
+        footerText: text.footerText,
+        issuedAt: new Date(),
+        dueAt: parsed.data.dueAt ?? null,
+        subtotal: computed.totals.subtotal,
+        discount: computed.totals.discount,
+        net: computed.totals.net,
+        taxAmount: computed.totals.taxAmount,
+        total: computed.totals.total,
+        balance: computed.totals.total,
+        createdBy: req.userId,
+        updatedBy: req.userId,
+        lines: { create: computed.lines.map((line) => ({ tenantId: tid, source: line.source, sourceRefId: line.sourceRefId, description: line.description, details: line.details, quantity: line.quantity, unitLabel: line.unitLabel, unitPrice: line.unitPrice, discount: line.discount, taxRate: line.taxRate, taxMode: line.taxMode, taxTreatment: line.taxTreatment, lineSubtotal: line.lineSubtotal, netAmount: line.netAmount, taxAmount: line.taxAmount, lineTotal: line.lineTotal, sortOrder: line.sortOrder })) },
+      },
+    });
+    for (const [index, payment] of order.payments.entries()) {
+      await tx.commercialDocumentPayment.create({
+        data: { tenantId: tid, documentId: created.id, paymentNo: paymentNos[index], kind: "PAYMENT", paymentMethodId: payment.paymentMethodId, amount: payment.amount, reference: payment.reference, note: `Carried from order #${order.orderNumber}`, paidAt: payment.createdAt, createdBy: req.userId },
+      });
+    }
+    return refreshDocumentTotals(tx as Tx, created.id);
+  });
+  res.status(201).json({ document });
 });
 
 commercialDocumentsRouter.get("/:id", async (req, res) => {
