@@ -204,6 +204,15 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
   };
 }
 
+async function safeShiftSummary(tid: string, employeeId: string, from: Date, to: Date) {
+  try {
+    return await shiftSummary(tid, employeeId, from, to);
+  } catch (error) {
+    console.error("Could not build shift summary", { tenantId: tid, employeeId, from, to, error });
+    return null;
+  }
+}
+
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use 24-hour HH:mm, e.g. 06:00");
 
 const templateSchema = z.object({
@@ -248,7 +257,7 @@ shiftsRouter.get("/approvals", async (req, res, next) => {
     });
     const enriched = await Promise.all(sessions.map(async (s) => ({
       ...s,
-      summary: s.approvedStartAt ? await shiftSummary(tid, s.employeeId, s.approvedStartAt, s.requestedEndAt ?? new Date()) : null,
+      summary: s.approvedStartAt ? await safeShiftSummary(tid, s.employeeId, s.approvedStartAt, s.requestedEndAt ?? new Date()) : null,
     })));
     res.json({ sessions: enriched });
   } catch (error) {
@@ -273,7 +282,7 @@ shiftsRouter.get("/active-supervised", async (req, res, next) => {
     });
     const enriched = await Promise.all(sessions.map(async (s) => ({
       ...s,
-      summary: s.approvedStartAt ? await shiftSummary(tid, s.employeeId, s.approvedStartAt, new Date()) : null,
+      summary: s.approvedStartAt ? await safeShiftSummary(tid, s.employeeId, s.approvedStartAt, new Date()) : null,
     })));
     res.json({ sessions: enriched });
   } catch (error) {
@@ -295,7 +304,7 @@ shiftsRouter.get("/history", async (req, res, next) => {
     });
     const enriched = await Promise.all(sessions.map(async (s) => ({
       ...s,
-      summary: s.approvedStartAt && s.approvedEndAt ? await shiftSummary(tid, s.employeeId, s.approvedStartAt, s.approvedEndAt) : null,
+      summary: s.approvedStartAt && s.approvedEndAt ? await safeShiftSummary(tid, s.employeeId, s.approvedStartAt, s.approvedEndAt) : null,
     })));
     res.json({ sessions: enriched });
   } catch (error) {
@@ -577,7 +586,7 @@ shiftsRouter.get("/sessions", async (req, res, next) => {
     if (query.data.withSummary === "true") {
       const enriched = await Promise.all(sessions.map(async (s) => {
         const end = s.approvedEndAt ?? s.requestedEndAt;
-        return { ...s, summary: s.approvedStartAt && end ? await shiftSummary(tid, s.employeeId, s.approvedStartAt, end) : null };
+        return { ...s, summary: s.approvedStartAt && end ? await safeShiftSummary(tid, s.employeeId, s.approvedStartAt, end) : null };
       }));
       res.json({ sessions: enriched });
       return;
