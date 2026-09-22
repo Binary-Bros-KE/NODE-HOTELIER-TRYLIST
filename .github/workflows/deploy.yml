@@ -31,6 +31,13 @@ jobs:
             # `npm ci` installs from package-lock.json without rewriting it,
             # so it can never drift and block the next `git` step.
             npm ci
+            # Explicit, even though "postinstall" already runs this — on this
+            # host `npm ci` doesn't reliably fire lifecycle scripts, so a
+            # schema change silently built against a stale generated client
+            # and failed `tsc` with errors pointing at fields/models that no
+            # longer exist. This has no DB dependency, so it's safe here
+            # even before migrate deploy has run.
+            npx prisma generate
             npx prisma migrate deploy
             npm run build
             pm2 restart hotelier-server --update-env
