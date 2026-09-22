@@ -18,21 +18,16 @@ const paymentStatus = z.enum(["PENDING", "PAID", "REFUNDED", "FAILED"]);
 const membershipStatus = z.enum(["ACTIVE", "PAUSED", "EXPIRED", "CANCELLED"]);
 const membershipSchema = z.object({
   customerId: z.string().cuid(),
-  planId: z.string().cuid(),
+  planName: z.string().trim().min(2).max(80),
+  planPrice: z.coerce.number().min(0).max(100_000_000).default(0),
+  durationDays: z.coerce.number().int().min(1).max(3650).default(30),
+  discountPercent: z.coerce.number().min(0).max(100).default(0),
   startsAt: z.coerce.date(),
   endsAt: z.coerce.date().optional(),
   status: membershipStatus.default("ACTIVE"),
 });
 const paymentMethodSchema = z.object({
   name: z.string().trim().min(2).max(60),
-  isActive: z.boolean().default(true),
-});
-const membershipPlanSchema = z.object({
-  name: z.string().trim().min(2).max(80),
-  description: z.string().trim().max(500).nullable().optional(),
-  price: z.coerce.number().min(0).max(100_000_000),
-  durationDays: z.coerce.number().int().min(1).max(3650),
-  discountPercent: z.coerce.number().min(0).max(100).default(0),
   isActive: z.boolean().default(true),
 });
 const membershipPaymentSchema = z.object({
@@ -50,13 +45,6 @@ const providerSchema = z.object({
   specialty: z.string().trim().max(120).nullable().optional(),
   phone: z.string().trim().max(30).nullable().optional(),
   isActive: z.boolean().default(true),
-});
-const scheduleSchema = z.object({
-  providerId: z.string().cuid(),
-  startsAt: z.coerce.date(),
-  endsAt: z.coerce.date(),
-  isAvailable: z.boolean().default(true),
-  notes: z.string().trim().max(500).nullable().optional(),
 });
 const appointmentSchema = z.object({
   customerId: z.string().cuid(),
@@ -83,7 +71,7 @@ const include = {
   service: { include: { variants: { where: { isActive: true } }, locations: { select: { id: true } } } },
   serviceVariant: true,
   provider: true,
-  membership: { include: { plan: true } },
+  membership: true,
   paymentMethod: true,
   location: { select: { id: true, name: true } },
   // Once completed, the real sale (tax, payment status, receipt) lives here — see /appointments/:id/complete.
@@ -91,10 +79,28 @@ const include = {
 } as const;
 const membershipInclude = {
   customer: true,
-  plan: true,
   payments: { include: { paymentMethod: true }, orderBy: { createdAt: "desc" as const } },
   _count: { select: { appointments: true } },
 } as const;
+
+function planSnapshot(membership: { id: string; planName: string; planPrice: unknown; durationDays: number; discountPercent: unknown }) {
+  return {
+    id: membership.id,
+    name: membership.planName,
+    price: membership.planPrice,
+    durationDays: membership.durationDays,
+    discountPercent: membership.discountPercent,
+    isActive: true,
+  };
+}
+
+function withPlanSnapshot<T extends { id: string; planName: string; planPrice: unknown; durationDays: number; discountPercent: unknown }>(membership: T) {
+  return { ...membership, plan: planSnapshot(membership) };
+}
+
+function withAppointmentMembershipPlan<T extends { membership: ({ id: string; planName: string; planPrice: unknown; durationDays: number; discountPercent: unknown } | null) }>(appointment: T) {
+  return { ...appointment, membership: appointment.membership ? withPlanSnapshot(appointment.membership) : null };
+}
 
 serviceCenterRouter.get("/memberships", async (req, res) => {
   const tid = tenantId(req);
@@ -105,7 +111,7 @@ serviceCenterRouter.get("/memberships", async (req, res) => {
   });
   const now = new Date();
   res.json({
-    memberships,
+    memberships: memberships.map(withPlanSnapshot),
     summary: {
       total: memberships.length,
       active: memberships.filter((item) => item.status === "ACTIVE" && item.endsAt >= now).length,
@@ -118,18 +124,15 @@ serviceCenterRouter.get("/memberships", async (req, res) => {
 serviceCenterRouter.get("/memberships/:id", async (req, res) => {
   const membership = await prisma.membership.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include: membershipInclude });
   if (!membership) { res.status(404).json({ error: "Membership not found" }); return; }
-  res.json({ membership });
+  res.json({ membership: withPlanSnapshot(membership) });
 });
 
 async function resolveMembership(tid: string, data: z.infer<typeof membershipSchema>) {
-  const [customer, plan] = await Promise.all([
-    prisma.customer.findFirst({ where: { id: data.customerId, tenantId: tid } }),
-    prisma.membershipPlan.findFirst({ where: { id: data.planId, tenantId: tid } }),
-  ]);
-  if (!customer || !plan) return { error: "Choose a valid customer and membership plan" } as const;
-  const endsAt = data.endsAt ?? new Date(data.startsAt.getTime() + plan.durationDays * 86_400_000);
+  const customer = await prisma.customer.findFirst({ where: { id: data.customerId, tenantId: tid } });
+  if (!customer) return { error: "Choose a valid customer" } as const;
+  const endsAt = data.endsAt ?? new Date(data.startsAt.getTime() + data.durationDays * 86_400_000);
   if (endsAt <= data.startsAt) return { error: "Membership end date must be after its start date" } as const;
-  return { customer, plan, endsAt } as const;
+  return { customer, endsAt } as const;
 }
 
 serviceCenterRouter.post("/memberships", async (req, res) => {
@@ -139,10 +142,10 @@ serviceCenterRouter.post("/memberships", async (req, res) => {
   const resolved = await resolveMembership(tid, parsed.data);
   if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
   const membership = await prisma.membership.create({
-    data: { tenantId: tid, customerId: parsed.data.customerId, planId: parsed.data.planId, startsAt: parsed.data.startsAt, endsAt: resolved.endsAt, status: parsed.data.status },
+    data: { tenantId: tid, ...parsed.data, endsAt: resolved.endsAt },
     include: membershipInclude,
   });
-  res.status(201).json({ membership });
+  res.status(201).json({ membership: withPlanSnapshot(membership) });
 });
 
 serviceCenterRouter.patch("/memberships/:id", async (req, res) => {
@@ -159,7 +162,7 @@ serviceCenterRouter.patch("/memberships/:id", async (req, res) => {
     data: { ...parsed.data, endsAt: resolved.endsAt },
     include: membershipInclude,
   });
-  res.json({ membership });
+  res.json({ membership: withPlanSnapshot(membership) });
 });
 
 serviceCenterRouter.delete("/memberships/:id", async (req, res) => {
@@ -170,60 +173,8 @@ serviceCenterRouter.delete("/memberships/:id", async (req, res) => {
 
 serviceCenterRouter.get("/membership-options", async (req, res) => {
   const tid = tenantId(req);
-  const [customers, plans] = await Promise.all([
-    prisma.customer.findMany({ where: { tenantId: tid }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
-    prisma.membershipPlan.findMany({ where: { tenantId: tid }, orderBy: { name: "asc" } }),
-  ]);
-  res.json({ customers, plans });
-});
-
-serviceCenterRouter.get("/membership-plans", async (req, res) => {
-  const tid = tenantId(req);
-  const membershipPlans = await prisma.membershipPlan.findMany({
-    where: { tenantId: tid },
-    include: { memberships: { select: { id: true, status: true, payments: { select: { amount: true, status: true } }, _count: { select: { appointments: true } } } } },
-    orderBy: [{ isActive: "desc" }, { price: "asc" }],
-  });
-  res.json({ membershipPlans });
-});
-
-serviceCenterRouter.get("/membership-plans/:id", async (req, res) => {
-  const membershipPlan = await prisma.membershipPlan.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include: { memberships: { include: { customer: true, payments: true } } } });
-  if (!membershipPlan) { res.status(404).json({ error: "Membership plan not found" }); return; }
-  res.json({ membershipPlan });
-});
-
-serviceCenterRouter.post("/membership-plans", async (req, res) => {
-  const parsed = membershipPlanSchema.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: "Invalid membership plan", details: parsed.error.flatten() }); return; }
-  const tid = tenantId(req);
-  const duplicate = await prisma.membershipPlan.findFirst({ where: { tenantId: tid, name: { equals: parsed.data.name, mode: "insensitive" } } });
-  if (duplicate) { res.status(409).json({ error: "A membership plan with this name already exists" }); return; }
-  const membershipPlan = await prisma.membershipPlan.create({ data: { tenantId: tid, ...parsed.data }, include: { memberships: true } });
-  res.status(201).json({ membershipPlan });
-});
-
-serviceCenterRouter.patch("/membership-plans/:id", async (req, res) => {
-  const tid = tenantId(req);
-  const current = await prisma.membershipPlan.findFirst({ where: { id: req.params.id, tenantId: tid } });
-  if (!current) { res.status(404).json({ error: "Membership plan not found" }); return; }
-  const parsed = membershipPlanSchema.partial().safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: "Invalid membership plan", details: parsed.error.flatten() }); return; }
-  if (parsed.data.name) {
-    const duplicate = await prisma.membershipPlan.findFirst({ where: { tenantId: tid, name: { equals: parsed.data.name, mode: "insensitive" }, id: { not: current.id } } });
-    if (duplicate) { res.status(409).json({ error: "A membership plan with this name already exists" }); return; }
-  }
-  const membershipPlan = await prisma.membershipPlan.update({ where: { id: current.id }, data: parsed.data });
-  res.json({ membershipPlan });
-});
-
-serviceCenterRouter.delete("/membership-plans/:id", async (req, res) => {
-  const tid = tenantId(req);
-  const current = await prisma.membershipPlan.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { _count: { select: { memberships: true } } } });
-  if (!current) { res.status(404).json({ error: "Membership plan not found" }); return; }
-  if (current._count.memberships) { res.status(409).json({ error: "This plan has customer memberships. Deactivate it instead of deleting it." }); return; }
-  await prisma.membershipPlan.delete({ where: { id: current.id } });
-  res.status(204).send();
+  const customers = await prisma.customer.findMany({ where: { tenantId: tid }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] });
+  res.json({ customers });
 });
 
 const membershipPaymentInclude = {
@@ -231,27 +182,30 @@ const membershipPaymentInclude = {
   membership: {
     include: {
       customer: true,
-      plan: true,
       appointments: { include: { service: true, provider: true }, orderBy: { startsAt: "desc" as const } },
     },
   },
 } as const;
 
+function withPaymentMembershipPlan<T extends { membership: { id: string; planName: string; planPrice: unknown; durationDays: number; discountPercent: unknown } }>(payment: T) {
+  return { ...payment, membership: withPlanSnapshot(payment.membership) };
+}
+
 serviceCenterRouter.get("/membership-payments", async (req, res) => {
   const tid = tenantId(req);
   const membershipPayments = await prisma.membershipPayment.findMany({ where: { tenantId: tid }, include: membershipPaymentInclude, orderBy: { createdAt: "desc" } });
-  res.json({ membershipPayments });
+  res.json({ membershipPayments: membershipPayments.map(withPaymentMembershipPlan) });
 });
 
 serviceCenterRouter.get("/membership-payments/:id", async (req, res) => {
   const membershipPayment = await prisma.membershipPayment.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include: membershipPaymentInclude });
   if (!membershipPayment) { res.status(404).json({ error: "Membership payment not found" }); return; }
-  res.json({ membershipPayment });
+  res.json({ membershipPayment: withPaymentMembershipPlan(membershipPayment) });
 });
 
 async function resolveMembershipPayment(tid: string, membershipId: string, paymentMethodId: string) {
   const [membership, paymentMethod] = await Promise.all([
-    prisma.membership.findFirst({ where: { id: membershipId, tenantId: tid }, include: { plan: true, customer: true } }),
+    prisma.membership.findFirst({ where: { id: membershipId, tenantId: tid }, include: { customer: true } }),
     prisma.paymentMethod.findFirst({ where: { id: paymentMethodId, tenantId: tid } }),
   ]);
   if (!membership) return { error: "Choose a valid customer membership" } as const;
@@ -267,7 +221,7 @@ serviceCenterRouter.post("/membership-payments", async (req, res) => {
   if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
   const paidAt = parsed.data.status === "PAID" ? (parsed.data.paidAt ?? new Date()) : parsed.data.paidAt;
   const membershipPayment = await prisma.membershipPayment.create({ data: { tenantId: tid, ...parsed.data, paidAt }, include: membershipPaymentInclude });
-  res.status(201).json({ membershipPayment });
+  res.status(201).json({ membershipPayment: withPaymentMembershipPlan(membershipPayment) });
 });
 
 serviceCenterRouter.patch("/membership-payments/:id", async (req, res) => {
@@ -283,7 +237,7 @@ serviceCenterRouter.patch("/membership-payments/:id", async (req, res) => {
   const nextStatus = parsed.data.status ?? current.status;
   const paidAt = parsed.data.paidAt !== undefined ? parsed.data.paidAt : nextStatus === "PAID" && !current.paidAt ? new Date() : current.paidAt;
   const membershipPayment = await prisma.membershipPayment.update({ where: { id: current.id }, data: { ...parsed.data, paidAt }, include: membershipPaymentInclude });
-  res.json({ membershipPayment });
+  res.json({ membershipPayment: withPaymentMembershipPlan(membershipPayment) });
 });
 
 serviceCenterRouter.delete("/membership-payments/:id", async (req, res) => {
@@ -295,16 +249,15 @@ serviceCenterRouter.delete("/membership-payments/:id", async (req, res) => {
 serviceCenterRouter.get("/membership-payment-options", async (req, res) => {
   const tid = tenantId(req);
   const [memberships, paymentMethods] = await Promise.all([
-    prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: true, plan: true, appointments: { select: { id: true, startsAt: true, service: { select: { name: true } } } } }, orderBy: { createdAt: "desc" } }),
+    prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: true, appointments: { select: { id: true, startsAt: true, service: { select: { name: true } } } } }, orderBy: { createdAt: "desc" } }),
     prisma.paymentMethod.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
   ]);
-  res.json({ memberships, paymentMethods });
+  res.json({ memberships: memberships.map(withPlanSnapshot), paymentMethods });
 });
 
 const providerInclude = {
-  schedules: { orderBy: { startsAt: "asc" as const } },
   appointments: { include: { customer: true, service: true }, orderBy: { startsAt: "desc" as const }, take: 20 },
-  _count: { select: { schedules: true, appointments: true } },
+  _count: { select: { appointments: true } },
 } as const;
 
 serviceCenterRouter.get("/providers", async (req, res) => {
@@ -349,62 +302,6 @@ serviceCenterRouter.delete("/providers/:id", async (req, res) => {
   if (current._count.appointments) { res.status(409).json({ error: "This provider has appointment history. Deactivate them instead of deleting them." }); return; }
   await prisma.serviceProvider.delete({ where: { id: current.id } });
   res.status(204).send();
-});
-
-serviceCenterRouter.get("/schedules", async (req, res) => {
-  const tid = tenantId(req);
-  const [schedules, appointments] = await Promise.all([
-    prisma.providerSchedule.findMany({ where: { tenantId: tid }, include: { provider: true }, orderBy: { startsAt: "asc" } }),
-    prisma.appointment.findMany({ where: { tenantId: tid }, include: { customer: true, service: true, provider: true, membership: { include: { plan: true } } }, orderBy: { startsAt: "asc" } }),
-  ]);
-  res.json({ schedules, appointments });
-});
-
-async function resolveSchedule(tid: string, data: z.infer<typeof scheduleSchema>, excludeId?: string) {
-  if (data.endsAt <= data.startsAt) return { error: "Schedule end time must be after its start time" } as const;
-  const provider = await prisma.serviceProvider.findFirst({ where: { id: data.providerId, tenantId: tid } });
-  if (!provider) return { error: "Choose a valid provider" } as const;
-  const overlap = await prisma.providerSchedule.findFirst({ where: { tenantId: tid, providerId: data.providerId, startsAt: { lt: data.endsAt }, endsAt: { gt: data.startsAt }, ...(excludeId ? { id: { not: excludeId } } : {}) } });
-  if (overlap) return { error: `${provider.name} already has an overlapping schedule` } as const;
-  return { provider } as const;
-}
-
-serviceCenterRouter.post("/schedules", async (req, res) => {
-  const parsed = scheduleSchema.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: "Invalid schedule", details: parsed.error.flatten() }); return; }
-  const tid = tenantId(req);
-  const resolved = await resolveSchedule(tid, parsed.data);
-  if ("error" in resolved) { res.status(409).json({ error: resolved.error }); return; }
-  const schedule = await prisma.providerSchedule.create({ data: { tenantId: tid, ...parsed.data }, include: { provider: true } });
-  res.status(201).json({ schedule });
-});
-
-serviceCenterRouter.patch("/schedules/:id", async (req, res) => {
-  const tid = tenantId(req);
-  const current = await prisma.providerSchedule.findFirst({ where: { id: req.params.id, tenantId: tid } });
-  if (!current) { res.status(404).json({ error: "Schedule not found" }); return; }
-  const parsed = scheduleSchema.partial().safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: "Invalid schedule", details: parsed.error.flatten() }); return; }
-  const merged = scheduleSchema.parse({ ...current, ...parsed.data });
-  const resolved = await resolveSchedule(tid, merged, current.id);
-  if ("error" in resolved) { res.status(409).json({ error: resolved.error }); return; }
-  const schedule = await prisma.providerSchedule.update({ where: { id: current.id }, data: parsed.data, include: { provider: true } });
-  res.json({ schedule });
-});
-
-serviceCenterRouter.delete("/schedules/:id", async (req, res) => {
-  const tid = tenantId(req);
-  const current = await prisma.providerSchedule.findFirst({ where: { id: req.params.id, tenantId: tid } });
-  if (!current) { res.status(404).json({ error: "Schedule not found" }); return; }
-  const bookings = await prisma.appointment.count({ where: { tenantId: tid, providerId: current.providerId, status: { notIn: ["CANCELLED", "NO_SHOW"] }, startsAt: { lt: current.endsAt }, endsAt: { gt: current.startsAt } } });
-  if (bookings) { res.status(409).json({ error: "This schedule contains customer appointments. Move or cancel them before deleting it." }); return; }
-  await prisma.providerSchedule.delete({ where: { id: current.id } });
-  res.status(204).send();
-});
-
-serviceCenterRouter.get("/schedule-options", async (req, res) => {
-  const providers = await prisma.serviceProvider.findMany({ where: { tenantId: tenantId(req), isActive: true }, orderBy: { name: "asc" } });
-  res.json({ providers });
 });
 
 serviceCenterRouter.get("/payment-methods", async (req, res) => {
@@ -466,13 +363,13 @@ serviceCenterRouter.get("/appointments", async (req, res) => {
   const tid = tenantId(req);
   const appointments = await prisma.appointment.findMany({ where: { tenantId: tid }, include, orderBy: { startsAt: "asc" } });
   const now = new Date();
-  res.json({ appointments, summary: { total: appointments.length, today: appointments.filter((item) => item.startsAt.toDateString() === now.toDateString() && !["CANCELLED", "NO_SHOW"].includes(item.status)).length, upcoming: appointments.filter((item) => item.startsAt > now && !["CANCELLED", "NO_SHOW"].includes(item.status)).length, completed: appointments.filter((item) => item.status === "COMPLETED").length } });
+  res.json({ appointments: appointments.map(withAppointmentMembershipPlan), summary: { total: appointments.length, today: appointments.filter((item) => item.startsAt.toDateString() === now.toDateString() && !["CANCELLED", "NO_SHOW"].includes(item.status)).length, upcoming: appointments.filter((item) => item.startsAt > now && !["CANCELLED", "NO_SHOW"].includes(item.status)).length, completed: appointments.filter((item) => item.status === "COMPLETED").length } });
 });
 
 serviceCenterRouter.get("/appointments/:id", async (req, res) => {
   const appointment = await prisma.appointment.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include });
   if (!appointment) { res.status(404).json({ error: "Appointment not found" }); return; }
-  res.json({ appointment });
+  res.json({ appointment: withAppointmentMembershipPlan(appointment) });
 });
 
 async function resolveAppointment(tid: string, data: z.infer<typeof appointmentSchema>, excludeId?: string) {
@@ -480,7 +377,7 @@ async function resolveAppointment(tid: string, data: z.infer<typeof appointmentS
     prisma.customer.findFirst({ where: { id: data.customerId, tenantId: tid } }),
     prisma.service.findFirst({ where: { id: data.serviceId, tenantId: tid, isActive: true }, include: { variants: { where: { isActive: true } }, locations: { select: { id: true } } } }),
     prisma.serviceProvider.findFirst({ where: { id: data.providerId, tenantId: tid, isActive: true } }),
-    data.membershipId ? prisma.membership.findFirst({ where: { id: data.membershipId, tenantId: tid, customerId: data.customerId, status: "ACTIVE", startsAt: { lte: data.startsAt }, endsAt: { gte: data.startsAt } }, include: { plan: true } }) : null,
+    data.membershipId ? prisma.membership.findFirst({ where: { id: data.membershipId, tenantId: tid, customerId: data.customerId, status: "ACTIVE", startsAt: { lte: data.startsAt }, endsAt: { gte: data.startsAt } } }) : null,
     data.paymentMethodId ? prisma.paymentMethod.findFirst({ where: { id: data.paymentMethodId, tenantId: tid, isActive: true } }) : null,
   ]);
   if (!customer || !service || !provider) return { error: "Choose a valid customer, service, and provider" } as const;
@@ -497,12 +394,10 @@ async function resolveAppointment(tid: string, data: z.infer<typeof appointmentS
   const durationMinutes = variant?.durationMinutes ?? service.durationMinutes;
   if (!durationMinutes) return { error: `"${service.name}" has no duration set — add one under Services before booking it` } as const;
   const endsAt = new Date(data.startsAt.getTime() + durationMinutes * 60_000);
-  const schedule = await prisma.providerSchedule.findFirst({ where: { tenantId: tid, providerId: provider.id, isAvailable: true, startsAt: { lte: data.startsAt }, endsAt: { gte: endsAt } } });
-  if (!schedule) return { error: `${provider.name} is not scheduled for this time` } as const;
   const conflict = await prisma.appointment.findFirst({ where: { tenantId: tid, providerId: provider.id, status: { notIn: ["CANCELLED", "NO_SHOW"] }, startsAt: { lt: endsAt }, endsAt: { gt: data.startsAt }, ...(excludeId ? { id: { not: excludeId } } : {}) } });
   if (conflict) return { error: `${provider.name} already has an appointment during this time` } as const;
   const listPrice = Number(variant?.price ?? service.price);
-  const discount = membership ? Number(membership.plan.discountPercent) : 0;
+  const discount = membership ? Number(membership.discountPercent) : 0;
   // An estimate shown while booking - the real charged amount is fixed at completion (lib/serviceSale.ts),
   // since prices (and which membership is active) can move between booking and the appointment happening.
   return { customer, service, variant, provider, membership, paymentMethod, endsAt, amount: round2(listPrice * (1 - discount / 100)) } as const;
@@ -515,7 +410,7 @@ serviceCenterRouter.post("/appointments", async (req, res) => {
   const resolved = await resolveAppointment(tid, parsed.data);
   if ("error" in resolved) { res.status(409).json({ error: resolved.error }); return; }
   const appointment = await prisma.appointment.create({ data: { tenantId: tid, ...parsed.data, membershipId: resolved.membership?.id, paymentMethodId: resolved.paymentMethod?.id, endsAt: resolved.endsAt, amount: resolved.amount }, include });
-  res.status(201).json({ appointment });
+  res.status(201).json({ appointment: withAppointmentMembershipPlan(appointment) });
 });
 
 serviceCenterRouter.patch("/appointments/:id", async (req, res) => {
@@ -528,7 +423,7 @@ serviceCenterRouter.patch("/appointments/:id", async (req, res) => {
   const resolved = await resolveAppointment(current.tenantId, merged, current.id);
   if ("error" in resolved) { res.status(409).json({ error: resolved.error }); return; }
   const appointment = await prisma.appointment.update({ where: { id: current.id }, data: { ...parsed.data, membershipId: resolved.membership?.id, paymentMethodId: resolved.paymentMethod?.id, endsAt: resolved.endsAt, amount: resolved.amount }, include });
-  res.json({ appointment });
+  res.json({ appointment: withAppointmentMembershipPlan(appointment) });
 });
 
 serviceCenterRouter.delete("/appointments/:id", async (req, res) => {
@@ -550,7 +445,7 @@ serviceCenterRouter.post("/appointments/:id/complete", async (req, res) => {
   const tid = tenantId(req);
   const appt = await prisma.appointment.findFirst({
     where: { id: req.params.id, tenantId: tid },
-    include: { service: true, serviceVariant: true, membership: { include: { plan: true } } },
+    include: { service: true, serviceVariant: true, membership: true },
   });
   if (!appt) { res.status(404).json({ error: "Appointment not found" }); return; }
   if (appt.orderId) { res.status(409).json({ error: "This appointment has already been completed" }); return; }
@@ -559,14 +454,14 @@ serviceCenterRouter.post("/appointments/:id/complete", async (req, res) => {
     const tax = await taxSettingsFor(tid);
     const fallbackTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
     const listPrice = Number(appt.serviceVariant?.price ?? appt.service.price);
-    const discountPercent = appt.membership ? Number(appt.membership.plan.discountPercent) : 0;
+    const discountPercent = appt.membership ? Number(appt.membership.discountPercent) : 0;
     const overridePrice = discountPercent > 0 ? round2(listPrice * (1 - discountPercent / 100)) : undefined;
     const order = await prisma.$transaction(async (tx) => {
       const itemsCreate = await resolveServiceLines(
         tx, tid,
         [{
           serviceId: appt.serviceId, variantId: appt.serviceVariantId ?? undefined, quantity: 1, addons: [],
-          ...(overridePrice !== undefined ? { unitPrice: overridePrice, overrideReason: `Membership: ${appt.membership!.plan.name} (${discountPercent}% off)` } : {}),
+          ...(overridePrice !== undefined ? { unitPrice: overridePrice, overrideReason: `Membership: ${appt.membership!.planName} (${discountPercent}% off)` } : {}),
         }],
         appt.locationId, req.userId, fallbackTax,
       );
@@ -589,7 +484,8 @@ serviceCenterRouter.post("/appointments/:id/complete", async (req, res) => {
       await tx.appointment.update({ where: { id: appt.id }, data: { status: "COMPLETED", orderId: created.id, amount: created.items[0]!.unitPrice } });
       return created;
     });
-    res.status(200).json({ order: withFinancials(order, tax), appointment: await prisma.appointment.findUniqueOrThrow({ where: { id: appt.id }, include }) });
+    const appointment = await prisma.appointment.findUniqueOrThrow({ where: { id: appt.id }, include });
+    res.status(200).json({ order: withFinancials(order, tax), appointment: withAppointmentMembershipPlan(appointment) });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
@@ -599,15 +495,14 @@ serviceCenterRouter.post("/appointments/:id/complete", async (req, res) => {
 
 serviceCenterRouter.get("/appointment-options", async (req, res) => {
   const tid = tenantId(req);
-  const [customers, services, providers, schedules, memberships, paymentMethods, membershipPayments, locations] = await Promise.all([
+  const [customers, services, providers, memberships, paymentMethods, membershipPayments, locations] = await Promise.all([
     prisma.customer.findMany({ where: { tenantId: tid }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
     prisma.service.findMany({ where: { tenantId: tid, isActive: true }, include: { variants: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] }, locations: { select: { id: true } } }, orderBy: { name: "asc" } }),
     prisma.serviceProvider.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
-    prisma.providerSchedule.findMany({ where: { tenantId: tid, isAvailable: true, endsAt: { gte: new Date() } }, include: { provider: true }, orderBy: { startsAt: "asc" } }),
-    prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: true, plan: true }, orderBy: { endsAt: "desc" } }),
+    prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: true }, orderBy: { endsAt: "desc" } }),
     prisma.paymentMethod.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
-    prisma.membershipPayment.findMany({ where: { tenantId: tid }, include: { membership: { include: { customer: true, plan: true } }, paymentMethod: true }, orderBy: { createdAt: "desc" }, take: 100 }),
+    prisma.membershipPayment.findMany({ where: { tenantId: tid }, include: { membership: { include: { customer: true } }, paymentMethod: true }, orderBy: { createdAt: "desc" }, take: 100 }),
     prisma.location.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
   ]);
-  res.json({ customers, services, providers, schedules, memberships, paymentMethods, membershipPayments, locations });
+  res.json({ customers, services, providers, memberships: memberships.map(withPlanSnapshot), paymentMethods, membershipPayments: membershipPayments.map(withPaymentMembershipPlan), locations });
 });

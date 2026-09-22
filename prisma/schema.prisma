@@ -433,8 +433,6 @@ model Tenant {
   supplierPayments       SupplierPayment[]
   supplierBalanceEntries SupplierBalanceEntry[]
   serviceProviders       ServiceProvider[]
-  providerSchedules      ProviderSchedule[]
-  membershipPlans        MembershipPlan[]
   memberships            Membership[]
   membershipPayments     MembershipPayment[]
   appointments           Appointment[]
@@ -3138,50 +3136,19 @@ model ServiceProvider {
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
   tenant       Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  schedules    ProviderSchedule[]
   appointments Appointment[]
 
   @@index([tenantId, isActive])
-}
-
-model ProviderSchedule {
-  id          String          @id @default(cuid())
-  tenantId    String
-  providerId  String
-  startsAt    DateTime
-  endsAt      DateTime
-  isAvailable Boolean         @default(true)
-  notes       String?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  provider    ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
-
-  @@index([tenantId, providerId, startsAt])
-}
-
-model MembershipPlan {
-  id              String       @id @default(cuid())
-  tenantId        String
-  name            String
-  description     String?
-  price           Decimal      @db.Decimal(12, 2)
-  durationDays    Int
-  discountPercent Decimal      @default(0) @db.Decimal(5, 2)
-  isActive        Boolean      @default(true)
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
-  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  memberships     Membership[]
-
-  @@unique([tenantId, name])
 }
 
 model Membership {
   id           String              @id @default(cuid())
   tenantId     String
   customerId   String
-  planId       String
+  planName     String
+  planPrice    Decimal             @default(0) @db.Decimal(12, 2)
+  durationDays Int                 @default(30)
+  discountPercent Decimal          @default(0) @db.Decimal(5, 2)
   startsAt     DateTime
   endsAt       DateTime
   status       MembershipStatus    @default(ACTIVE)
@@ -3189,7 +3156,6 @@ model Membership {
   updatedAt    DateTime            @updatedAt
   tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   customer     Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  plan         MembershipPlan      @relation(fields: [planId], references: [id], onDelete: Restrict)
   payments     MembershipPayment[]
   appointments Appointment[]
 
