@@ -352,6 +352,49 @@ enum TaxTreatment {
   EXEMPT
 }
 
+enum CommercialDocumentType {
+  QUOTATION
+  INVOICE
+}
+
+enum CommercialDocumentStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+  CONVERTED
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  VOID
+}
+
+enum CommercialDocumentSource {
+  MANUAL
+  QUOTATION
+  HOTEL_STAY
+  SERVICE_SALE
+  RESTAURANT_ORDER
+}
+
+enum CommercialDocumentLineSource {
+  CUSTOM
+  ROOM
+  ROOM_STAY
+  FOLIO
+  SERVICE
+  SERVICE_MEMBERSHIP
+  POS_ORDER
+}
+
+enum CommercialDocumentPaymentKind {
+  DEPOSIT
+  PAYMENT
+}
+
 model Tenant {
   id        String   @id @default(cuid())
   name      String
@@ -446,6 +489,9 @@ model Tenant {
   menuLedgerEntries      MenuLedgerEntry[]
   reservationGroups      ReservationGroup[]
   serviceVariants        ServiceVariant[]
+  commercialDocuments    CommercialDocument[]
+  commercialDocumentLines CommercialDocumentLine[]
+  commercialDocumentPayments CommercialDocumentPayment[]
 }
 
 enum CustomerType {
@@ -555,6 +601,7 @@ model Customer {
   location          Location?             @relation(fields: [locationId], references: [id], onDelete: SetNull)
   memberships       Membership[]
   appointments      Appointment[]
+  commercialDocuments CommercialDocument[]
 
   @@unique([tenantId, customerNo])
   @@index([tenantId, lastName, firstName])
@@ -1246,6 +1293,7 @@ model PaymentMethod {
   membershipPayments MembershipPayment[]
   appointments       Appointment[]
   supplierPayments   SupplierPayment[]
+  commercialDocumentPayments CommercialDocumentPayment[]
 
   @@unique([tenantId, code])
   @@unique([tenantId, name])
@@ -1269,6 +1317,7 @@ enum TransactionSource {
   ASSET_PURCHASE
   SUPPLIER_PAYMENT
   SALARY_PAYMENT
+  COMMERCIAL_DOCUMENT_PAYMENT
 }
 
 // A single, unified ledger of every payment actually made across the
@@ -1298,9 +1347,111 @@ model Transaction {
   description     String?
   sourceRefId     String?
   createdAt       DateTime             @default(now())
+  commercialDocumentPayments CommercialDocumentPayment[]
 
   @@unique([tenantId, transactionNo])
   @@index([tenantId, createdAt])
+  @@index([tenantId, paymentMethodId])
+}
+
+model CommercialDocument {
+  id                 String                      @id @default(cuid())
+  tenantId           String
+  documentNo         String
+  type               CommercialDocumentType
+  status             CommercialDocumentStatus    @default(DRAFT)
+  source             CommercialDocumentSource    @default(MANUAL)
+  sourceRefId        String?
+  sourceDocumentId   String?
+  customerId         String?
+  prospectName       String?
+  prospectPhone      String?
+  prospectEmail      String?
+  prospectAddress    String?                     @db.Text
+  locationId         String?
+  title              String?
+  intro              String?                     @db.Text
+  headerText         String?                     @db.Text
+  footerText         String?                     @db.Text
+  issuedAt           DateTime?
+  acceptedAt         DateTime?
+  expiresAt          DateTime?
+  dueAt              DateTime?
+  subtotal           Decimal                     @default(0) @db.Decimal(12, 2)
+  discount           Decimal                     @default(0) @db.Decimal(12, 2)
+  net                Decimal                     @default(0) @db.Decimal(12, 2)
+  taxAmount          Decimal                     @default(0) @db.Decimal(12, 2)
+  total              Decimal                     @default(0) @db.Decimal(12, 2)
+  paidAmount         Decimal                     @default(0) @db.Decimal(12, 2)
+  balance            Decimal                     @default(0) @db.Decimal(12, 2)
+  depositRequired    Decimal                     @default(0) @db.Decimal(12, 2)
+  createdBy          String?
+  updatedBy          String?
+  createdAt          DateTime                    @default(now())
+  updatedAt          DateTime                    @updatedAt
+  tenant             Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer           Customer?                   @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  location           Location?                   @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  sourceDocument     CommercialDocument?         @relation("DocumentConversion", fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+  convertedDocuments CommercialDocument[]        @relation("DocumentConversion")
+  lines              CommercialDocumentLine[]
+  payments           CommercialDocumentPayment[]
+
+  @@unique([tenantId, documentNo])
+  @@index([tenantId, type, status])
+  @@index([tenantId, customerId])
+  @@index([tenantId, locationId])
+  @@index([tenantId, dueAt])
+}
+
+model CommercialDocumentLine {
+  id           String                       @id @default(cuid())
+  tenantId     String
+  documentId   String
+  source       CommercialDocumentLineSource @default(CUSTOM)
+  sourceRefId  String?
+  description  String                       @db.Text
+  details      String?                      @db.Text
+  quantity     Decimal                      @default(1) @db.Decimal(12, 3)
+  unitLabel    String?
+  unitPrice    Decimal                      @db.Decimal(12, 2)
+  discount     Decimal                      @default(0) @db.Decimal(12, 2)
+  taxRate      Decimal                      @default(16) @db.Decimal(5, 2)
+  taxMode      TaxMode                      @default(INCLUSIVE)
+  taxTreatment TaxTreatment                 @default(STANDARD)
+  lineSubtotal Decimal                      @default(0) @db.Decimal(12, 2)
+  netAmount    Decimal                      @default(0) @db.Decimal(12, 2)
+  taxAmount    Decimal                      @default(0) @db.Decimal(12, 2)
+  lineTotal    Decimal                      @default(0) @db.Decimal(12, 2)
+  sortOrder    Int                          @default(0)
+  createdAt    DateTime                     @default(now())
+  tenant       Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document     CommercialDocument           @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, documentId])
+}
+
+model CommercialDocumentPayment {
+  id              String                        @id @default(cuid())
+  tenantId        String
+  documentId      String
+  paymentNo       String
+  kind            CommercialDocumentPaymentKind @default(PAYMENT)
+  paymentMethodId String
+  amount          Decimal                       @db.Decimal(12, 2)
+  reference       String?
+  note            String?                       @db.Text
+  paidAt          DateTime                      @default(now())
+  createdBy       String?
+  createdAt       DateTime                      @default(now())
+  transactionId   String?
+  tenant          Tenant                        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document        CommercialDocument            @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  paymentMethod   PaymentMethod                 @relation(fields: [paymentMethodId], references: [id], onDelete: Restrict)
+  transaction     Transaction?                  @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, paymentNo])
+  @@index([tenantId, documentId])
   @@index([tenantId, paymentMethodId])
 }
 
@@ -2125,6 +2276,7 @@ model Location {
   dispatchRequestsTo     StockDispatchRequest[] @relation("DispatchTo")
   printJobs              PrintJob[]
   appointments           Appointment[]
+  commercialDocuments    CommercialDocument[]
 
   @@unique([tenantId, name])
 }
