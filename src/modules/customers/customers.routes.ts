@@ -165,7 +165,12 @@ customersRouter.patch("/:id", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid customer", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
-    const updated = await prisma.customer.updateMany({ where: { id: req.params.id, tenantId: tid }, data: { ...data.data, updatedBy: req.userId } });
+    // A business record has no personal surname — if the form just flipped
+    // this customer to BUSINESS, drop any lastName left over from before so
+    // it can't linger and show up next to the business name everywhere the
+    // app renders "firstName lastName".
+    const clearLastName = data.data.customerType === "BUSINESS" ? { lastName: null } : {};
+    const updated = await prisma.customer.updateMany({ where: { id: req.params.id, tenantId: tid }, data: { ...data.data, ...clearLastName, updatedBy: req.userId } });
     if (!updated.count) { res.status(404).json({ error: "Customer not found" }); return; }
     const customer = await prisma.customer.findUniqueOrThrow({ where: { id: req.params.id }, include: auditInclude });
     res.json({ customer });
