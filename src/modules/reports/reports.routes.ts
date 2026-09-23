@@ -286,7 +286,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       appointmentsPaid, membershipPayments, expenses, goodsReceiptItems,
       cancelledPurchases, supplierPayments, debtorCustomers, openFolios,
       creditorSuppliers, employeesForBranch, creditEntries, trendCreditEntries,
-      roomRevenueLines,
+      roomRevenueFolios,
     ] = await Promise.all([
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
@@ -335,13 +335,19 @@ reportsRouter.get("/sales", async (req, res, next) => {
       prisma.folioLineItem.findMany({
         where: {
           tenantId: tid,
-          source: { in: ["ROOM", "DISCOUNT"] },
+          source: "ROOM",
           createdAt: { gte: start, lte: end },
           folio: { reservation: { status: { notIn: ["CANCELLED", "NO_SHOW"] }, ...(locationId ? { locationId } : {}) } },
         },
-        select: { folioId: true, source: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true },
+        distinct: ["folioId"],
+        select: { folioId: true },
       }),
     ]);
+    const roomRevenueFolioIds = roomRevenueFolios.map((f) => f.folioId);
+    const roomRevenueLines = roomRevenueFolioIds.length ? await prisma.folioLineItem.findMany({
+      where: { tenantId: tid, folioId: { in: roomRevenueFolioIds }, source: { in: ["ROOM", "DISCOUNT"] } },
+      select: { folioId: true, source: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true },
+    }) : [];
 
     // ---- Total Revenue: cash actually received (Transaction ledger is the
     // single source of truth here — it already avoids double-counting a
@@ -701,7 +707,7 @@ reportsRouter.get("/rooms", async (req, res, next) => {
 
     const [
       rooms,
-      roomLines,
+      roomRevenueFolios,
       reservationsInRange,
       currentGuests,
       upcomingReservations,
@@ -715,25 +721,12 @@ reportsRouter.get("/rooms", async (req, res, next) => {
       prisma.folioLineItem.findMany({
         where: {
           tenantId: tid,
-          source: { in: ["ROOM", "DISCOUNT"] },
+          source: "ROOM",
           createdAt: { gte: start, lte: end },
           folio: { reservation: { status: { notIn: ["CANCELLED", "NO_SHOW"] }, ...(locationId ? { locationId } : {}) } },
         },
-        include: {
-          folio: {
-            select: {
-              reservation: {
-                select: {
-                  id: true,
-                  reservationNo: true,
-                  room: { select: { id: true, number: true, name: true, roomType: { select: { id: true, name: true } } } },
-                  customer: { select: { firstName: true, lastName: true } },
-                  location: { select: { id: true, name: true } },
-                },
-              },
-            },
-          },
-        },
+        distinct: ["folioId"],
+        select: { folioId: true },
       }),
       prisma.reservation.findMany({
         where: {
@@ -777,6 +770,25 @@ reportsRouter.get("/rooms", async (req, res, next) => {
         include: { paymentMethod: { select: { name: true } } },
       }),
     ]);
+    const roomRevenueFolioIds = roomRevenueFolios.map((f) => f.folioId);
+    const roomLines = roomRevenueFolioIds.length ? await prisma.folioLineItem.findMany({
+      where: { tenantId: tid, folioId: { in: roomRevenueFolioIds }, source: { in: ["ROOM", "DISCOUNT"] } },
+      include: {
+        folio: {
+          select: {
+            reservation: {
+              select: {
+                id: true,
+                reservationNo: true,
+                room: { select: { id: true, number: true, name: true, roomType: { select: { id: true, name: true } } } },
+                customer: { select: { firstName: true, lastName: true } },
+                location: { select: { id: true, name: true } },
+              },
+            },
+          },
+        },
+      },
+    }) : [];
 
     const lineTotal = (line: ReportTaxLine) => round2(folioLinesFinancials([line], tax).total);
     const roomBuckets = new Map<string, { roomId: string; roomNumber: string; roomName: string | null; roomType: string; stays: Set<string>; nights: number; revenue: number; discounts: number; lastGuest: string | null }>();
