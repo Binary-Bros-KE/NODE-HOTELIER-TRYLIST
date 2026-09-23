@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { randomBytes } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { verifySecret } from "../../lib/hash.js";
@@ -9,7 +10,7 @@ export const authRouter = Router();
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 const loginSchema = z.object({
-  employeeCode: z.string().trim().min(1),
+  employeeCode: z.string().trim().optional(),
   pin: z.string().trim().min(1),
 });
 
@@ -18,6 +19,7 @@ const locationsSelect = { select: { id: true, name: true } } as const;
 const defaultLocationSelect = { select: { id: true, name: true } } as const;
 const departmentSelect = { select: { id: true, name: true } } as const;
 const employeeInclude = { role: roleSelect, locations: locationsSelect, defaultLocation: defaultLocationSelect, department: departmentSelect } as const;
+type LoginEmployee = Prisma.EmployeeGetPayload<{ include: typeof employeeInclude }>;
 
 const tenantId = (req: { tenantId?: string }) => {
   if (!req.tenantId) throw new Error("Tenant context is required");
@@ -53,19 +55,29 @@ function publicEmployee(employee: {
 
 authRouter.post("/login", async (req, res, next) => {
   const data = loginSchema.safeParse(req.body);
-  if (!data.success) { res.status(400).json({ error: "Enter your employee code and PIN" }); return; }
+  if (!data.success) { res.status(400).json({ error: "Enter your PIN" }); return; }
   try {
-    const employee = await prisma.employee.findFirst({
-      where: { tenantId: tenantId(req), employeeCode: { equals: data.data.employeeCode, mode: "insensitive" } },
-      include: employeeInclude,
-    });
+    const tid = tenantId(req);
+    const employeeCode = data.data.employeeCode?.trim();
+    let employee: LoginEmployee | null = null;
+    if (employeeCode) {
+      employee = await prisma.employee.findFirst({
+        where: { tenantId: tid, employeeCode: { equals: employeeCode, mode: "insensitive" } },
+        include: employeeInclude,
+      });
+    } else {
+      const activeEmployees = await prisma.employee.findMany({ where: { tenantId: tid, status: "ACTIVE" }, include: employeeInclude });
+      const matches = activeEmployees.filter((candidate) => verifySecret(data.data.pin, candidate.pin));
+      if (matches.length > 1) { res.status(409).json({ error: "This PIN is shared. Use employee code login." }); return; }
+      employee = matches[0] ?? null;
+    }
     if (!employee || employee.status !== "ACTIVE" || !verifySecret(data.data.pin, employee.pin)) {
-      res.status(401).json({ error: "Incorrect employee code or PIN" });
+      res.status(401).json({ error: employeeCode ? "Incorrect employee code or PIN" : "Incorrect PIN" });
       return;
     }
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-    await prisma.session.create({ data: { token, employeeId: employee.id, tenantId: tenantId(req), expiresAt } });
+    await prisma.session.create({ data: { token, employeeId: employee.id, tenantId: tid, expiresAt } });
     res.json({ token, expiresAt, user: publicEmployee(employee) });
   } catch (error) {
     next(error);

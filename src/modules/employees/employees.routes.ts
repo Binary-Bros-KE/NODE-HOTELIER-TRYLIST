@@ -2,7 +2,7 @@ import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
-import { hashSecret } from "../../lib/hash.js";
+import { hashSecret, verifySecret } from "../../lib/hash.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 
@@ -153,6 +153,16 @@ async function assertDepartmentInTenant(departmentId: string | undefined, tenant
   if (!department) throw Object.assign(new Error("Selected department was not found"), { status: 400 });
 }
 
+async function assertPinUnique(pin: string, tenant: string, excludeEmployeeId?: string) {
+  const employees = await prisma.employee.findMany({
+    where: { tenantId: tenant, ...(excludeEmployeeId ? { id: { not: excludeEmployeeId } } : {}) },
+    select: { pin: true },
+  });
+  if (employees.some((employee) => verifySecret(pin, employee.pin))) {
+    throw Object.assign(new Error("This PIN is already used by another employee"), { status: 409 });
+  }
+}
+
 employeesRouter.get("/", async (req, res) => {
   const query = listSchema.safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid employee filters", details: query.error.flatten() }); return; }
@@ -195,6 +205,7 @@ employeesRouter.post("/", async (req, res, next) => {
     await assertRoleInTenant(roleId, tenantId(req));
     await assertLocationsInTenant(locationIds, tenantId(req));
     await assertDepartmentInTenant(employeeData.departmentId, tenantId(req));
+    await assertPinUnique(pin, tenantId(req));
     const employee = await prisma.employee.create({
       data: {
         tenantId: tenantId(req), ...employeeData,
@@ -222,6 +233,7 @@ employeesRouter.patch("/:id", async (req, res, next) => {
     if (roleId !== undefined) await assertRoleInTenant(roleId, tenantId(req));
     if (locationIds !== undefined) await assertLocationsInTenant(locationIds, tenantId(req));
     if (employeeData.departmentId !== undefined) await assertDepartmentInTenant(employeeData.departmentId, tenantId(req));
+    if (pin) await assertPinUnique(pin, tenantId(req), req.params.id);
     const existing = await prisma.employee.findFirst({
       where: { id: req.params.id, tenantId: tenantId(req) },
       select: { id: true, defaultLocationId: true, locations: { select: { id: true } } },
