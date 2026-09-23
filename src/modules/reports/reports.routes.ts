@@ -473,6 +473,16 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const roomSalesValue = round2([...linesByFolio(roomRevenueLines).values()].reduce((sum, lines) => sum + folioLinesFinancials(lines, tax).total, 0));
     const roomSalesCount = new Set(roomRevenueLines.filter((l) => l.source === "ROOM").map((l) => l.folioId)).size;
     const roomDiscountsGiven = round2(Math.abs(roomRevenueLines.filter((l) => l.source === "DISCOUNT").reduce((s, l) => s + Number(l.amount) * Number(l.quantity), 0)));
+    for (const lines of linesByFolio(roomRevenueLines).values()) {
+      const fin = folioLinesFinancials(lines, tax);
+      taxCollected += fin.taxAmount;
+      for (const line of fin.taxLines) {
+        const bucket = taxBuckets.get(line.key) ?? { ...line, net: 0, tax: 0, gross: 0 };
+        bucket.net += line.net; bucket.tax += line.tax; bucket.gross += line.gross;
+        taxBuckets.set(line.key, bucket);
+      }
+    }
+    taxCollected = round2(taxCollected);
 
     const soldItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).map((i) => ({ ...i, revenue: round2(i.revenue) }));
     const topItems = soldItems.slice(0, 10);
@@ -975,7 +985,7 @@ reportsRouter.get("/tax", async (req, res, next) => {
     const tid = tenantId(req);
     const { start, end } = resolveSalesRange(period, date, from, to, await businessDayStartHourFor(tid));
 
-    const [tax, orders] = await Promise.all([
+    const [tax, orders, roomRevenueFolios] = await Promise.all([
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
         where: { tenantId: tid, status: "COMPLETED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
@@ -991,7 +1001,32 @@ reportsRouter.get("/tax", async (req, res, next) => {
           },
         },
       }),
+      prisma.folioLineItem.findMany({
+        where: {
+          tenantId: tid,
+          source: "ROOM",
+          createdAt: { gte: start, lte: end },
+          folio: { reservation: { status: { notIn: ["CANCELLED", "NO_SHOW"] }, ...(locationId ? { locationId } : {}) } },
+        },
+        distinct: ["folioId"],
+        select: { folioId: true },
+      }),
     ]);
+    const roomRevenueFolioIds = roomRevenueFolios.map((f) => f.folioId);
+    const roomLines = roomRevenueFolioIds.length ? await prisma.folioLineItem.findMany({
+      where: { tenantId: tid, folioId: { in: roomRevenueFolioIds }, source: { in: ["ROOM", "DISCOUNT"] } },
+      include: {
+        folio: {
+          select: {
+            reservation: {
+              select: {
+                room: { select: { number: true, name: true, roomType: { select: { name: true } } } },
+              },
+            },
+          },
+        },
+      },
+    }) : [];
 
     const categories = new Map<string, {
       key: string;
@@ -1052,6 +1087,45 @@ reportsRouter.get("/tax", async (req, res, next) => {
       }
     }
 
+    for (const [folioId, lines] of linesByFolio(roomLines)) {
+      const financials = folioLinesFinancials(lines, tax);
+      net += financials.net;
+      taxAmount += financials.taxAmount;
+      gross += financials.total;
+      const reservation = lines[0].folio.reservation;
+      const room = reservation.room;
+      const name = `Room ${room.number}${room.name ? ` - ${room.name}` : ""}`;
+      const category = room.roomType.name;
+      const quantity = round2(lines.filter((line) => line.source === "ROOM").reduce((s, line) => s + Number(line.quantity), 0));
+
+      for (const line of financials.taxLines) {
+        const bucket = categories.get(line.key) ?? {
+          key: line.key,
+          label: line.label,
+          treatment: line.treatment,
+          rate: line.rate,
+          mode: line.mode,
+          lines: 0,
+          net: 0,
+          tax: 0,
+          gross: 0,
+          items: new Map(),
+        };
+        bucket.lines += 1;
+        bucket.net += line.net;
+        bucket.tax += line.tax;
+        bucket.gross += line.gross;
+        const itemKey = `${line.key}|room|${folioId}`;
+        const itemBucket = bucket.items.get(itemKey) ?? { itemId: folioId, name, sku: null, category, quantity: 0, net: 0, tax: 0, gross: 0 };
+        itemBucket.quantity += quantity;
+        itemBucket.net += line.net;
+        itemBucket.tax += line.tax;
+        itemBucket.gross += line.gross;
+        bucket.items.set(itemKey, itemBucket);
+        categories.set(line.key, bucket);
+      }
+    }
+
     const breakdown = [...categories.values()]
       .map((category) => ({
         key: category.key,
@@ -1072,7 +1146,7 @@ reportsRouter.get("/tax", async (req, res, next) => {
 
     res.json({
       range: { period, start: start.toISOString(), end: end.toISOString() },
-      summary: { net: round2(net), tax: round2(taxAmount), gross: round2(gross), orders: orders.length, lines: breakdown.reduce((sum, b) => sum + b.lines, 0) },
+      summary: { net: round2(net), tax: round2(taxAmount), gross: round2(gross), orders: orders.length + roomRevenueFolioIds.length, lines: breakdown.reduce((sum, b) => sum + b.lines, 0) },
       breakdown,
       topItems: breakdown
         .flatMap((b) => b.topItems.map((item) => ({ ...item, taxCategory: b.label })))
