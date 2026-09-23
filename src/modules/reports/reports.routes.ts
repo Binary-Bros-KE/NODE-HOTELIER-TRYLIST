@@ -121,6 +121,32 @@ function resolveSalesRange(period: "day" | "week" | "month" | "custom", dateStr:
 
 type Moneyish = Prisma.Decimal | number | null;
 
+type ReportTaxLine = {
+  amount: Prisma.Decimal | number;
+  quantity: Prisma.Decimal | number;
+  taxRate: Moneyish;
+  taxMode: "INCLUSIVE" | "EXCLUSIVE" | null;
+  taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT" | null;
+};
+
+function folioLinesFinancials(lines: ReportTaxLine[], tax: Awaited<ReturnType<typeof taxSettingsFor>>) {
+  return computeOrderFinancials({
+    discount: 0,
+    items: lines.map((line) => ({
+      quantity: Number(line.quantity),
+      unitPrice: line.amount,
+      addons: [],
+      taxRate: line.taxRate,
+      taxMode: line.taxMode,
+      taxTreatment: line.taxTreatment,
+    })),
+  }, tax);
+}
+
+function fullName(person: { firstName: string; lastName?: string | null }) {
+  return `${person.firstName} ${person.lastName ?? ""}`.trim();
+}
+
 /** Cost of one sold line (quantity already applied), checked in priority
  * order: a direct retail-product sale, then a variant's own bar/stock link,
  * then the menu item's recipe, then the menu item's own direct product link.
@@ -260,6 +286,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       appointmentsPaid, membershipPayments, expenses, goodsReceiptItems,
       cancelledPurchases, supplierPayments, debtorCustomers, openFolios,
       creditorSuppliers, employeesForBranch, creditEntries, trendCreditEntries,
+      roomRevenueLines,
     ] = await Promise.all([
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
@@ -304,6 +331,15 @@ reportsRouter.get("/sales", async (req, res, next) => {
       prisma.customerCreditEntry.findMany({
         where: { tenantId: tid, type: "CREDIT", createdAt: { gte: trendStart, lte: trendEnd }, OR: [{ order: { status: "COMPLETED", ...(locationId ? { locationId } : {}) } }, ...(locationId ? [] : [{ folioId: { not: null } }])] },
         select: { amount: true, createdAt: true },
+      }),
+      prisma.folioLineItem.findMany({
+        where: {
+          tenantId: tid,
+          source: { in: ["ROOM", "DISCOUNT"] },
+          createdAt: { gte: start, lte: end },
+          ...(locationId ? { folio: { reservation: { locationId } } } : {}),
+        },
+        select: { folioId: true, source: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true },
       }),
     ]);
 
@@ -422,6 +458,10 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // Credit given in the period (see creditEntries above).
     const creditGiven = creditSalesRevenue;
     const creditCount = new Set(creditEntries.map((e) => e.orderId ?? e.folioId)).size;
+    const roomSalesFinancials = folioLinesFinancials(roomRevenueLines, tax);
+    const roomSalesValue = round2(roomSalesFinancials.total);
+    const roomSalesCount = new Set(roomRevenueLines.filter((l) => l.source === "ROOM").map((l) => l.folioId)).size;
+    const roomDiscountsGiven = round2(Math.abs(roomRevenueLines.filter((l) => l.source === "DISCOUNT").reduce((s, l) => s + Number(l.amount) * Number(l.quantity), 0)));
 
     const soldItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).map((i) => ({ ...i, revenue: round2(i.revenue) }));
     const topItems = soldItems.slice(0, 10);
@@ -594,6 +634,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         taxCollected, discountsGiven,
         complimentaryValue, complimentaryCogs,
         creditGiven, creditCount, creditRepaymentsCash,
+        roomSalesValue, roomSalesCount, roomDiscountsGiven,
         completedSalesValue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
         serviceCenterExcludedByLocationFilter: !!locationId,
       },
@@ -635,6 +676,271 @@ reportsRouter.get("/sales", async (req, res, next) => {
 // Tax Report — VAT collected by treatment/rate, with the highest-taxed items
 // under each bucket. Uses the same line-level tax snapshots as receipts.
 // ============================================================================
+
+// ============================================================================
+// Rooms Report - room revenue, occupancy, live guests, and operational state.
+// ============================================================================
+
+function overlapDays(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date) {
+  const start = Math.max(aStart.getTime(), bStart.getTime());
+  const end = Math.min(aEnd.getTime(), bEnd.getTime());
+  return Math.max(0, (end - start) / (1000 * 60 * 60 * 24));
+}
+
+reportsRouter.get("/rooms", async (req, res, next) => {
+  try {
+    const query = salesQuerySchema.safeParse(req.query);
+    if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
+    const { period, date, from, to, locationId } = query.data;
+    const tid = tenantId(req);
+    const startHour = await businessDayStartHourFor(tid);
+    const { start, end } = resolveSalesRange(period, date, from, to, startHour);
+    const now = new Date();
+    const tax = await taxSettingsFor(tid);
+    const locationWhere = locationId ? { locationId } : {};
+
+    const [
+      rooms,
+      roomLines,
+      reservationsInRange,
+      currentGuests,
+      upcomingReservations,
+      roomPayments,
+    ] = await Promise.all([
+      prisma.room.findMany({
+        where: { tenantId: tid },
+        include: { roomType: { select: { id: true, name: true } } },
+        orderBy: { number: "asc" },
+      }),
+      prisma.folioLineItem.findMany({
+        where: {
+          tenantId: tid,
+          source: { in: ["ROOM", "DISCOUNT"] },
+          createdAt: { gte: start, lte: end },
+          ...(locationId ? { folio: { reservation: { locationId } } } : {}),
+        },
+        include: {
+          folio: {
+            select: {
+              reservation: {
+                select: {
+                  id: true,
+                  reservationNo: true,
+                  room: { select: { id: true, number: true, name: true, roomType: { select: { id: true, name: true } } } },
+                  customer: { select: { firstName: true, lastName: true } },
+                  location: { select: { id: true, name: true } },
+                },
+              },
+            },
+          },
+        },
+      }),
+      prisma.reservation.findMany({
+        where: {
+          tenantId: tid,
+          status: { notIn: ["CANCELLED", "NO_SHOW"] },
+          checkIn: { lte: end },
+          checkOut: { gte: start },
+          ...locationWhere,
+        },
+        select: {
+          id: true,
+          checkIn: true,
+          checkOut: true,
+          roomId: true,
+          room: { select: { id: true, number: true, name: true, roomType: { select: { id: true, name: true } } } },
+        },
+      }),
+      prisma.reservation.findMany({
+        where: { tenantId: tid, status: "CHECKED_IN", ...locationWhere },
+        include: {
+          customer: { select: { firstName: true, lastName: true, phone: true } },
+          room: { select: { id: true, number: true, name: true, roomType: { select: { id: true, name: true } } } },
+          location: { select: { id: true, name: true } },
+          folio: { include: { lineItems: true, payments: { include: { paymentMethod: { select: { name: true } } } } } },
+          _count: { select: { additionalGuests: true } },
+        },
+        orderBy: [{ checkOut: "asc" }, { room: { number: "asc" } }],
+      }),
+      prisma.reservation.findMany({
+        where: { tenantId: tid, status: { in: ["PENDING", "CONFIRMED"] }, checkIn: { gte: now, lte: end }, ...locationWhere },
+        include: {
+          customer: { select: { firstName: true, lastName: true, phone: true } },
+          room: { select: { id: true, number: true, name: true, roomType: { select: { id: true, name: true } } } },
+          location: { select: { id: true, name: true } },
+        },
+        orderBy: [{ checkIn: "asc" }, { room: { number: "asc" } }],
+        take: 30,
+      }),
+      prisma.transaction.findMany({
+        where: { tenantId: tid, direction: "IN", status: "COMPLETE", source: { in: ["FOLIO_DEPOSIT", "FOLIO_SETTLEMENT"] }, createdAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
+        include: { paymentMethod: { select: { name: true } } },
+      }),
+    ]);
+
+    const lineTotal = (line: ReportTaxLine) => round2(folioLinesFinancials([line], tax).total);
+    const roomBuckets = new Map<string, { roomId: string; roomNumber: string; roomName: string | null; roomType: string; stays: Set<string>; nights: number; revenue: number; discounts: number; lastGuest: string | null }>();
+    const typeBuckets = new Map<string, { roomTypeId: string; roomType: string; rooms: Set<string>; stays: Set<string>; nights: number; revenue: number }>();
+    let roomRevenue = 0;
+    let roomDiscounts = 0;
+
+    for (const line of roomLines) {
+      const reservation = line.folio.reservation;
+      const room = reservation.room;
+      const total = lineTotal(line);
+      roomRevenue += total;
+      if (line.source === "DISCOUNT") roomDiscounts += Math.abs(total);
+
+      const roomBucket = roomBuckets.get(room.id) ?? {
+        roomId: room.id,
+        roomNumber: room.number,
+        roomName: room.name,
+        roomType: room.roomType.name,
+        stays: new Set<string>(),
+        nights: 0,
+        revenue: 0,
+        discounts: 0,
+        lastGuest: null,
+      };
+      roomBucket.revenue += total;
+      if (line.source === "ROOM") {
+        roomBucket.stays.add(reservation.id);
+        roomBucket.nights += Number(line.quantity);
+        roomBucket.lastGuest = fullName(reservation.customer);
+      } else {
+        roomBucket.discounts += Math.abs(total);
+      }
+      roomBuckets.set(room.id, roomBucket);
+
+      const typeBucket = typeBuckets.get(room.roomType.id) ?? { roomTypeId: room.roomType.id, roomType: room.roomType.name, rooms: new Set<string>(), stays: new Set<string>(), nights: 0, revenue: 0 };
+      typeBucket.rooms.add(room.id);
+      typeBucket.revenue += total;
+      if (line.source === "ROOM") {
+        typeBucket.stays.add(reservation.id);
+        typeBucket.nights += Number(line.quantity);
+      }
+      typeBuckets.set(room.roomType.id, typeBucket);
+    }
+
+    const occupancyByRoom = new Map<string, { occupiedNights: number; stays: number; roomNumber: string; roomName: string | null; roomType: string }>();
+    for (const room of rooms) occupancyByRoom.set(room.id, { occupiedNights: 0, stays: 0, roomNumber: room.number, roomName: room.name, roomType: room.roomType.name });
+    for (const stay of reservationsInRange) {
+      const bucket = occupancyByRoom.get(stay.roomId) ?? { occupiedNights: 0, stays: 0, roomNumber: stay.room.number, roomName: stay.room.name, roomType: stay.room.roomType.name };
+      bucket.occupiedNights += overlapDays(stay.checkIn, stay.checkOut, start, end);
+      bucket.stays += 1;
+      occupancyByRoom.set(stay.roomId, bucket);
+    }
+
+    const rangeDays = Math.max(1, overlapDays(start, end, start, end));
+    const occupiedRoomNights = round2([...occupancyByRoom.values()].reduce((s, r) => s + r.occupiedNights, 0));
+    const occupancyRate = rooms.length ? round2((occupiedRoomNights / (rooms.length * rangeDays)) * 100) : 0;
+    const vacantRooms = rooms.filter((r) => r.status === "VACANT").length;
+    const occupiedRooms = rooms.filter((r) => r.status === "OCCUPIED").length;
+    const outOfServiceRooms = rooms.filter((r) => r.status === "OUT_OF_SERVICE");
+    const dirtyRooms = rooms.filter((r) => r.cleanliness === "DIRTY").length;
+
+    const topRooms = [...roomBuckets.values()]
+      .map((b) => ({ roomId: b.roomId, roomNumber: b.roomNumber, roomName: b.roomName, roomType: b.roomType, stays: b.stays.size, nights: round2(b.nights), revenue: round2(b.revenue), discounts: round2(b.discounts), lastGuest: b.lastGuest }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 20);
+
+    const slowestRooms = [...occupancyByRoom.entries()]
+      .map(([roomId, b]) => ({ roomId, roomNumber: b.roomNumber, roomName: b.roomName, roomType: b.roomType, stays: b.stays, occupiedNights: round2(b.occupiedNights), occupancyRate: round2((b.occupiedNights / rangeDays) * 100) }))
+      .sort((a, b) => a.occupiedNights - b.occupiedNights || a.roomNumber.localeCompare(b.roomNumber, undefined, { numeric: true }))
+      .slice(0, 20);
+
+    const salesByRoomType = [...typeBuckets.values()]
+      .map((b) => ({ roomTypeId: b.roomTypeId, roomType: b.roomType, rooms: b.rooms.size, stays: b.stays.size, nights: round2(b.nights), revenue: round2(b.revenue), averageStayValue: b.stays.size ? round2(b.revenue / b.stays.size) : 0 }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    const guests = currentGuests.map((stay) => {
+      const charges = folioLinesFinancials(stay.folio?.lineItems ?? [], tax).total;
+      const paid = (stay.folio?.payments ?? []).reduce((s, p) => s + Number(p.amount), 0);
+      const balance = round2(charges - paid);
+      return {
+        reservationId: stay.id,
+        reservationNo: stay.reservationNo,
+        guestName: fullName(stay.customer),
+        phone: stay.customer.phone,
+        roomNumber: stay.room.number,
+        roomName: stay.room.name,
+        roomType: stay.room.roomType.name,
+        locationName: stay.location?.name ?? "Unassigned",
+        checkIn: stay.checkIn.toISOString(),
+        checkOut: stay.checkOut.toISOString(),
+        guests: 1 + stay._count.additionalGuests,
+        charges: round2(charges),
+        paid: round2(paid),
+        balance,
+        paymentStatus: balance > 0.01 ? "OWING" : paid > charges + 0.01 ? "OVERPAID" : "PAID",
+      };
+    });
+
+    const totalInHouseCharges = round2(guests.reduce((s, g) => s + g.charges, 0));
+    const totalInHousePaid = round2(guests.reduce((s, g) => s + g.paid, 0));
+    const totalInHouseBalance = round2(guests.reduce((s, g) => s + Math.max(0, g.balance), 0));
+    const paidGuests = guests.filter((g) => g.paymentStatus === "PAID").length;
+    const owingGuests = guests.filter((g) => g.paymentStatus === "OWING").length;
+
+    const deposits = round2(roomPayments.filter((t) => t.source === "FOLIO_DEPOSIT").reduce((s, t) => s + Number(t.amount), 0));
+    const settlements = round2(roomPayments.filter((t) => t.source === "FOLIO_SETTLEMENT").reduce((s, t) => s + Number(t.amount), 0));
+    const collected = round2(deposits + settlements);
+    const byPaymentMethodMap = new Map<string, { name: string; count: number; total: number }>();
+    for (const txn of roomPayments) {
+      const key = txn.paymentMethodId ?? "unknown";
+      const bucket = byPaymentMethodMap.get(key) ?? { name: txn.paymentMethod?.name ?? "Unknown", count: 0, total: 0 };
+      bucket.count += 1;
+      bucket.total += Number(txn.amount);
+      byPaymentMethodMap.set(key, bucket);
+    }
+
+    res.json({
+      range: { period, start: start.toISOString(), end: end.toISOString() },
+      cards: {
+        totalRooms: rooms.length,
+        vacantRooms,
+        occupiedRooms,
+        outOfServiceRooms: outOfServiceRooms.length,
+        dirtyRooms,
+        occupancyRate,
+        occupiedRoomNights,
+        roomRevenue: round2(roomRevenue),
+        roomDiscounts: round2(roomDiscounts),
+        roomPayments: collected,
+        deposits,
+        settlements,
+        currentGuests: guests.length,
+        paidGuests,
+        owingGuests,
+        inHouseCharges: totalInHouseCharges,
+        inHousePaid: totalInHousePaid,
+        inHouseBalance: totalInHouseBalance,
+        upcomingReservations: upcomingReservations.length,
+      },
+      topRooms,
+      slowestRooms,
+      salesByRoomType,
+      outOfService: outOfServiceRooms.map((room) => ({ roomId: room.id, roomNumber: room.number, roomName: room.name, roomType: room.roomType.name, cleanliness: room.cleanliness, notes: room.notes })),
+      currentGuests: guests,
+      upcoming: upcomingReservations.map((stay) => ({
+        reservationId: stay.id,
+        reservationNo: stay.reservationNo,
+        guestName: fullName(stay.customer),
+        phone: stay.customer.phone,
+        roomNumber: stay.room.number,
+        roomName: stay.room.name,
+        roomType: stay.room.roomType.name,
+        locationName: stay.location?.name ?? "Unassigned",
+        checkIn: stay.checkIn.toISOString(),
+        checkOut: stay.checkOut.toISOString(),
+        status: stay.status,
+      })),
+      byPaymentMethod: [...byPaymentMethodMap.values()].map((b) => ({ ...b, total: round2(b.total), percentOfTotal: collected ? round2((b.total / collected) * 100) : 0 })).sort((a, b) => b.total - a.total),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 reportsRouter.get("/tax", async (req, res, next) => {
   try {
