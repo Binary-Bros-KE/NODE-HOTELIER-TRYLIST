@@ -147,6 +147,12 @@ function fullName(person: { firstName: string; lastName?: string | null }) {
   return `${person.firstName} ${person.lastName ?? ""}`.trim();
 }
 
+function linesByFolio<T extends { folioId: string }>(lines: T[]) {
+  const grouped = new Map<string, T[]>();
+  for (const line of lines) grouped.set(line.folioId, [...(grouped.get(line.folioId) ?? []), line]);
+  return grouped;
+}
+
 /** Cost of one sold line (quantity already applied), checked in priority
  * order: a direct retail-product sale, then a variant's own bar/stock link,
  * then the menu item's recipe, then the menu item's own direct product link.
@@ -464,8 +470,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // Credit given in the period (see creditEntries above).
     const creditGiven = creditSalesRevenue;
     const creditCount = new Set(creditEntries.map((e) => e.orderId ?? e.folioId)).size;
-    const roomSalesFinancials = folioLinesFinancials(roomRevenueLines, tax);
-    const roomSalesValue = round2(roomSalesFinancials.total);
+    const roomSalesValue = round2([...linesByFolio(roomRevenueLines).values()].reduce((sum, lines) => sum + folioLinesFinancials(lines, tax).total, 0));
     const roomSalesCount = new Set(roomRevenueLines.filter((l) => l.source === "ROOM").map((l) => l.folioId)).size;
     const roomDiscountsGiven = round2(Math.abs(roomRevenueLines.filter((l) => l.source === "DISCOUNT").reduce((s, l) => s + Number(l.amount) * Number(l.quantity), 0)));
 
@@ -790,18 +795,19 @@ reportsRouter.get("/rooms", async (req, res, next) => {
       },
     }) : [];
 
-    const lineTotal = (line: ReportTaxLine) => round2(folioLinesFinancials([line], tax).total);
     const roomBuckets = new Map<string, { roomId: string; roomNumber: string; roomName: string | null; roomType: string; stays: Set<string>; nights: number; revenue: number; discounts: number; lastGuest: string | null }>();
     const typeBuckets = new Map<string, { roomTypeId: string; roomType: string; rooms: Set<string>; stays: Set<string>; nights: number; revenue: number }>();
     let roomRevenue = 0;
     let roomDiscounts = 0;
 
-    for (const line of roomLines) {
-      const reservation = line.folio.reservation;
+    for (const lines of linesByFolio(roomLines).values()) {
+      const reservation = lines[0].folio.reservation;
       const room = reservation.room;
-      const total = lineTotal(line);
+      const total = round2(folioLinesFinancials(lines, tax).total);
+      const discountTotal = round2(Math.abs(lines.filter((line) => line.source === "DISCOUNT").reduce((s, line) => s + Number(line.amount) * Number(line.quantity), 0)));
+      const roomNights = lines.filter((line) => line.source === "ROOM").reduce((s, line) => s + Number(line.quantity), 0);
       roomRevenue += total;
-      if (line.source === "DISCOUNT") roomDiscounts += Math.abs(total);
+      roomDiscounts += discountTotal;
 
       const roomBucket = roomBuckets.get(room.id) ?? {
         roomId: room.id,
@@ -815,22 +821,17 @@ reportsRouter.get("/rooms", async (req, res, next) => {
         lastGuest: null,
       };
       roomBucket.revenue += total;
-      if (line.source === "ROOM") {
-        roomBucket.stays.add(reservation.id);
-        roomBucket.nights += Number(line.quantity);
-        roomBucket.lastGuest = fullName(reservation.customer);
-      } else {
-        roomBucket.discounts += Math.abs(total);
-      }
+      roomBucket.stays.add(reservation.id);
+      roomBucket.nights += roomNights;
+      roomBucket.lastGuest = fullName(reservation.customer);
+      roomBucket.discounts += discountTotal;
       roomBuckets.set(room.id, roomBucket);
 
       const typeBucket = typeBuckets.get(room.roomType.id) ?? { roomTypeId: room.roomType.id, roomType: room.roomType.name, rooms: new Set<string>(), stays: new Set<string>(), nights: 0, revenue: 0 };
       typeBucket.rooms.add(room.id);
       typeBucket.revenue += total;
-      if (line.source === "ROOM") {
-        typeBucket.stays.add(reservation.id);
-        typeBucket.nights += Number(line.quantity);
-      }
+      typeBucket.stays.add(reservation.id);
+      typeBucket.nights += roomNights;
       typeBuckets.set(room.roomType.id, typeBucket);
     }
 
