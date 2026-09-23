@@ -332,7 +332,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       // it doesn't shrink to zero when the customer later repays.
       prisma.customerCreditEntry.findMany({
         where: { tenantId: tid, type: "CREDIT", createdAt: { gte: start, lte: end }, OR: [{ order: { status: "COMPLETED", ...(locationId ? { locationId } : {}) } }, ...(locationId ? [] : [{ folioId: { not: null } }])] },
-        select: { amount: true, orderId: true, folioId: true },
+        select: { amount: true, orderId: true, folioId: true, createdBy: true, order: { select: { createdBy: true } } },
       }),
       prisma.customerCreditEntry.findMany({
         where: { tenantId: tid, type: "CREDIT", createdAt: { gte: trendStart, lte: trendEnd }, OR: [{ order: { status: "COMPLETED", ...(locationId ? { locationId } : {}) } }, ...(locationId ? [] : [{ folioId: { not: null } }])] },
@@ -533,9 +533,10 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // ---- Sales by payment method / by employee (cash-basis, from the
     // Transaction ledger — same set that built Total Revenue above, minus
     // service-center bookings which have no method/employee here) ----
-    const transactionsInTotal = round2(transactionsIn.reduce((s, t) => s + Number(t.amount), 0));
+    const newSaleTransactions = transactionsIn.filter((t) => !repaymentTxnIds.has(t.id));
+    const transactionsInTotal = round2(newSaleTransactions.reduce((s, t) => s + Number(t.amount), 0));
     const byMethodMap = new Map<string, { name: string; count: number; total: number }>();
-    for (const t of transactionsIn) {
+    for (const t of newSaleTransactions) {
       const key = t.paymentMethodId ?? "unknown";
       const bucket = byMethodMap.get(key) ?? { name: t.paymentMethod?.name ?? "Unknown", count: 0, total: 0 };
       bucket.count += 1; bucket.total += Number(t.amount);
@@ -559,7 +560,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const employeeName = new Map(employeesForBranch.map((e) => [e.id, `${e.firstName} ${e.lastName}`.trim()]));
     const employeeBranch = new Map(employeesForBranch.map((e) => [e.id, e.defaultLocation?.name ?? "—"]));
     const byEmployeeMap = new Map<string, { name: string; branch: string; count: number; total: number }>();
-    for (const t of transactionsIn) {
+    for (const t of newSaleTransactions) {
       const key = t.employeeId ?? "unattributed";
       const bucket = byEmployeeMap.get(key) ?? {
         name: t.employeeId ? employeeName.get(t.employeeId) ?? "Unknown" : "Unattributed",
@@ -569,8 +570,19 @@ reportsRouter.get("/sales", async (req, res, next) => {
       bucket.count += 1; bucket.total += Number(t.amount);
       byEmployeeMap.set(key, bucket);
     }
+    for (const credit of creditEntries) {
+      const employeeId = credit.createdBy ?? credit.order?.createdBy ?? null;
+      const key = employeeId ?? "unattributed";
+      const bucket = byEmployeeMap.get(key) ?? {
+        name: employeeId ? employeeName.get(employeeId) ?? "Unknown" : "Unattributed",
+        branch: employeeId ? employeeBranch.get(employeeId) ?? "—" : "—",
+        count: 0, total: 0,
+      };
+      bucket.count += 1; bucket.total += Number(credit.amount);
+      byEmployeeMap.set(key, bucket);
+    }
     const byEmployee = [...byEmployeeMap.values()]
-      .map((b) => ({ ...b, total: round2(b.total), percentOfTotal: transactionsInTotal ? round2((b.total / transactionsInTotal) * 100) : 0 }))
+      .map((b) => ({ ...b, total: round2(b.total), percentOfTotal: soldBasisTotal ? round2((b.total / soldBasisTotal) * 100) : 0 }))
       .sort((a, b) => b.total - a.total);
 
     // ---- Sales by customer — sold-basis like Sales by Location (a credit
