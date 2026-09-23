@@ -120,6 +120,12 @@ async function resolvePaymentMethod(tid: string, paymentMethodId: string, refere
   return { method, reference: cleanReference };
 }
 
+async function isSuperAdminUser(tid: string, userId: string | undefined) {
+  if (!userId) return false;
+  const employee = await prisma.employee.findFirst({ where: { id: userId, tenantId: tid, status: "ACTIVE" }, select: { role: { select: { name: true } } } });
+  return employee?.role?.name === "Super Admin";
+}
+
 function tenantId(req: { tenantId?: string }): string { if (!req.tenantId) throw new Error("Tenant context is required"); return req.tenantId; }
 
 /** The tenant's tax defaults, for resolving a room/service's own null tax
@@ -440,21 +446,55 @@ receptionRouter.patch("/reservations/:id/cancel", async (req, res) => {
   const data = cancelSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "cancellation", data.error.flatten()); return; }
   const tid = tenantId(req);
-  const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid } });
+  const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { customer: true, folio: { include: { payments: true } } } });
   if (!current) { res.status(404).json({ error: "Reservation not found" }); return; }
-  if (!["PENDING", "CONFIRMED"].includes(current.status)) { res.status(409).json({ error: "Only a pending or confirmed reservation can be cancelled — a checked-in guest must check out instead" }); return; }
+  const adminCancel = ["CHECKED_IN", "CHECKED_OUT"].includes(current.status);
+  if (!["PENDING", "CONFIRMED", "CHECKED_IN", "CHECKED_OUT"].includes(current.status)) { res.status(409).json({ error: "This stay is already closed" }); return; }
+  if (adminCancel && !(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can cancel a checked-in or checked-out stay" }); return; }
   const actor = await resolveActor(tid, req);
+  const reversalNos = adminCancel ? await Promise.all((current.folio?.payments ?? []).map(() => nextTransactionNo(tid))) : [];
   const reservation = await prisma.$transaction(async (tx) => {
+    if (adminCancel && current.folio) {
+      const paymentIds = current.folio.payments.map((p) => p.id);
+      if (paymentIds.length) {
+        await tx.transaction.updateMany({
+          where: { tenantId: tid, source: { in: ["FOLIO_DEPOSIT", "FOLIO_SETTLEMENT"] }, sourceRefId: { in: paymentIds }, status: "COMPLETE" },
+          data: { status: "VOIDED" },
+        });
+        for (const [index, payment] of current.folio.payments.entries()) {
+          await tx.transaction.create({
+            data: {
+              tenantId: tid,
+              transactionNo: reversalNos[index],
+              direction: "OUT",
+              source: payment.kind === "DEPOSIT" ? "FOLIO_DEPOSIT" : "FOLIO_SETTLEMENT",
+              amount: payment.amount,
+              paymentMethodId: payment.paymentMethodId,
+              reference: payment.reference,
+              customerId: current.customerId,
+              employeeId: req.userId,
+              description: `Cancellation reversal - ${current.reservationNo}`,
+              sourceRefId: payment.id,
+            },
+          });
+        }
+      }
+      const outstanding = (await folioCreditOutstanding(tx, tid, [current.folio.id])).get(current.folio.id) ?? 0;
+      if (outstanding > 0.01) {
+        await applyCustomerBalance(tx, { tenantId: tid, customerId: current.customerId, folioId: current.folio.id, delta: -outstanding, type: "ADJUSTMENT", note: `Stay ${current.reservationNo} cancelled`, by: req.userId });
+      }
+      await tx.folio.update({ where: { id: current.folio.id }, data: { status: "SETTLED", creditAmount: 0, creditReason: null, creditExpectedAt: null } });
+    }
     await tx.reservation.update({
       where: { id: current.id },
       data: { status: "CANCELLED", cancellationReason: data.data.cancellationReason, cancellationNotes: data.data.cancellationNotes, updatedBy: req.userId },
     });
+    if (current.status === "CHECKED_IN") await freeRoom(tx, tid, current.roomId, `${current.customer.firstName} ${current.customer.lastName}`, "cancelled", current.id, { id: actor.performedBy ?? "", name: actor.name });
     await logActivity(tx, tid, current.id, "CANCELLED", `Cancelled (${data.data.cancellationReason.replace(/_/g, " ").toLowerCase()})`, actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation });
 });
-
 receptionRouter.patch("/reservations/:id/no-show", async (req, res) => {
   const tid = tenantId(req);
   const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid } });
@@ -508,19 +548,17 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
   if (data.data.amount > 0 && !data.data.paymentMethodId) { res.status(400).json({ error: "Choose a payment method" }); return; }
   const resolvedPayment = data.data.paymentMethodId ? await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference) : null;
   const tax = await taxDefaults(tid);
-  // A balance can't just vanish at checkout: it's either paid, or the stay is
-  // completed on credit with a reason and an expected payment date (same rule
-  // as a POS order). The unpaid part then sits on the customer's balance.
-  const balanceBefore = folioTotals(current.folio, tax).balance;
-  if (data.data.amount > balanceBefore + 0.01) { res.status(400).json({ error: `Amount exceeds the balance due of ${round2(balanceBefore).toFixed(2)}` }); return; }
-  const onCredit = round2(balanceBefore - data.data.amount);
-  if (onCredit > 0.01 && ((data.data.creditReason ?? "").length < 3 || !data.data.creditExpectedAt)) {
-    res.status(409).json({ error: `A balance of ${onCredit.toFixed(2)} remains — pay it, or complete on credit with a reason and an expected payment date`, code: "BALANCE_DUE", balance: onCredit });
-    return;
-  }
   const transactionNo = data.data.amount > 0 ? await nextTransactionNo(tid) : null;
   const actor = await resolveActor(tid, req);
   const reservation = await prisma.$transaction(async (tx) => {
+    const liveFolio = await tx.folio.findUnique({ where: { id: current.folio!.id }, include: { lineItems: true, payments: true } });
+    if (!liveFolio) throw Object.assign(new Error("This reservation has no folio on record"), { status: 500 });
+    const balanceBefore = folioTotals(liveFolio, tax).balance;
+    if (data.data.amount > balanceBefore + 0.01) throw Object.assign(new Error(`Amount exceeds the balance due of ${round2(balanceBefore).toFixed(2)}`), { status: 400 });
+    const onCredit = round2(balanceBefore - data.data.amount);
+    if (onCredit > 0.01 && ((data.data.creditReason ?? "").length < 3 || !data.data.creditExpectedAt)) {
+      throw Object.assign(new Error(`A balance of ${onCredit.toFixed(2)} remains - pay it, or complete on credit with a reason and an expected payment date`), { status: 409, code: "BALANCE_DUE", balance: onCredit });
+    }
     if (data.data.amount > 0) {
       const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: current.folio!.id, kind: "SETTLEMENT", paymentMethodId: data.data.paymentMethodId!, amount: data.data.amount, reference: resolvedPayment?.reference, createdBy: req.userId } });
       await tx.transaction.create({
@@ -647,12 +685,18 @@ receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
   const data = paymentSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "deposit", data.error.flatten()); return; }
   const tid = tenantId(req);
-  const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { folio: true } });
+  const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { folio: { include: { lineItems: true, payments: true } } } });
   if (!reservation || !reservation.folio) { res.status(404).json({ error: "Reservation not found" }); return; }
+  if (!["PENDING", "CONFIRMED", "CHECKED_IN"].includes(reservation.status)) { res.status(409).json({ error: "Payments can only be recorded before checkout or cancellation" }); return; }
   const resolvedPayment = await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+  const tax = await taxDefaults(tid);
   const transactionNo = await nextTransactionNo(tid);
   const actor = await resolveActor(tid, req);
   const payment = await prisma.$transaction(async (tx) => {
+    const liveFolio = await tx.folio.findUnique({ where: { id: reservation.folio!.id }, include: { lineItems: true, payments: true } });
+    if (!liveFolio) throw Object.assign(new Error("This reservation has no folio on record"), { status: 500 });
+    const balance = folioTotals(liveFolio, tax).balance;
+    if (data.data.amount > balance + 0.01) throw Object.assign(new Error(`Amount exceeds the balance due of ${round2(balance).toFixed(2)}`), { status: 400 });
     const created = await tx.folioPayment.create({
       data: { tenantId: tid, folioId: reservation.folio!.id, kind: "DEPOSIT", ...data.data, reference: resolvedPayment.reference, createdBy: req.userId },
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
