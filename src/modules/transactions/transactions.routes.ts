@@ -70,7 +70,7 @@ transactionsRouter.get("/", async (req, res) => {
   // in/out totals to just those 8.
   const [transactions, aggregate] = await Promise.all([
     prisma.transaction.findMany({ where, include: transactionInclude, orderBy: { createdAt: "desc" }, ...(limit ? { take: limit } : {}) }),
-    prisma.transaction.groupBy({ by: ["direction"], where, _sum: { amount: true }, _count: true }),
+    prisma.transaction.groupBy({ by: ["direction"], where: { ...where, status: "COMPLETE" }, _sum: { amount: true }, _count: true }),
   ]);
 
   const totalIn = Number(aggregate.find((a) => a.direction === "IN")?._sum.amount ?? 0);

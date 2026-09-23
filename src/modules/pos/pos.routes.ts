@@ -1161,6 +1161,73 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
 const cancelRequestSchema = z.object({ reason: z.string().trim().min(3, "Give a reason").max(500) });
 const rejectCancelSchema = z.object({ note: z.string().trim().max(500).optional() });
 
+async function voidCompletedOrder(
+  tx: Prisma.TransactionClient,
+  args: { tenantId: string; order: Awaited<ReturnType<typeof prisma.posOrder.findFirst>> & NonNullable<unknown>; reason: string; userId?: string },
+) {
+  const order = args.order as Prisma.PosOrderGetPayload<{ include: typeof orderInclude }>;
+  if (order.servedAt) {
+    const stockLocationId = await resolveStockLocationId(args.tenantId, order.locationId);
+    if (stockLocationId) {
+      const consumed = computeStockRequirements(order.items.filter((item) => !isUndeductedAddition(order, item)));
+      await applyStockDelta(tx, args.tenantId, stockLocationId, consumed, new Map(), order.orderNumber, { userId: args.userId });
+    }
+    await recordMenuLedger(tx, { tenantId: args.tenantId, type: "RETURN", order, lines: menuLedgerLinesFromItems(order.items), note: `Sale voided: ${args.reason}`, by: args.userId });
+  }
+
+  if (order.payments.length > 0) {
+    await tx.transaction.updateMany({
+      where: { tenantId: args.tenantId, source: "POS_SALE", sourceRefId: { in: order.payments.map((p) => p.id) }, status: "COMPLETE" },
+      data: { status: "VOIDED" },
+    });
+    const reversalNos = await Promise.all(order.payments.map(() => nextTransactionNo(args.tenantId)));
+    for (const [index, payment] of order.payments.entries()) {
+      await tx.transaction.create({
+        data: {
+          tenantId: args.tenantId,
+          transactionNo: reversalNos[index],
+          direction: "OUT",
+          source: "POS_SALE",
+          amount: payment.amount,
+          paymentMethodId: payment.paymentMethodId,
+          reference: payment.reference,
+          customerId: order.customerId ?? order.reservation?.customerId ?? null,
+          locationId: order.locationId,
+          employeeId: args.userId,
+          description: `Void/refund POS order #${order.orderNumber}`,
+          sourceRefId: payment.id,
+        },
+      });
+    }
+  }
+
+  await tx.folioLineItem.deleteMany({ where: { tenantId: args.tenantId, source: "POS_ORDER", sourceRefId: order.id } });
+  const creditCustomerId = order.customerId ?? order.reservation?.customerId ?? null;
+  if (creditCustomerId) {
+    await reconcileOrderCredit(tx, { tenantId: args.tenantId, orderId: order.id, orderNumber: order.orderNumber, customerId: creditCustomerId, status: "CANCELLED", paid: 0, total: 0, by: args.userId });
+  }
+  await tx.posOrderReturnRequest.updateMany({
+    where: { orderId: order.id, status: "PENDING" },
+    data: { status: "REJECTED", decidedBy: args.userId ?? null, decidedAt: new Date(), decisionNote: "Sale was voided in full" },
+  });
+  await tx.posOrder.update({
+    where: { id: order.id },
+    data: {
+      status: "CANCELLED",
+      paymentStatus: "UNPAID",
+      cancelReason: args.reason,
+      cancelRequestedBy: args.userId ?? null,
+      cancelRequestedAt: new Date(),
+      cancelDecidedBy: args.userId ?? null,
+      cancelDecidedAt: new Date(),
+      cancelDecisionNote: "Voided by Super Admin",
+      statusBeforeCancel: order.status,
+    },
+  });
+  await tx.stockDispatchRequest.updateMany({ where: { orderId: order.id, status: "REQUESTED" }, data: { status: "CANCELLED", respondedAt: new Date(), respondedBy: args.userId ?? null } });
+  if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
+}
+
 // A "return" is a cancellation of an order that's already been served (or
 // paid) rather than one still being prepared — same request/approve/reject
 // machinery, but only within this window of servedAt. An order that hasn't
@@ -1216,6 +1283,26 @@ posRouter.patch("/orders/:id/cancel", async (req, res) => {
   res.status(200).json({ order: withFinancials(updated, tax) });
 });
 
+posRouter.post("/orders/:id/void", async (req, res) => {
+  const parsed = cancelRequestSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid request", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  if (!(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can void a completed sale" }); return; }
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (order.status !== "COMPLETED") { res.status(409).json({ error: "Only completed sales can be voided here" }); return; }
+  try {
+    const updated = await prisma.$transaction(async (tx) => {
+      await voidCompletedOrder(tx, { tenantId: tid, order, reason: parsed.data.reason, userId: req.userId });
+      return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+    });
+    const tax = await taxSettingsFor(tid);
+    res.status(200).json({ order: withFinancials(updated, tax) });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    throw error;
+  }
+});
 /** Admin approves a pending cancellation/return → CANCELLED. Frees the
  * table; if the order had already been served (checked via servedAt, not
  * statusBeforeCancel — a COMPLETED order was served too), returns its
