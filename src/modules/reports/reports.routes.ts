@@ -337,7 +337,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
           tenantId: tid,
           source: { in: ["ROOM", "DISCOUNT"] },
           createdAt: { gte: start, lte: end },
-          ...(locationId ? { folio: { reservation: { locationId } } } : {}),
+          folio: { reservation: { status: { notIn: ["CANCELLED", "NO_SHOW"] }, ...(locationId ? { locationId } : {}) } },
         },
         select: { folioId: true, source: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true },
       }),
@@ -717,7 +717,7 @@ reportsRouter.get("/rooms", async (req, res, next) => {
           tenantId: tid,
           source: { in: ["ROOM", "DISCOUNT"] },
           createdAt: { gte: start, lte: end },
-          ...(locationId ? { folio: { reservation: { locationId } } } : {}),
+          folio: { reservation: { status: { notIn: ["CANCELLED", "NO_SHOW"] }, ...(locationId ? { locationId } : {}) } },
         },
         include: {
           folio: {
