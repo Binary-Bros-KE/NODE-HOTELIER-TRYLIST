@@ -1147,6 +1147,7 @@ enum ReservationActivityAction {
   CREDIT_PAYMENT
   ROOM_CHANGED
   ROOM_CHARGE_CHANGED
+  PAYMENT_RECORDED
 }
 
 // Append-only timeline of who did what to a reservation, and where — a

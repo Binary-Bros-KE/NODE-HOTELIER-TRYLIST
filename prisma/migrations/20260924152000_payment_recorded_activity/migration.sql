@@ -1,0 +1,1 @@
+ALTER TYPE "ReservationActivityAction" ADD VALUE IF NOT EXISTS 'PAYMENT_RECORDED';

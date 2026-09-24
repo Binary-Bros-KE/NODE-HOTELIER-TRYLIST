@@ -674,6 +674,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
           sourceRefId: created.id,
         },
       });
+      await logActivity(tx, tid, current.id, "PAYMENT_RECORDED", `Settlement recorded — ${data.data.amount}`, actor);
     }
     await tx.folio.update({
       where: { id: current.folio!.id },
@@ -1280,6 +1281,7 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
             description: `Group checkout ${group.groupNo} — ${reservation.reservationNo}`, sourceRefId: created.id,
           },
         });
+        await logActivity(tx, tid, reservation.id, "PAYMENT_RECORDED", `Settlement recorded with the group — ${alloc.amount}`, actor);
       }
       for (const reservation of targets) {
         const credit = round2(remaining.get(reservation.id) ?? 0);
