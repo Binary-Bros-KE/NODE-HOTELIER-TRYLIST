@@ -320,7 +320,8 @@ async function reconcileRoomBilledPosPayments(
     where: { id: folioId },
     select: {
       lineItems: { orderBy: { createdAt: "asc" }, select: { source: true, sourceRefId: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true } },
-      payments: { orderBy: { createdAt: "asc" }, select: { paymentMethodId: true, amount: true, reference: true } },
+      payments: { orderBy: { createdAt: "asc" }, select: { paymentMethodId: true, amount: true, reference: true, paymentMethod: { select: { name: true } } } },
+      reservation: { select: { location: { select: { name: true } } } },
     },
   });
   if (!folio || folio.payments.length === 0) return;
@@ -360,7 +361,21 @@ async function reconcileRoomBilledPosPayments(
       });
     }
     const paidAfter = round2(alreadyPaid + Math.max(0, delta));
-    await tx.posOrder.update({ where: { id: order.id }, data: { paymentStatus: paymentStatusFor(paidAfter, total) } });
+    await tx.posOrder.update({
+      where: { id: order.id },
+      data: {
+        paymentStatus: paymentStatusFor(paidAfter, total),
+        ...(paidAfter >= total - 0.01
+          ? {
+              roomBillSettledAt: new Date(),
+              roomBillSettledBy: by,
+              roomBillSettlementLocation: folio.reservation.location?.name ?? null,
+              roomBillSettlementMethod: paymentForReceipt.paymentMethod.name,
+              roomBillSettlementReference: paymentForReceipt.reference,
+            }
+          : {}),
+      },
+    });
   }
 }
 

@@ -2546,6 +2546,13 @@ model PosOrder {
   paymentStatus              PosPaymentStatus        @default(UNPAID)
   creditReason               String?
   creditExpectedAt           DateTime?
+  billedToRoomAt             DateTime?
+  billedToRoomBy             String?
+  roomBillSettledAt          DateTime?
+  roomBillSettledBy          String?
+  roomBillSettlementLocation String?
+  roomBillSettlementMethod   String?
+  roomBillSettlementReference String?
   // Opaque token for a public, no-auth receipt page. Minted on first Share,
   // reused thereafter. Globally unique so the public route needs no tenant.
   shareToken                 String?                 @unique
@@ -2573,6 +2580,7 @@ model PosOrder {
   @@index([tenantId, saleType, updatedAt])
   @@index([complimentarySessionId])
   @@index([tenantId, creditExpectedAt])
+  @@index([tenantId, billedToRoomAt])
 }
 
 model ComplimentarySession {

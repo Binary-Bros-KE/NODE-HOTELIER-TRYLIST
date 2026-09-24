@@ -326,7 +326,7 @@ async function chargeOrderToFolio(
   tx: Prisma.TransactionClient,
   tid: string,
   folioId: string,
-  order: { id: string; orderNumber: number; channel: string },
+  order: { id: string; orderNumber: number; channel: string; location?: { name: string } | null },
   amount: number,
   req: { userId?: string },
 ) {
@@ -334,8 +334,9 @@ async function chargeOrderToFolio(
   const existing = await tx.folioLineItem.findFirst({ where: { tenantId: tid, folioId, source: "POS_ORDER", sourceRefId: order.id }, select: { id: true } });
   if (existing) return;
   const channelLabel = order.channel === "FOOD" ? "Order" : order.channel === "PRODUCTS" ? "Retail sale" : "Service sale";
+  const label = `${channelLabel} #${order.orderNumber}${order.location?.name ? ` - ${order.location.name}` : ""}`;
   await tx.folioLineItem.create({
-    data: { tenantId: tid, folioId, source: "POS_ORDER", label: `${channelLabel} #${order.orderNumber}`, amount, quantity: 1, sourceRefId: order.id, createdBy: req.userId },
+    data: { tenantId: tid, folioId, source: "POS_ORDER", label, amount, quantity: 1, sourceRefId: order.id, createdBy: req.userId },
   });
 }
 
@@ -381,12 +382,19 @@ function hasPendingReturnRequests(order: { returnRequests?: { status: string }[]
  * the receipt) to a name. Plain id, no Prisma relation (see the field's own
  * comment), so it's one extra lookup rather than an include. Used only where
  * a receipt actually renders — GET /orders/:id and the public share route. */
-export async function withServedBy<T extends { createdBy: string | null }>(
+export async function withServedBy<T extends { createdBy: string | null; roomBillSettledBy?: string | null }>(
   order: T,
-): Promise<T & { servedBy: { firstName: string; lastName: string } | null }> {
-  if (!order.createdBy) return { ...order, servedBy: null };
-  const employee = await prisma.employee.findUnique({ where: { id: order.createdBy }, select: { firstName: true, lastName: true } });
-  return { ...order, servedBy: employee ? { firstName: employee.firstName, lastName: employee.lastName } : null };
+): Promise<T & { servedBy: { firstName: string; lastName: string } | null; roomBillSettledByEmployee: { firstName: string; lastName: string } | null }> {
+  const ids = [order.createdBy, order.roomBillSettledBy].filter(Boolean) as string[];
+  const employees = ids.length
+    ? await prisma.employee.findMany({ where: { id: { in: ids } }, select: { id: true, firstName: true, lastName: true } })
+    : [];
+  const byId = new Map(employees.map((employee) => [employee.id, { firstName: employee.firstName, lastName: employee.lastName }]));
+  return {
+    ...order,
+    servedBy: order.createdBy ? byId.get(order.createdBy) ?? null : null,
+    roomBillSettledByEmployee: order.roomBillSettledBy ? byId.get(order.roomBillSettledBy) ?? null : null,
+  };
 }
 
 /** Frees a table back to AVAILABLE if it has no other active order. Call from inside the same transaction that finalized the order. */
@@ -1615,7 +1623,15 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
       const reservation = await resolveBillableReservation(tid, data.reservationId);
       updatedOrder = await prisma.$transaction(async (tx) => {
         await chargeOrderToFolio(tx, tid, reservation!.folio!.id, order, data.amount, req);
-        await tx.posOrder.update({ where: { id: order.id }, data: { reservationId: order.reservationId ?? reservation!.id, customerId: order.customerId ?? reservation!.customerId } });
+        await tx.posOrder.update({
+          where: { id: order.id },
+          data: {
+            reservationId: order.reservationId ?? reservation!.id,
+            customerId: order.customerId ?? reservation!.customerId,
+            billedToRoomAt: order.billedToRoomAt ?? new Date(),
+            billedToRoomBy: order.billedToRoomBy ?? req.userId,
+          },
+        });
         const newStatus = order.status === "SERVED" ? "COMPLETED" : order.status;
         await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(alreadyPaid, total) } });
         if (newStatus === "COMPLETED" && order.status === "SERVED" && order.tableId) await releaseTableIfIdle(tx, order.tableId);
