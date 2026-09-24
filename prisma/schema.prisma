@@ -1145,6 +1145,8 @@ enum ReservationActivityAction {
   CHECKED_OUT
   ROOM_TERMS_CHANGED
   CREDIT_PAYMENT
+  ROOM_CHANGED
+  ROOM_CHARGE_CHANGED
 }
 
 // Append-only timeline of who did what to a reservation, and where — a
