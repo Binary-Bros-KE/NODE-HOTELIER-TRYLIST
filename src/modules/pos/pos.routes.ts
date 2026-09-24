@@ -331,6 +331,8 @@ async function chargeOrderToFolio(
   req: { userId?: string },
 ) {
   if (amount <= 0) return;
+  const existing = await tx.folioLineItem.findFirst({ where: { tenantId: tid, folioId, source: "POS_ORDER", sourceRefId: order.id }, select: { id: true } });
+  if (existing) return;
   const channelLabel = order.channel === "FOOD" ? "Order" : order.channel === "PRODUCTS" ? "Retail sale" : "Service sale";
   await tx.folioLineItem.create({
     data: { tenantId: tid, folioId, source: "POS_ORDER", label: `${channelLabel} #${order.orderNumber}`, amount, quantity: 1, sourceRefId: order.id, createdBy: req.userId },
@@ -1607,19 +1609,17 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
     let updatedOrder;
     const data = parsed.data;
     if (data.method === "ROOM") {
+      if (Math.abs(data.amount - remaining) > 0.01) {
+        throw Object.assign(new Error(`Charge the full remaining balance of ${remaining.toFixed(2)} to the room`), { status: 400 });
+      }
       const reservation = await resolveBillableReservation(tid, data.reservationId);
-      const roomChargeMethod = await prisma.paymentMethod.findFirst({ where: { tenantId: tid, code: "ROOM_CHARGE" } });
-      if (!roomChargeMethod) throw Object.assign(new Error("Room charge isn't set up for this property"), { status: 500 });
       updatedOrder = await prisma.$transaction(async (tx) => {
-        await tx.payment.create({ data: { tenantId: tid, orderId: order.id, paymentMethodId: roomChargeMethod.id, amount: data.amount, reference: reservation!.reservationNo, receivedBy: req.userId } });
         await chargeOrderToFolio(tx, tid, reservation!.folio!.id, order, data.amount, req);
         await tx.posOrder.update({ where: { id: order.id }, data: { reservationId: order.reservationId ?? reservation!.id, customerId: order.customerId ?? reservation!.customerId } });
-        const paidSoFar = alreadyPaid + data.amount;
-        const newStatus = order.status === "SERVED" && paidSoFar >= total - 0.01 ? "COMPLETED" : order.status;
-        await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(paidSoFar, total) } });
+        const newStatus = order.status === "SERVED" ? "COMPLETED" : order.status;
+        await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(alreadyPaid, total) } });
         if (newStatus === "COMPLETED" && order.status === "SERVED" && order.tableId) await releaseTableIfIdle(tx, order.tableId);
         if (newStatus === "COMPLETED") await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
-        await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId ?? reservation!.customerId ?? null, status: newStatus, paid: paidSoFar, total, by: req.userId });
         return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
       });
     } else {

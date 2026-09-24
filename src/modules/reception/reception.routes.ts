@@ -172,6 +172,10 @@ async function logActivity(
 }
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+function paymentStatusFor(paid: number, total: number): "UNPAID" | "PARTIAL" | "PAID" {
+  if (paid >= total - 0.01) return "PAID";
+  return paid > 0.01 ? "PARTIAL" : "UNPAID";
+}
 function sameNairobiDay(a: Date, b: Date) {
   const x = nairobiParts(a);
   const y = nairobiParts(b);
@@ -303,6 +307,61 @@ function folioTotals(folio: { lineItems: FolioLineForTax[]; payments: { amount: 
   const paid = folio.payments.reduce((sum, payment) => sum + Number(payment.amount), 0);
   const charges = fin.total;
   return { charges, paid, balance: round2(charges - paid), tax: fin };
+}
+
+async function reconcileRoomBilledPosPayments(
+  tx: Prisma.TransactionClient,
+  tid: string,
+  folioId: string,
+  fallbackTax: TaxFallback | undefined,
+  by: string | undefined,
+) {
+  const folio = await tx.folio.findUnique({
+    where: { id: folioId },
+    select: {
+      lineItems: { orderBy: { createdAt: "asc" }, select: { source: true, sourceRefId: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true } },
+      payments: { orderBy: { createdAt: "asc" }, select: { paymentMethodId: true, amount: true, reference: true } },
+    },
+  });
+  if (!folio || folio.payments.length === 0) return;
+  const totalPaid = round2(folio.payments.reduce((sum, payment) => sum + Number(payment.amount), 0));
+  const paymentForReceipt = folio.payments[folio.payments.length - 1];
+  const desiredByOrder = new Map<string, number>();
+  let chargesBefore = 0;
+  for (const line of folio.lineItems) {
+    const lineTotal = folioTotals({ lineItems: [line], payments: [] }, fallbackTax).charges;
+    if (line.source === "POS_ORDER" && line.sourceRefId) {
+      const covered = Math.min(Math.max(round2(totalPaid - chargesBefore), 0), lineTotal);
+      if (covered > 0.01) desiredByOrder.set(line.sourceRefId, round2((desiredByOrder.get(line.sourceRefId) ?? 0) + covered));
+    }
+    chargesBefore = round2(chargesBefore + lineTotal);
+  }
+  const orderIds = [...desiredByOrder.keys()];
+  if (orderIds.length === 0) return;
+  const orders = await tx.posOrder.findMany({
+    where: { tenantId: tid, id: { in: orderIds } },
+    include: { items: { include: { addons: { select: { quantity: true, unitPrice: true } } } }, payments: true },
+  });
+  for (const order of orders) {
+    const total = computeOrderFinancials(order, fallbackTax as never).total;
+    const desiredPaid = Math.min(desiredByOrder.get(order.id) ?? 0, total);
+    const alreadyPaid = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0);
+    const delta = round2(desiredPaid - alreadyPaid);
+    if (delta > 0.01) {
+      await tx.payment.create({
+        data: {
+          tenantId: tid,
+          orderId: order.id,
+          paymentMethodId: paymentForReceipt.paymentMethodId,
+          amount: delta,
+          reference: paymentForReceipt.reference,
+          receivedBy: by,
+        },
+      });
+    }
+    const paidAfter = round2(alreadyPaid + Math.max(0, delta));
+    await tx.posOrder.update({ where: { id: order.id }, data: { paymentStatus: paymentStatusFor(paidAfter, total) } });
+  }
 }
 
 // Checkout frees the room and opens an unassigned turnover task for the housekeeping supervisor.
@@ -697,6 +756,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
       });
       await logActivity(tx, tid, current.id, "PAYMENT_RECORDED", `Settlement recorded — ${data.data.amount}`, actor);
     }
+    await reconcileRoomBilledPosPayments(tx, tid, current.folio!.id, tax, req.userId);
     await tx.folio.update({
       where: { id: current.folio!.id },
       data: onCredit > 0.01
@@ -929,6 +989,7 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
       },
     });
     await applyCustomerBalance(tx, { tenantId: tid, customerId: creditOwner, folioId: reservation.folio!.id, delta: -data.data.amount, type: "REPAYMENT", note: `Payment against stay ${reservation.reservationNo}`, by: req.userId });
+    await reconcileRoomBilledPosPayments(tx, tid, reservation.folio!.id, await taxDefaults(tid), req.userId);
     await logActivity(tx, tid, reservation.id, "CREDIT_PAYMENT", `Credit payment received — ${data.data.amount}`, actor);
     return created;
   });
@@ -1307,6 +1368,7 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
       for (const reservation of targets) {
         const credit = round2(remaining.get(reservation.id) ?? 0);
         const onCredit = credit > 0.01;
+        await reconcileRoomBilledPosPayments(tx, tid, reservation.folio!.id, groupTax, req.userId);
         await tx.folio.update({
           where: { id: reservation.folio!.id },
           data: onCredit ? { status: "SETTLED", creditAmount: credit, creditReason: data.data.creditReason, creditExpectedAt: data.data.creditExpectedAt } : { status: "SETTLED" },
