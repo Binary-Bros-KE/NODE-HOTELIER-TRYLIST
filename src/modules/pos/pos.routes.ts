@@ -13,6 +13,7 @@ import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger
 import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
 import { computeStockRequirements, addonStockInclude, addonStockSelect, serviceStockSelect, serviceVariantStockSelect, variantStockInclude, variantStockSelect, type OrderItemForStock } from "../../lib/stockRequirements.js";
 import { DispatchError, dispatchRequired, orderDispatchInfo, supplyingStoreId } from "../../lib/dispatch.js";
+import { currentMemberDiscount } from "../../lib/membership.js";
 import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js";
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
 import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, resolveStockLocationId, settleServedAdditions } from "../../lib/orderStock.js";
@@ -2190,7 +2191,7 @@ posRouter.post("/retail-orders", async (req, res) => {
           };
         });
       } else {
-        itemsCreate = await resolveServiceLines(tx, tid, parsed.data.items, effectiveLocationId, req.userId, retailFallbackTax);
+        itemsCreate = await resolveServiceLines(tx, tid, parsed.data.items, effectiveLocationId, req.userId, retailFallbackTax, await currentMemberDiscount(tx, tid, customerId));
       }
 
       const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
@@ -2310,7 +2311,7 @@ posRouter.post("/service-orders", async (req, res) => {
     const tax = await taxSettingsFor(tid);
     const fallbackTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
     const order = await prisma.$transaction(async (tx) => {
-      const itemsCreate = await resolveServiceLines(tx, tid, parsed.data.items, effectiveLocationId, req.userId, fallbackTax);
+      const itemsCreate = await resolveServiceLines(tx, tid, parsed.data.items, effectiveLocationId, req.userId, fallbackTax, await currentMemberDiscount(tx, tid, customerId));
       const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
       const created = await tx.posOrder.create({
         data: { tenantId: tid, orderNumber: (last?.orderNumber ?? 0) + 1, channel: "SERVICES", status: "OPEN", locationId: effectiveLocationId, customerId, createdBy: req.userId, notes: parsed.data.label, discount: 0, items: { create: itemsCreate } },
@@ -2333,7 +2334,7 @@ posRouter.post("/orders/:id/service-lines", async (req, res) => {
     const tax = await taxSettingsFor(tid);
     const fallbackTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
     const updated = await prisma.$transaction(async (tx) => {
-      const rows = await resolveServiceLines(tx, tid, parsed.data.items, order.locationId, req.userId, fallbackTax);
+      const rows = await resolveServiceLines(tx, tid, parsed.data.items, order.locationId, req.userId, fallbackTax, await currentMemberDiscount(tx, tid, order.customerId));
       const added = [];
       for (const row of rows) added.push(await tx.posOrderItem.create({ data: { ...row, orderId: order.id }, include: stockLineInclude }));
       await assertServiceStock(tx, tid, order.locationId, added);

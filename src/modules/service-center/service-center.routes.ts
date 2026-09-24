@@ -1,4 +1,5 @@
 import { Router } from "express";
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { prisma } from "../../lib/prisma.js";
@@ -7,6 +8,9 @@ import { orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.
 import { resolveServiceLines } from "../../lib/serviceSale.js";
 import { computeStockRequirements } from "../../lib/stockRequirements.js";
 import { deductStockForOrder, resolveStockLocationId } from "../../lib/orderStock.js";
+import { partialNoDefaults } from "../../lib/zod.js";
+import { effectiveMembershipStatus } from "../../lib/membership.js";
+import { nextTransactionNo } from "../../lib/sequence.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
@@ -17,9 +21,19 @@ serviceCenterRouter.use(requireModule("SERVICE_CENTER"));
 const appointmentStatus = z.enum(["BOOKED", "CONFIRMED", "IN_PROGRESS", "COMPLETED", "CANCELLED", "NO_SHOW"]);
 const paymentStatus = z.enum(["PENDING", "PAID", "REFUNDED", "FAILED"]);
 const membershipStatus = z.enum(["ACTIVE", "PAUSED", "EXPIRED", "CANCELLED"]);
+const planSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  price: z.coerce.number().min(0).max(100_000_000).default(0),
+  durationDays: z.coerce.number().int().min(1).max(3650).default(30),
+  discountPercent: z.coerce.number().min(0).max(100).default(0),
+  description: z.string().trim().max(300).nullable().optional(),
+  isActive: z.boolean().default(true),
+});
 const membershipSchema = z.object({
   customerId: z.string().cuid(),
-  planName: z.string().trim().min(2).max(80),
+  // Sell from the plan catalog (the plan fills the name/price/duration/discount), or leave out for a one-off.
+  planId: z.string().cuid().nullable().optional(),
+  planName: z.string().trim().min(2).max(80).optional(),
   planPrice: z.coerce.number().min(0).max(100_000_000).default(0),
   durationDays: z.coerce.number().int().min(1).max(3650).default(30),
   discountPercent: z.coerce.number().min(0).max(100).default(0),
@@ -96,7 +110,8 @@ function planSnapshot(membership: { id: string; planName: string; planPrice: unk
 }
 
 function withPlanSnapshot<T extends { id: string; planName: string; planPrice: unknown; durationDays: number; discountPercent: unknown }>(membership: T) {
-  return { ...membership, plan: planSnapshot(membership) };
+  const m = membership as T & { status?: string; endsAt?: Date };
+  return { ...membership, ...(m.status && m.endsAt ? { status: effectiveMembershipStatus(m.status, m.endsAt) } : {}), plan: planSnapshot(membership) };
 }
 
 function withAppointmentMembershipPlan<T extends { membership: ({ id: string; planName: string; planPrice: unknown; durationDays: number; discountPercent: unknown } | null) }>(appointment: T) {
@@ -131,10 +146,71 @@ serviceCenterRouter.get("/memberships/:id", async (req, res) => {
 async function resolveMembership(tid: string, data: z.infer<typeof membershipSchema>) {
   const customer = await prisma.customer.findFirst({ where: { id: data.customerId, tenantId: tid } });
   if (!customer) return { error: "Choose a valid customer" } as const;
-  const endsAt = data.endsAt ?? new Date(data.startsAt.getTime() + data.durationDays * 86_400_000);
+  // A catalog plan supplies the terms that get frozen onto the membership.
+  let terms = { planName: data.planName, planPrice: data.planPrice, durationDays: data.durationDays, discountPercent: data.discountPercent };
+  if (data.planId) {
+    const plan = await prisma.membershipPlan.findFirst({ where: { id: data.planId, tenantId: tid } });
+    if (!plan) return { error: "Choose a valid membership plan" } as const;
+    terms = { planName: plan.name, planPrice: Number(plan.price), durationDays: plan.durationDays, discountPercent: Number(plan.discountPercent) };
+  }
+  if (!terms.planName) return { error: "Choose a plan or name this membership" } as const;
+  const endsAt = data.endsAt ?? new Date(data.startsAt.getTime() + terms.durationDays * 86_400_000);
   if (endsAt <= data.startsAt) return { error: "Membership end date must be after its start date" } as const;
-  return { customer, endsAt } as const;
+  return { customer, endsAt, terms: { ...terms, planName: terms.planName } } as const;
 }
+
+serviceCenterRouter.get("/membership-plans", async (req, res) => {
+  const plans = await prisma.membershipPlan.findMany({ where: { tenantId: tenantId(req) }, include: { _count: { select: { memberships: true } } }, orderBy: [{ isActive: "desc" }, { name: "asc" }] });
+  res.json({ plans });
+});
+serviceCenterRouter.post("/membership-plans", async (req, res) => {
+  const parsed = planSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid plan", details: parsed.error.flatten() }); return; }
+  try {
+    res.status(201).json({ plan: await prisma.membershipPlan.create({ data: { tenantId: tenantId(req), ...parsed.data } }) });
+  } catch (error) {
+    if ((error as { code?: string }).code === "P2002") { res.status(409).json({ error: "A plan with this name already exists" }); return; }
+    throw error;
+  }
+});
+serviceCenterRouter.patch("/membership-plans/:id", async (req, res) => {
+  const parsed = planSchema.partial().safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid plan", details: parsed.error.flatten() }); return; }
+  const tid = tenantId(req);
+  try {
+    // Members already on the plan keep the terms they were sold (snapshot).
+    const updated = await prisma.membershipPlan.updateMany({ where: { id: req.params.id, tenantId: tid }, data: parsed.data });
+    if (!updated.count) { res.status(404).json({ error: "Plan not found" }); return; }
+    res.json({ plan: await prisma.membershipPlan.findUniqueOrThrow({ where: { id: req.params.id } }) });
+  } catch (error) {
+    if ((error as { code?: string }).code === "P2002") { res.status(409).json({ error: "A plan with this name already exists" }); return; }
+    throw error;
+  }
+});
+serviceCenterRouter.delete("/membership-plans/:id", async (req, res) => {
+  const tid = tenantId(req);
+  const plan = await prisma.membershipPlan.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { _count: { select: { memberships: true } } } });
+  if (!plan) { res.status(404).json({ error: "Plan not found" }); return; }
+  if (plan._count.memberships > 0) { res.status(409).json({ error: "Members have been sold this plan — deactivate it instead of deleting" }); return; }
+  await prisma.membershipPlan.delete({ where: { id: plan.id } });
+  res.status(204).send();
+});
+
+/** Renew: extends from the later of now and the current end date (so an early renewal loses no days), reactivates, and optionally re-prices from the plan's current terms. */
+serviceCenterRouter.post("/memberships/:id/renew", async (req, res) => {
+  const tid = tenantId(req);
+  const current = await prisma.membership.findFirst({ where: { id: req.params.id, tenantId: tid } });
+  if (!current) { res.status(404).json({ error: "Membership not found" }); return; }
+  if (current.status === "CANCELLED") { res.status(409).json({ error: "A cancelled membership can't be renewed — sell a new one" }); return; }
+  const now = new Date();
+  const from = current.endsAt > now ? current.endsAt : now;
+  const membership = await prisma.membership.update({
+    where: { id: current.id },
+    data: { status: "ACTIVE", endsAt: new Date(from.getTime() + current.durationDays * 86_400_000) },
+    include: membershipInclude,
+  });
+  res.json({ membership: withPlanSnapshot(membership) });
+});
 
 serviceCenterRouter.post("/memberships", async (req, res) => {
   const parsed = membershipSchema.safeParse(req.body);
@@ -143,7 +219,7 @@ serviceCenterRouter.post("/memberships", async (req, res) => {
   const resolved = await resolveMembership(tid, parsed.data);
   if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
   const membership = await prisma.membership.create({
-    data: { tenantId: tid, ...parsed.data, endsAt: resolved.endsAt },
+    data: { tenantId: tid, customerId: parsed.data.customerId, planId: parsed.data.planId ?? null, ...resolved.terms, startsAt: parsed.data.startsAt, status: parsed.data.status, endsAt: resolved.endsAt },
     include: membershipInclude,
   });
   res.status(201).json({ membership: withPlanSnapshot(membership) });
@@ -153,14 +229,15 @@ serviceCenterRouter.patch("/memberships/:id", async (req, res) => {
   const tid = tenantId(req);
   const current = await prisma.membership.findFirst({ where: { id: req.params.id, tenantId: tid } });
   if (!current) { res.status(404).json({ error: "Membership not found" }); return; }
-  const parsed = membershipSchema.partial().safeParse(req.body);
+  const parsed = partialNoDefaults(membershipSchema).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid membership", details: parsed.error.flatten() }); return; }
   const merged = membershipSchema.parse({ ...current, ...parsed.data });
-  const resolved = await resolveMembership(tid, merged);
+  const newPlan = parsed.data.planId && parsed.data.planId !== current.planId ? parsed.data.planId : null;
+  const resolved = await resolveMembership(tid, { ...merged, planId: newPlan });
   if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
   const membership = await prisma.membership.update({
     where: { id: current.id },
-    data: { ...parsed.data, endsAt: resolved.endsAt },
+    data: { customerId: merged.customerId, planId: parsed.data.planId !== undefined ? parsed.data.planId : current.planId, ...resolved.terms, startsAt: merged.startsAt, status: merged.status, endsAt: resolved.endsAt },
     include: membershipInclude,
   });
   res.json({ membership: withPlanSnapshot(membership) });
@@ -225,6 +302,28 @@ async function resolveMembershipPaymentReference(tid: string, method: { name: st
   return cleanReference;
 }
 
+/** Keeps the unified ledger in step with a membership payment: PAID has exactly one
+ * COMPLETE transaction (amount/method/reference kept current); anything else voids it. */
+async function syncPaymentLedger(
+  tx: Prisma.TransactionClient,
+  tid: string,
+  payment: { id: string; status: string; amount: unknown; paymentMethodId: string; reference: string | null; membershipId: string },
+  customerId: string,
+  transactionNo: string | null,
+  userId: string | undefined,
+) {
+  const existing = await tx.transaction.findFirst({ where: { tenantId: tid, source: "MEMBERSHIP_PAYMENT", sourceRefId: payment.id } });
+  if (payment.status !== "PAID") {
+    if (existing) await tx.transaction.update({ where: { id: existing.id }, data: { status: "VOIDED" } });
+    return;
+  }
+  const fields = { amount: Number(payment.amount), paymentMethodId: payment.paymentMethodId, reference: payment.reference, customerId, status: "COMPLETE" as const };
+  if (existing) { await tx.transaction.update({ where: { id: existing.id }, data: fields }); return; }
+  await tx.transaction.create({
+    data: { tenantId: tid, transactionNo: transactionNo!, direction: "IN", source: "MEMBERSHIP_PAYMENT", employeeId: userId, description: "Membership payment", sourceRefId: payment.id, ...fields },
+  });
+}
+
 serviceCenterRouter.post("/membership-payments", async (req, res) => {
   const parsed = membershipPaymentSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid membership payment", details: parsed.error.flatten() }); return; }
@@ -233,7 +332,12 @@ serviceCenterRouter.post("/membership-payments", async (req, res) => {
   if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
   const reference = await resolveMembershipPaymentReference(tid, resolved.paymentMethod, parsed.data.reference);
   const paidAt = parsed.data.status === "PAID" ? (parsed.data.paidAt ?? new Date()) : parsed.data.paidAt;
-  const membershipPayment = await prisma.membershipPayment.create({ data: { tenantId: tid, ...parsed.data, reference, paidAt }, include: membershipPaymentInclude });
+  const transactionNo = parsed.data.status === "PAID" ? await nextTransactionNo(tid) : null;
+  const membershipPayment = await prisma.$transaction(async (tx) => {
+    const created = await tx.membershipPayment.create({ data: { tenantId: tid, ...parsed.data, reference, paidAt }, include: membershipPaymentInclude });
+    await syncPaymentLedger(tx, tid, created, resolved.membership.customerId, transactionNo, req.userId);
+    return created;
+  });
   res.status(201).json({ membershipPayment: withPaymentMembershipPlan(membershipPayment) });
 });
 
@@ -251,12 +355,22 @@ serviceCenterRouter.patch("/membership-payments/:id", async (req, res) => {
   const reference = parsed.data.reference !== undefined || parsed.data.paymentMethodId !== undefined ? await resolveMembershipPaymentReference(tid, resolved.paymentMethod, nextReference, current.id) : current.reference;
   const nextStatus = parsed.data.status ?? current.status;
   const paidAt = parsed.data.paidAt !== undefined ? parsed.data.paidAt : nextStatus === "PAID" && !current.paidAt ? new Date() : current.paidAt;
-  const membershipPayment = await prisma.membershipPayment.update({ where: { id: current.id }, data: { ...parsed.data, reference, paidAt }, include: membershipPaymentInclude });
+  const transactionNo = nextStatus === "PAID" ? await nextTransactionNo(tid) : null;
+  const membershipPayment = await prisma.$transaction(async (tx) => {
+    const updated = await tx.membershipPayment.update({ where: { id: current.id }, data: { ...parsed.data, reference, paidAt }, include: membershipPaymentInclude });
+    await syncPaymentLedger(tx, tid, updated, resolved.membership.customerId, transactionNo, req.userId);
+    return updated;
+  });
   res.json({ membershipPayment: withPaymentMembershipPlan(membershipPayment) });
 });
 
 serviceCenterRouter.delete("/membership-payments/:id", async (req, res) => {
-  const deleted = await prisma.membershipPayment.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } });
+  const tid = tenantId(req);
+  const deleted = await prisma.$transaction(async (tx) => {
+    // A deleted payment must not stay in the ledger as money received.
+    await tx.transaction.updateMany({ where: { tenantId: tid, source: "MEMBERSHIP_PAYMENT", sourceRefId: req.params.id }, data: { status: "VOIDED" } });
+    return tx.membershipPayment.deleteMany({ where: { id: req.params.id, tenantId: tid } });
+  });
   if (!deleted.count) { res.status(404).json({ error: "Membership payment not found" }); return; }
   res.status(204).send();
 });
@@ -468,17 +582,19 @@ serviceCenterRouter.post("/appointments/:id/complete", async (req, res) => {
   try {
     const tax = await taxSettingsFor(tid);
     const fallbackTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
-    const listPrice = Number(appt.serviceVariant?.price ?? appt.service.price);
-    const discountPercent = appt.membership ? Number(appt.membership.discountPercent) : 0;
-    const overridePrice = discountPercent > 0 ? round2(listPrice * (1 - discountPercent / 100)) : undefined;
+    // The chosen membership only discounts while it's current — a lapsed/paused one gives nothing.
+    const now = new Date();
+    const m = appt.membership;
+    const memberDiscount = m && m.status === "ACTIVE" && m.startsAt <= now && m.endsAt >= now && Number(m.discountPercent) > 0
+      ? { percent: Number(m.discountPercent), label: `Membership: ${m.planName} (${Number(m.discountPercent)}% off)` }
+      : null;
     const order = await prisma.$transaction(async (tx) => {
       const itemsCreate = await resolveServiceLines(
         tx, tid,
         [{
           serviceId: appt.serviceId, variantId: appt.serviceVariantId ?? undefined, quantity: 1, addons: [],
-          ...(overridePrice !== undefined ? { unitPrice: overridePrice, overrideReason: `Membership: ${appt.membership!.planName} (${discountPercent}% off)` } : {}),
         }],
-        appt.locationId, req.userId, fallbackTax,
+        appt.locationId, req.userId, fallbackTax, memberDiscount,
       );
       const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
       const created = await tx.posOrder.create({

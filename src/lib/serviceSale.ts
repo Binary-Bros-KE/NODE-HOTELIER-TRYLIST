@@ -32,6 +32,9 @@ export async function resolveServiceLines(
   effectiveLocationId: string | null,
   userId: string | undefined,
   retailFallbackTax: TaxFallback,
+  // The customer's current membership discount: applied as a price change on
+  // every line that wasn't already given an explicit price at the till.
+  memberDiscount?: { percent: number; label: string } | null,
 ): Promise<Prisma.PosOrderItemUncheckedCreateWithoutOrderInput[]> {
   const serviceIds = [...new Set(inputs.map((item) => item.serviceId))];
   const addonIds = [...new Set(inputs.flatMap((item) => item.addons.map((a) => a.addonId)))];
@@ -46,7 +49,8 @@ export async function resolveServiceLines(
   if (notHere) throw Object.assign(new Error(`"${notHere.name}" isn't sold at this location`), { status: 409 });
   const byId = new Map(services.map((s) => [s.id, s]));
   const addonById = new Map(serviceAddons.map((a) => [a.id, a]));
-  return inputs.map((item) => {
+  return inputs.map((rawItem) => {
+    const item = rawItem;
     const service = byId.get(item.serviceId)!;
     // Sizes/options: required once a service has any active ones.
     if (service.variants.length > 0 && !item.variantId) throw Object.assign(new Error(`Choose an option for "${service.name}"`), { status: 400 });
@@ -59,6 +63,10 @@ export async function resolveServiceLines(
       if (addon.serviceCategoryId && addon.serviceCategoryId !== service.categoryId) throw Object.assign(new Error(`"${addon.name}" isn't offered with "${service.name}"`), { status: 400 });
     }
     const listPrice = variant?.price ?? service.price;
+    if (memberDiscount && memberDiscount.percent > 0 && item.unitPrice === undefined) {
+      item.unitPrice = Math.round(Number(listPrice) * (1 - memberDiscount.percent / 100) * 100) / 100;
+      item.overrideReason = memberDiscount.label;
+    }
     // Override: charge another price, but keep the list price and the reason on the line.
     const overridden = item.unitPrice !== undefined && Math.abs(item.unitPrice - Number(listPrice)) > 0.004;
     if (overridden && !(item.overrideReason && item.overrideReason.length >= 3)) throw Object.assign(new Error(`Give a reason for changing the price of "${service.name}"`), { status: 400 });

@@ -478,9 +478,10 @@ model Tenant {
   supplierBalanceEntries     SupplierBalanceEntry[]
   serviceProviders           ServiceProvider[]
   memberships                Membership[]
+  membershipPlans            MembershipPlan[]
   membershipPayments         MembershipPayment[]
   appointments               Appointment[]
-  shiftTemplates             ShiftTemplate[]
+  shiftTemplates            ShiftTemplate[]
   shiftRotations             EmployeeShiftRotation[]
   shiftOverrides             EmployeeShiftOverride[]
   attendanceRecords          AttendanceRecord[]
@@ -1391,6 +1392,7 @@ enum TransactionSource {
   SUPPLIER_PAYMENT
   SALARY_PAYMENT
   COMMERCIAL_DOCUMENT_PAYMENT
+  MEMBERSHIP_PAYMENT
 }
 
 // A single, unified ledger of every payment actually made across the
@@ -3427,6 +3429,11 @@ model Membership {
   id              String              @id @default(cuid())
   tenantId        String
   customerId      String
+  // The catalog plan it was sold from (null = a one-off). The name/price/
+  // duration/discount below are always the snapshot actually sold, so editing
+  // a plan never changes a member already on it.
+  planId          String?
+  plan            MembershipPlan?     @relation(fields: [planId], references: [id], onDelete: SetNull)
   planName        String
   planPrice       Decimal             @default(0) @db.Decimal(12, 2)
   durationDays    Int                 @default(30)
@@ -3442,6 +3449,24 @@ model Membership {
   appointments    Appointment[]
 
   @@index([tenantId, customerId, status])
+}
+
+model MembershipPlan {
+  id              String       @id @default(cuid())
+  tenantId        String
+  name            String
+  price           Decimal      @default(0) @db.Decimal(12, 2)
+  durationDays    Int          @default(30)
+  discountPercent Decimal      @default(0) @db.Decimal(5, 2)
+  description     String?
+  isActive        Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberships     Membership[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, isActive])
 }
 
 model MembershipPayment {
