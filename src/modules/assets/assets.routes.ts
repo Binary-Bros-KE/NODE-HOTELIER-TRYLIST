@@ -28,6 +28,7 @@ const createSchema = z.object({
   quantity: z.coerce.number().min(0).default(0),
   unitCost: optionalNumber(0),
   locationId: optionalId,
+  roomId: optionalId,
   // Only meaningful when quantity + unitCost together represent a real
   // purchase to log — see the "was there money spent" check in POST /.
   paymentMethodId: optionalId,
@@ -62,6 +63,7 @@ const tenantId = (req: { tenantId?: string }) => {
 const assetInclude = {
   category: { select: { id: true, name: true } },
   location: { select: { id: true, name: true } },
+  room: { select: { id: true, number: true, name: true, roomType: { select: { id: true, name: true } } } },
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
   updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
 } as const;
@@ -78,24 +80,74 @@ assetsRouter.get("/", async (req, res) => {
     search: optionalText(120),
     categoryId: optionalId,
     locationId: optionalId,
+    roomId: optionalId,
+    assignment: z.enum(["all", "rooms", "locations", "unassigned"]).default("all"),
     active: z.enum(["true", "false"]).optional(),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid asset filters", details: query.error.flatten() }); return; }
-  const { search, categoryId, locationId, active } = query.data;
+  const { search, categoryId, locationId, roomId, assignment, active } = query.data;
   const tid = tenantId(req);
   const where: Prisma.AssetWhereInput = {
     tenantId: tid,
     ...(categoryId ? { categoryId } : {}),
     ...(locationId ? { locationId } : {}),
+    ...(roomId ? { roomId } : {}),
+    ...(assignment === "rooms" ? { roomId: { not: null } } : {}),
+    ...(assignment === "locations" ? { roomId: null, locationId: { not: null } } : {}),
+    ...(assignment === "unassigned" ? { roomId: null, locationId: null } : {}),
     ...(active ? { isActive: active === "true" } : {}),
     ...(search ? { OR: [
       { name: { contains: search, mode: "insensitive" } },
       { assetNo: { contains: search, mode: "insensitive" } },
+      { room: { is: { number: { contains: search, mode: "insensitive" } } } },
     ] } : {}),
   };
   const assets = await prisma.asset.findMany({ where, include: assetInclude, orderBy: { name: "asc" } });
   const totalValue = assets.reduce((sum, a) => sum + Number(a.quantity) * Number(a.unitCost ?? 0), 0);
-  res.json({ assets, summary: { total: assets.length, totalValue } });
+  res.json({ assets, summary: { total: assets.length, totalValue, roomAssets: assets.filter((a) => a.roomId).length } });
+});
+
+assetsRouter.get("/reports/rooms", async (req, res) => {
+  const query = z.object({
+    roomId: optionalId,
+    active: z.enum(["true", "false"]).default("true"),
+  }).safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Invalid room asset filters", details: query.error.flatten() }); return; }
+  const tid = tenantId(req);
+  const assets = await prisma.asset.findMany({
+    where: {
+      tenantId: tid,
+      roomId: query.data.roomId ? query.data.roomId : { not: null },
+      isActive: query.data.active === "true",
+    },
+    include: assetInclude,
+    orderBy: [{ room: { number: "asc" } }, { name: "asc" }],
+  });
+  const rooms = Array.from(assets.reduce((map, asset) => {
+    if (!asset.room) return map;
+    const row = map.get(asset.room.id) ?? {
+      room: asset.room,
+      assetCount: 0,
+      quantity: 0,
+      value: 0,
+      assets: [] as typeof assets,
+    };
+    row.assetCount += 1;
+    row.quantity += Number(asset.quantity);
+    row.value += Number(asset.quantity) * Number(asset.unitCost ?? 0);
+    row.assets.push(asset);
+    map.set(asset.room.id, row);
+    return map;
+  }, new Map<string, { room: NonNullable<(typeof assets)[number]["room"]>; assetCount: number; quantity: number; value: number; assets: typeof assets }>()).values());
+  res.json({
+    rooms,
+    summary: {
+      rooms: rooms.length,
+      assets: assets.length,
+      quantity: rooms.reduce((sum, room) => sum + room.quantity, 0),
+      value: rooms.reduce((sum, room) => sum + room.value, 0),
+    },
+  });
 });
 
 assetsRouter.get("/:id", async (req, res) => {
@@ -111,7 +163,7 @@ assetsRouter.post("/", async (req, res, next) => {
   const data = createSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid asset", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
-  const { quantity, paymentMethodId, reference, categoryId, locationId, ...rest } = data.data;
+  const { quantity, paymentMethodId, reference, categoryId, locationId, roomId, ...rest } = data.data;
   const hasPurchase = quantity > 0 && rest.unitCost !== undefined && rest.unitCost > 0;
   try {
     if (categoryId) {
@@ -122,13 +174,17 @@ assetsRouter.post("/", async (req, res, next) => {
       const location = await prisma.location.findFirst({ where: { id: locationId, tenantId: tid } });
       if (!location) { res.status(400).json({ error: "Choose a location from this property" }); return; }
     }
+    if (roomId) {
+      const room = await prisma.room.findFirst({ where: { id: roomId, tenantId: tid } });
+      if (!room) { res.status(400).json({ error: "Choose a room from this property" }); return; }
+    }
     if (hasPurchase && !paymentMethodId) { res.status(400).json({ error: "Choose a payment method for this purchase" }); return; }
     const resolvedPayment = paymentMethodId ? await resolvePaymentMethod(tid, paymentMethodId, reference) : null;
 
     const assetNo = await nextAssetNo(tid);
     const transactionNo = hasPurchase ? await nextTransactionNo(tid) : null;
     const asset = await prisma.$transaction(async (tx) => {
-      const created = await tx.asset.create({ data: { tenantId: tid, assetNo, categoryId, locationId, quantity, createdBy: req.userId, ...rest } });
+      const created = await tx.asset.create({ data: { tenantId: tid, assetNo, categoryId, locationId, roomId, quantity, createdBy: req.userId, ...rest } });
       if (quantity > 0) {
         const movement = await tx.assetMovement.create({
           data: { tenantId: tid, assetId: created.id, type: "RECEIPT", quantity, unitCost: rest.unitCost, paymentMethodId: hasPurchase ? paymentMethodId : undefined, reference: hasPurchase ? resolvedPayment?.reference : undefined, note: "Opening quantity", performedBy: req.userId },
@@ -173,6 +229,10 @@ assetsRouter.patch("/:id", async (req, res, next) => {
     if (data.data.locationId) {
       const location = await prisma.location.findFirst({ where: { id: data.data.locationId, tenantId: tid } });
       if (!location) { res.status(400).json({ error: "Choose a location from this property" }); return; }
+    }
+    if (data.data.roomId) {
+      const room = await prisma.room.findFirst({ where: { id: data.data.roomId, tenantId: tid } });
+      if (!room) { res.status(400).json({ error: "Choose a room from this property" }); return; }
     }
     const updated = await prisma.asset.updateMany({ where: { id: req.params.id, tenantId: tid }, data: { ...data.data, updatedBy: req.userId } });
     if (!updated.count) { res.status(404).json({ error: "Asset not found" }); return; }
