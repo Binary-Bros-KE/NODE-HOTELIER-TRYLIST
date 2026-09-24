@@ -413,31 +413,6 @@ serviceCenterRouter.get("/membership-payment-options", async (req, res) => {
   res.json({ memberships: memberships.map(withPlanSnapshot), paymentMethods });
 });
 
-// Providers are employees pinned to a service-selling location (assign them under Team). Read-only here.
-const staffInclude = {
-  providedAppointments: { include: { customer: true, service: true }, orderBy: { startsAt: "desc" as const }, take: 20 },
-  _count: { select: { providedAppointments: true } },
-  locations: { select: { id: true, name: true } },
-} as const;
-async function staffView(e: ProviderRow & { providedAppointments: unknown[]; _count: { providedAppointments: number }; locations: { id: string; name: string }[] }, tid: string) {
-  const shift = await resolveShiftFor(tid, e.id);
-  const { providedAppointments, _count, locations, ...rest } = e;
-  return { ...toProvider(rest as ProviderRow), appointments: providedAppointments, _count: { appointments: _count.providedAppointments }, locations, shift: shift ? { name: shift.name, startTime: shift.startTime, endTime: shift.endTime } : null };
-}
-
-serviceCenterRouter.get("/providers", async (req, res) => {
-  const tid = tenantId(req);
-  const staff = await prisma.employee.findMany({ where: serviceStaffWhere(tid), include: staffInclude, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] });
-  res.json({ providers: await Promise.all(staff.map((e) => staffView(e, tid))) });
-});
-
-serviceCenterRouter.get("/providers/:id", async (req, res) => {
-  const tid = tenantId(req);
-  const e = await prisma.employee.findFirst({ where: { ...serviceStaffWhere(tid), id: req.params.id }, include: staffInclude });
-  if (!e) { res.status(404).json({ error: "Provider not found" }); return; }
-  res.json({ provider: await staffView(e, tid) });
-});
-
 serviceCenterRouter.get("/payment-methods", async (req, res) => {
   const tid = tenantId(req);
   const paymentMethods = await prisma.paymentMethod.findMany({
