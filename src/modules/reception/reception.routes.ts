@@ -12,6 +12,7 @@ import { applyCustomerBalance, folioCreditOutstanding } from "../../lib/customer
 import { createRoomTask } from "../../lib/housekeeping.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
+import { nairobiParts } from "../../lib/shifts.js";
 
 export const receptionRouter = Router();
 receptionRouter.use(requireModule("RESERVATIONS"));
@@ -98,7 +99,7 @@ const reservationUpdateSchema = z.object({
 const cancelSchema = z.object({ cancellationReason: z.enum(CANCELLATION_REASONS), cancellationNotes: optionalText(500) });
 const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional() }).default({});
 const extendSchema = z.object({ checkOut: z.coerce.date(), quantityOverride: z.coerce.number().positive().optional() });
-const roomChargeSchema = z.object({ rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional() }).default({});
+const roomChargeSchema = z.object({ roomId: z.string().cuid().optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional() }).default({});
 const roomChangeSchema = z.object({
   roomId: z.string().cuid(),
   effectiveAt: z.coerce.date(),
@@ -171,6 +172,11 @@ async function logActivity(
 }
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+function sameNairobiDay(a: Date, b: Date) {
+  const x = nairobiParts(a);
+  const y = nairobiParts(b);
+  return x.year === y.year && x.month === y.month && x.day === y.day;
+}
 
 /** Terms as stored: complimentary ignores any discount, a paid room ignores
  * the complimentary reason, and a zero discount is no discount. */
@@ -533,9 +539,20 @@ receptionRouter.patch("/reservations/:id/room-charge", async (req, res) => {
   const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { room: { include: { roomType: true } }, folio: { include: { payments: true } } } });
   if (!current || !current.folio) { res.status(404).json({ error: "Reservation not found" }); return; }
   if (current.status !== "CHECKED_IN") { res.status(409).json({ error: "Only a checked-in stay can have its room charge updated" }); return; }
-  if (current.folio.payments.length > 0) { res.status(409).json({ error: "Room charge can only be replaced before any payment is recorded" }); return; }
-  const charge = await resolveRoomCharge(prisma, current.room, { rateId: data.data.rateId ?? current.rateId, mealPlan: data.data.rateId || current.rateId ? undefined : current.mealPlan, headcount: current.adults + current.children, quantityOverride: data.data.quantityOverride }, current.checkIn, current.checkOut, await taxDefaults(tid));
+  if (current.folio.payments.length > 0) { res.status(409).json({ error: "Room can only be corrected before any payment is recorded" }); return; }
+  if (!sameNairobiDay(current.checkIn, new Date())) { res.status(409).json({ error: "Room correction is only available on the check-in date. Use room upgrade/change for later days." }); return; }
+  const targetRoomId = data.data.roomId ?? current.roomId;
+  const room = targetRoomId === current.roomId
+    ? current.room
+    : await prisma.room.findFirst({ where: { id: targetRoomId, tenantId: tid, status: "VACANT", cleanliness: "CLEAN" }, include: { roomType: true } });
+  if (!room) { res.status(400).json({ error: "Choose a clean, vacant replacement room" }); return; }
+  if (targetRoomId !== current.roomId && !(await roomIsAvailable({ tenantId: tid, roomId: targetRoomId, checkIn: current.checkIn, checkOut: current.checkOut, excludeId: current.id }))) {
+    res.status(409).json({ error: "That replacement room is already booked for this stay" });
+    return;
+  }
+  const charge = await resolveRoomCharge(prisma, room, { rateId: data.data.rateId ?? (targetRoomId === current.roomId ? current.rateId : undefined), mealPlan: data.data.rateId || (targetRoomId === current.roomId && current.rateId) ? undefined : current.mealPlan, headcount: current.adults + current.children, quantityOverride: data.data.quantityOverride }, current.checkIn, current.checkOut, await taxDefaults(tid));
   const actor = await resolveActor(tid, req);
+  const oldRoomNumber = current.room.number;
   const reservation = await prisma.$transaction(async (tx) => {
     await tx.folioLineItem.deleteMany({ where: { folioId: current.folio!.id, source: "ROOM" } });
     await tx.folioLineItem.create({
@@ -553,9 +570,13 @@ receptionRouter.patch("/reservations/:id/room-charge", async (req, res) => {
         createdBy: req.userId,
       },
     });
-    await tx.reservation.update({ where: { id: current.id }, data: { rateId: charge.rateId, rateName: charge.rateName, updatedBy: req.userId } });
+    await tx.reservation.update({ where: { id: current.id }, data: { roomId: room.id, rateId: charge.rateId, rateName: charge.rateName, updatedBy: req.userId } });
+    if (room.id !== current.roomId) {
+      await tx.room.update({ where: { id: current.roomId }, data: { status: "VACANT" } });
+      await tx.room.update({ where: { id: room.id }, data: { status: "OCCUPIED" } });
+    }
     await syncRoomAdjustment(tx, tid, current.id, req.userId);
-    await logActivity(tx, tid, current.id, "ROOM_CHARGE_CHANGED", "Room charge replaced before payment", actor);
+    await logActivity(tx, tid, current.id, "ROOM_CHARGE_CHANGED", room.id === current.roomId ? "Room charge replaced before payment" : `Room corrected from ${oldRoomNumber} to ${room.number} before payment`, actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation, totals: folioTotals(reservation.folio, await taxDefaults(tid)) });
