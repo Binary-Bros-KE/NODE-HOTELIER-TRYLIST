@@ -476,9 +476,9 @@ model Tenant {
   stockTransfers             StockTransfer[]
   supplierPayments           SupplierPayment[]
   supplierBalanceEntries     SupplierBalanceEntry[]
-  serviceProviders           ServiceProvider[]
   memberships                Membership[]
   membershipPlans            MembershipPlan[]
+  membershipVisits           MembershipVisit[]
   membershipPayments         MembershipPayment[]
   appointments               Appointment[]
   shiftTemplates            ShiftTemplate[]
@@ -3015,6 +3015,9 @@ model Employee {
   defaultLocationId             String?
   defaultLocation               Location?               @relation("EmployeeDefaultLocation", fields: [defaultLocationId], references: [id], onDelete: SetNull)
   managedLocations              Location[]              @relation("LocationManager")
+  // Appointments this employee is the service provider for. A provider is just
+  // an employee pinned to a location that sells services - no separate table.
+  providedAppointments          Appointment[]           @relation("AppointmentProvider")
   sessions                      Session[]
   createdReservations           Reservation[]           @relation("ReservationCreatedBy")
   updatedReservations           Reservation[]           @relation("ReservationUpdatedBy")
@@ -3410,21 +3413,6 @@ model PlatformSession {
   @@index([adminId])
 }
 
-model ServiceProvider {
-  id           String        @id @default(cuid())
-  tenantId     String
-  name         String
-  specialty    String?
-  phone        String?
-  isActive     Boolean       @default(true)
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  appointments Appointment[]
-
-  @@index([tenantId, isActive])
-}
-
 model Membership {
   id              String              @id @default(cuid())
   tenantId        String
@@ -3438,6 +3426,9 @@ model Membership {
   planPrice       Decimal             @default(0) @db.Decimal(12, 2)
   durationDays    Int                 @default(30)
   discountPercent Decimal             @default(0) @db.Decimal(5, 2)
+  visitLimit      Int?
+  discountOnProducts Boolean          @default(false)
+  visits          MembershipVisit[]
   startsAt        DateTime
   endsAt          DateTime
   status          MembershipStatus    @default(ACTIVE)
@@ -3451,6 +3442,21 @@ model Membership {
   @@index([tenantId, customerId, status])
 }
 
+// One check-in of a member (a gym entry, a class attended). Counted against
+// the membership's visitLimit for its current term.
+model MembershipVisit {
+  id           String     @id @default(cuid())
+  tenantId     String
+  membershipId String
+  visitedAt    DateTime   @default(now())
+  note         String?
+  recordedBy   String?
+  tenant       Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  membership   Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, membershipId, visitedAt])
+}
+
 model MembershipPlan {
   id              String       @id @default(cuid())
   tenantId        String
@@ -3459,6 +3465,10 @@ model MembershipPlan {
   durationDays    Int          @default(30)
   discountPercent Decimal      @default(0) @db.Decimal(5, 2)
   description     String?
+  // Max visits per membership term (null = unlimited). Frozen onto each membership sold.
+  visitLimit      Int?
+  // Whether the % discount also applies to retail product sales, not just services.
+  discountOnProducts Boolean   @default(false)
   isActive        Boolean      @default(true)
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
@@ -3497,7 +3507,9 @@ model Appointment {
   serviceId        String
   // A size/duration option of that service (a variant's own price/duration wins).
   serviceVariantId String?
-  providerId       String
+  // The employee doing the service (null only on appointments that predate
+  // providers being employees and couldn't be matched to one).
+  providerId       String?
   membershipId     String?
   paymentMethodId  String?
   // Which selling point this happens at - optional, same "unallocated = any
@@ -3523,7 +3535,7 @@ model Appointment {
   customer         Customer          @relation(fields: [customerId], references: [id], onDelete: Restrict)
   service          Service           @relation("AppointmentService", fields: [serviceId], references: [id], onDelete: Restrict)
   serviceVariant   ServiceVariant?   @relation("AppointmentServiceVariant", fields: [serviceVariantId], references: [id], onDelete: SetNull)
-  provider         ServiceProvider   @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  provider         Employee?         @relation("AppointmentProvider", fields: [providerId], references: [id], onDelete: Restrict)
   membership       Membership?       @relation(fields: [membershipId], references: [id], onDelete: SetNull)
   paymentMethod    PaymentMethod?    @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
   location         Location?         @relation(fields: [locationId], references: [id], onDelete: SetNull)

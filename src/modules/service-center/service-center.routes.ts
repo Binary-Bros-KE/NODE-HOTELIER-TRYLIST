@@ -9,6 +9,8 @@ import { resolveServiceLines } from "../../lib/serviceSale.js";
 import { computeStockRequirements } from "../../lib/stockRequirements.js";
 import { deductStockForOrder, resolveStockLocationId } from "../../lib/orderStock.js";
 import { partialNoDefaults } from "../../lib/zod.js";
+import { visitsInTerm } from "../../lib/membership.js";
+import { isWithinShift, resolveShiftFor } from "../../lib/shifts.js";
 import { effectiveMembershipStatus } from "../../lib/membership.js";
 import { nextTransactionNo } from "../../lib/sequence.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
@@ -27,6 +29,8 @@ const planSchema = z.object({
   durationDays: z.coerce.number().int().min(1).max(3650).default(30),
   discountPercent: z.coerce.number().min(0).max(100).default(0),
   description: z.string().trim().max(300).nullable().optional(),
+  visitLimit: z.preprocess((v) => (v === "" ? null : v), z.coerce.number().int().min(1).max(100_000).nullable()).optional(),
+  discountOnProducts: z.boolean().default(false),
   isActive: z.boolean().default(true),
 });
 const membershipSchema = z.object({
@@ -37,6 +41,8 @@ const membershipSchema = z.object({
   planPrice: z.coerce.number().min(0).max(100_000_000).default(0),
   durationDays: z.coerce.number().int().min(1).max(3650).default(30),
   discountPercent: z.coerce.number().min(0).max(100).default(0),
+  visitLimit: z.preprocess((v) => (v === "" ? null : v), z.coerce.number().int().min(1).max(100_000).nullable()).optional(),
+  discountOnProducts: z.boolean().default(false),
   startsAt: z.coerce.date(),
   endsAt: z.coerce.date().optional(),
   status: membershipStatus.default("ACTIVE"),
@@ -54,12 +60,6 @@ const membershipPaymentSchema = z.object({
   status: paymentStatus.default("PAID"),
   reference: z.string().trim().max(120).nullable().optional(),
   paidAt: z.coerce.date().nullable().optional(),
-});
-const providerSchema = z.object({
-  name: z.string().trim().min(2).max(100),
-  specialty: z.string().trim().max(120).nullable().optional(),
-  phone: z.string().trim().max(30).nullable().optional(),
-  isActive: z.boolean().default(true),
 });
 const appointmentSchema = z.object({
   customerId: z.string().cuid(),
@@ -81,11 +81,20 @@ const tenantId = (req: { tenantId?: string }) => {
   if (!req.tenantId) throw new Error("Tenant context is required");
   return req.tenantId;
 };
+// A provider is just an employee: active, and pinned to a location that sells services.
+const providerSelect = { id: true, firstName: true, lastName: true, jobTitle: true, phone: true } as const;
+type ProviderRow = { id: string; firstName: string; lastName: string; jobTitle: string; phone: string };
+const toProvider = (e: ProviderRow | null | undefined) => (e ? { id: e.id, name: `${e.firstName} ${e.lastName}`.trim(), specialty: e.jobTitle, phone: e.phone, isActive: true } : null);
+const serviceStaffWhere = (tid: string, locationId?: string | null) => ({
+  tenantId: tid, status: "ACTIVE" as const,
+  locations: { some: locationId ? { id: locationId, canSellServices: true } : { canSellServices: true, isActive: true } },
+});
+
 const include = {
   customer: true,
   service: { include: { variants: { where: { isActive: true } }, locations: { select: { id: true } } } },
   serviceVariant: true,
-  provider: true,
+  provider: { select: providerSelect },
   membership: true,
   paymentMethod: true,
   location: { select: { id: true, name: true } },
@@ -95,6 +104,7 @@ const include = {
 const membershipInclude = {
   customer: true,
   payments: { include: { paymentMethod: true }, orderBy: { createdAt: "desc" as const } },
+  visits: { select: { id: true, visitedAt: true, note: true }, orderBy: { visitedAt: "desc" as const }, take: 500 },
   _count: { select: { appointments: true } },
 } as const;
 
@@ -110,12 +120,13 @@ function planSnapshot(membership: { id: string; planName: string; planPrice: unk
 }
 
 function withPlanSnapshot<T extends { id: string; planName: string; planPrice: unknown; durationDays: number; discountPercent: unknown }>(membership: T) {
-  const m = membership as T & { status?: string; endsAt?: Date };
-  return { ...membership, ...(m.status && m.endsAt ? { status: effectiveMembershipStatus(m.status, m.endsAt) } : {}), plan: planSnapshot(membership) };
+  const m = membership as T & { status?: string; endsAt?: Date; startsAt?: Date; visits?: { visitedAt: Date }[] };
+  const used = m.visits && m.startsAt && m.endsAt ? { visitsUsed: visitsInTerm({ startsAt: m.startsAt, endsAt: m.endsAt, durationDays: membership.durationDays }, m.visits) } : {};
+  return { ...membership, ...used, ...(m.status && m.endsAt ? { status: effectiveMembershipStatus(m.status, m.endsAt) } : {}), plan: planSnapshot(membership) };
 }
 
-function withAppointmentMembershipPlan<T extends { membership: ({ id: string; planName: string; planPrice: unknown; durationDays: number; discountPercent: unknown } | null) }>(appointment: T) {
-  return { ...appointment, membership: appointment.membership ? withPlanSnapshot(appointment.membership) : null };
+function withAppointmentMembershipPlan<T extends { provider?: unknown; membership: ({ id: string; planName: string; planPrice: unknown; durationDays: number; discountPercent: unknown } | null) }>(appointment: T) {
+  return { ...appointment, provider: toProvider(appointment.provider as ProviderRow | null | undefined), membership: appointment.membership ? withPlanSnapshot(appointment.membership) : null };
 }
 
 serviceCenterRouter.get("/memberships", async (req, res) => {
@@ -147,11 +158,11 @@ async function resolveMembership(tid: string, data: z.infer<typeof membershipSch
   const customer = await prisma.customer.findFirst({ where: { id: data.customerId, tenantId: tid } });
   if (!customer) return { error: "Choose a valid customer" } as const;
   // A catalog plan supplies the terms that get frozen onto the membership.
-  let terms = { planName: data.planName, planPrice: data.planPrice, durationDays: data.durationDays, discountPercent: data.discountPercent };
+  let terms = { planName: data.planName, planPrice: data.planPrice, durationDays: data.durationDays, discountPercent: data.discountPercent, visitLimit: data.visitLimit ?? null, discountOnProducts: data.discountOnProducts };
   if (data.planId) {
     const plan = await prisma.membershipPlan.findFirst({ where: { id: data.planId, tenantId: tid } });
     if (!plan) return { error: "Choose a valid membership plan" } as const;
-    terms = { planName: plan.name, planPrice: Number(plan.price), durationDays: plan.durationDays, discountPercent: Number(plan.discountPercent) };
+    terms = { planName: plan.name, planPrice: Number(plan.price), durationDays: plan.durationDays, discountPercent: Number(plan.discountPercent), visitLimit: plan.visitLimit, discountOnProducts: plan.discountOnProducts };
   }
   if (!terms.planName) return { error: "Choose a plan or name this membership" } as const;
   const endsAt = data.endsAt ?? new Date(data.startsAt.getTime() + terms.durationDays * 86_400_000);
@@ -174,7 +185,7 @@ serviceCenterRouter.post("/membership-plans", async (req, res) => {
   }
 });
 serviceCenterRouter.patch("/membership-plans/:id", async (req, res) => {
-  const parsed = planSchema.partial().safeParse(req.body);
+  const parsed = partialNoDefaults(planSchema).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid plan", details: parsed.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
@@ -193,6 +204,24 @@ serviceCenterRouter.delete("/membership-plans/:id", async (req, res) => {
   if (!plan) { res.status(404).json({ error: "Plan not found" }); return; }
   if (plan._count.memberships > 0) { res.status(409).json({ error: "Members have been sold this plan — deactivate it instead of deleting" }); return; }
   await prisma.membershipPlan.delete({ where: { id: plan.id } });
+  res.status(204).send();
+});
+
+serviceCenterRouter.post("/memberships/:id/visits", async (req, res) => {
+  const tid = tenantId(req);
+  const m = await prisma.membership.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { visits: { select: { visitedAt: true } } } });
+  if (!m) { res.status(404).json({ error: "Membership not found" }); return; }
+  const now = new Date();
+  if (effectiveMembershipStatus(m.status, m.endsAt, now) !== "ACTIVE" || m.startsAt > now) { res.status(409).json({ error: "This membership is not active - renew it before checking in" }); return; }
+  if (m.visitLimit != null && visitsInTerm(m, m.visits) >= m.visitLimit) { res.status(409).json({ error: `All ${m.visitLimit} visits for this term have been used` }); return; }
+  const note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 200) || null : null;
+  await prisma.membershipVisit.create({ data: { tenantId: tid, membershipId: m.id, note, recordedBy: req.userId } });
+  const membership = await prisma.membership.findUniqueOrThrow({ where: { id: m.id }, include: membershipInclude });
+  res.status(201).json({ membership: withPlanSnapshot(membership) });
+});
+serviceCenterRouter.delete("/memberships/:id/visits/:visitId", async (req, res) => {
+  const removed = await prisma.membershipVisit.deleteMany({ where: { id: req.params.visitId, membershipId: req.params.id, tenantId: tenantId(req) } });
+  if (!removed.count) { res.status(404).json({ error: "Visit not found" }); return; }
   res.status(204).send();
 });
 
@@ -260,7 +289,7 @@ const membershipPaymentInclude = {
   membership: {
     include: {
       customer: true,
-      appointments: { include: { service: true, provider: true }, orderBy: { startsAt: "desc" as const } },
+      appointments: { include: { service: true, provider: { select: providerSelect } }, orderBy: { startsAt: "desc" as const } },
     },
   },
 } as const;
@@ -384,53 +413,29 @@ serviceCenterRouter.get("/membership-payment-options", async (req, res) => {
   res.json({ memberships: memberships.map(withPlanSnapshot), paymentMethods });
 });
 
-const providerInclude = {
-  appointments: { include: { customer: true, service: true }, orderBy: { startsAt: "desc" as const }, take: 20 },
-  _count: { select: { appointments: true } },
+// Providers are employees pinned to a service-selling location (assign them under Team). Read-only here.
+const staffInclude = {
+  providedAppointments: { include: { customer: true, service: true }, orderBy: { startsAt: "desc" as const }, take: 20 },
+  _count: { select: { providedAppointments: true } },
+  locations: { select: { id: true, name: true } },
 } as const;
+async function staffView(e: ProviderRow & { providedAppointments: unknown[]; _count: { providedAppointments: number }; locations: { id: string; name: string }[] }, tid: string) {
+  const shift = await resolveShiftFor(tid, e.id);
+  const { providedAppointments, _count, locations, ...rest } = e;
+  return { ...toProvider(rest as ProviderRow), appointments: providedAppointments, _count: { appointments: _count.providedAppointments }, locations, shift: shift ? { name: shift.name, startTime: shift.startTime, endTime: shift.endTime } : null };
+}
 
 serviceCenterRouter.get("/providers", async (req, res) => {
-  const providers = await prisma.serviceProvider.findMany({ where: { tenantId: tenantId(req) }, include: providerInclude, orderBy: [{ isActive: "desc" }, { name: "asc" }] });
-  res.json({ providers });
+  const tid = tenantId(req);
+  const staff = await prisma.employee.findMany({ where: serviceStaffWhere(tid), include: staffInclude, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] });
+  res.json({ providers: await Promise.all(staff.map((e) => staffView(e, tid))) });
 });
 
 serviceCenterRouter.get("/providers/:id", async (req, res) => {
-  const provider = await prisma.serviceProvider.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include: providerInclude });
-  if (!provider) { res.status(404).json({ error: "Provider not found" }); return; }
-  res.json({ provider });
-});
-
-serviceCenterRouter.post("/providers", async (req, res) => {
-  const parsed = providerSchema.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: "Invalid provider", details: parsed.error.flatten() }); return; }
   const tid = tenantId(req);
-  const duplicate = await prisma.serviceProvider.findFirst({ where: { tenantId: tid, name: { equals: parsed.data.name, mode: "insensitive" } } });
-  if (duplicate) { res.status(409).json({ error: "A provider with this name already exists" }); return; }
-  const provider = await prisma.serviceProvider.create({ data: { tenantId: tid, ...parsed.data }, include: providerInclude });
-  res.status(201).json({ provider });
-});
-
-serviceCenterRouter.patch("/providers/:id", async (req, res) => {
-  const tid = tenantId(req);
-  const current = await prisma.serviceProvider.findFirst({ where: { id: req.params.id, tenantId: tid } });
-  if (!current) { res.status(404).json({ error: "Provider not found" }); return; }
-  const parsed = providerSchema.partial().safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: "Invalid provider", details: parsed.error.flatten() }); return; }
-  if (parsed.data.name) {
-    const duplicate = await prisma.serviceProvider.findFirst({ where: { tenantId: tid, name: { equals: parsed.data.name, mode: "insensitive" }, id: { not: current.id } } });
-    if (duplicate) { res.status(409).json({ error: "A provider with this name already exists" }); return; }
-  }
-  const provider = await prisma.serviceProvider.update({ where: { id: current.id }, data: parsed.data, include: providerInclude });
-  res.json({ provider });
-});
-
-serviceCenterRouter.delete("/providers/:id", async (req, res) => {
-  const tid = tenantId(req);
-  const current = await prisma.serviceProvider.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { _count: { select: { appointments: true } } } });
-  if (!current) { res.status(404).json({ error: "Provider not found" }); return; }
-  if (current._count.appointments) { res.status(409).json({ error: "This provider has appointment history. Deactivate them instead of deleting them." }); return; }
-  await prisma.serviceProvider.delete({ where: { id: current.id } });
-  res.status(204).send();
+  const e = await prisma.employee.findFirst({ where: { ...serviceStaffWhere(tid), id: req.params.id }, include: staffInclude });
+  if (!e) { res.status(404).json({ error: "Provider not found" }); return; }
+  res.json({ provider: await staffView(e, tid) });
 });
 
 serviceCenterRouter.get("/payment-methods", async (req, res) => {
@@ -505,7 +510,7 @@ async function resolveAppointment(tid: string, data: z.infer<typeof appointmentS
   const [customer, service, provider, membership, paymentMethod] = await Promise.all([
     prisma.customer.findFirst({ where: { id: data.customerId, tenantId: tid } }),
     prisma.service.findFirst({ where: { id: data.serviceId, tenantId: tid, isActive: true }, include: { variants: { where: { isActive: true } }, locations: { select: { id: true } } } }),
-    prisma.serviceProvider.findFirst({ where: { id: data.providerId, tenantId: tid, isActive: true } }),
+    prisma.employee.findFirst({ where: { ...serviceStaffWhere(tid, data.locationId), id: data.providerId }, select: providerSelect }),
     data.membershipId ? prisma.membership.findFirst({ where: { id: data.membershipId, tenantId: tid, customerId: data.customerId, status: "ACTIVE", startsAt: { lte: data.startsAt }, endsAt: { gte: data.startsAt } } }) : null,
     data.paymentMethodId ? prisma.paymentMethod.findFirst({ where: { id: data.paymentMethodId, tenantId: tid, isActive: true } }) : null,
   ]);
@@ -523,13 +528,19 @@ async function resolveAppointment(tid: string, data: z.infer<typeof appointmentS
   const durationMinutes = variant?.durationMinutes ?? service.durationMinutes;
   if (!durationMinutes) return { error: `"${service.name}" has no duration set — add one under Services before booking it` } as const;
   const endsAt = new Date(data.startsAt.getTime() + durationMinutes * 60_000);
+  // Availability comes from the employee's shift (rotation/override): no shift configured = unrestricted.
+  const providerName = `${provider.firstName} ${provider.lastName}`.trim();
+  const shift = await resolveShiftFor(tid, provider.id, data.startsAt);
+  if (shift && !(isWithinShift(shift, data.startsAt) && isWithinShift(shift, new Date(endsAt.getTime() - 60_000)))) {
+    return { error: `${providerName} is on the ${shift.name} shift (${shift.startTime}-${shift.endTime}) at that time - pick a time inside it` } as const;
+  }
   const conflict = await prisma.appointment.findFirst({ where: { tenantId: tid, providerId: provider.id, status: { notIn: ["CANCELLED", "NO_SHOW"] }, startsAt: { lt: endsAt }, endsAt: { gt: data.startsAt }, ...(excludeId ? { id: { not: excludeId } } : {}) } });
-  if (conflict) return { error: `${provider.name} already has an appointment during this time` } as const;
+  if (conflict) return { error: `${providerName} already has an appointment during this time` } as const;
   const listPrice = Number(variant?.price ?? service.price);
   const discount = membership ? Number(membership.discountPercent) : 0;
   // An estimate shown while booking - the real charged amount is fixed at completion (lib/serviceSale.ts),
   // since prices (and which membership is active) can move between booking and the appointment happening.
-  return { customer, service, variant, provider, membership, paymentMethod, endsAt, amount: round2(listPrice * (1 - discount / 100)) } as const;
+  return { customer, service, variant, provider: toProvider(provider)!, membership, paymentMethod, endsAt, amount: round2(listPrice * (1 - discount / 100)) } as const;
 }
 
 serviceCenterRouter.post("/appointments", async (req, res) => {
@@ -629,11 +640,11 @@ serviceCenterRouter.get("/appointment-options", async (req, res) => {
   const [customers, services, providers, memberships, paymentMethods, membershipPayments, locations] = await Promise.all([
     prisma.customer.findMany({ where: { tenantId: tid }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
     prisma.service.findMany({ where: { tenantId: tid, isActive: true }, include: { variants: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] }, locations: { select: { id: true } } }, orderBy: { name: "asc" } }),
-    prisma.serviceProvider.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
+    prisma.employee.findMany({ where: serviceStaffWhere(tid), select: { ...providerSelect, locations: { select: { id: true } } }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
     prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: true }, orderBy: { endsAt: "desc" } }),
     prisma.paymentMethod.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
     prisma.membershipPayment.findMany({ where: { tenantId: tid }, include: { membership: { include: { customer: true } }, paymentMethod: true }, orderBy: { createdAt: "desc" }, take: 100 }),
     prisma.location.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
   ]);
-  res.json({ customers, services, providers, memberships: memberships.map(withPlanSnapshot), paymentMethods, membershipPayments: membershipPayments.map(withPaymentMembershipPlan), locations });
+  res.json({ customers, services, providers: providers.map((p) => ({ ...toProvider(p)!, locationIds: p.locations.map((l) => l.id) })), memberships: memberships.map(withPlanSnapshot), paymentMethods, membershipPayments: membershipPayments.map(withPaymentMembershipPlan), locations });
 });

@@ -2179,12 +2179,16 @@ posRouter.post("/retail-orders", async (req, res) => {
           productNames.set(p.id, p.name);
           productsById.set(p.id, p);
         }
+        const memberDiscount = await currentMemberDiscount(tx, tid, customerId);
         itemsCreate = parsed.data.items.map((item) => {
           const product = productsById.get(item.productId)!;
+          const list = Number(product.sellingPrice);
+          const member = Boolean(memberDiscount?.onProducts && memberDiscount.percent > 0);
           return {
             productId: item.productId,
             quantity: item.quantity,
-            unitPrice: product.sellingPrice!,
+            unitPrice: member ? Math.round(list * (1 - memberDiscount!.percent / 100) * 100) / 100 : product.sellingPrice!,
+            ...(member ? { listPrice: product.sellingPrice!, priceOverrideReason: memberDiscount!.label, priceOverriddenBy: req.userId } : {}),
             taxRate: product.taxRate ?? retailFallbackTax.taxRate,
             taxMode: product.taxMode ?? retailFallbackTax.taxMode,
             taxTreatment: product.taxTreatment ?? retailFallbackTax.taxTreatment,
