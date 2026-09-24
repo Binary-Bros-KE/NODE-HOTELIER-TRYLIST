@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { Prisma, ReservationActivityAction } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
-import { requireModule } from "../../middleware/tenantContext.js";
+import { requireModule, hasPermission } from "../../middleware/tenantContext.js";
 import { nextCustomerNo, nextReservationNo, nextFolioNo, nextTransactionNo, nextGroupNo } from "../../lib/sequence.js";
 import { resolveActorLocationWithHint } from "../../lib/location.js";
 import { resolveRoomCharge, type RoomCharge, type TaxFallback } from "../../lib/roomCharge.js";
@@ -969,6 +969,7 @@ receptionRouter.patch("/reservations/:id/room-terms", async (req, res) => {
  * Records the payment on the (already settled) folio and the money in the
  * ledger, and brings the customer's balance down. */
 receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res) => {
+  if (!(await hasPermission(tenantId(req), req.userId, "CREDIT_COLLECT"))) { res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager", code: "CREDIT_COLLECT_REQUIRED" }); return; }
   const data = paymentSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "payment", data.error.flatten()); return; }
   const tid = tenantId(req);
@@ -1406,6 +1407,7 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
 /** Receive payment against the credit a group was checked out on. Spread over
  * the rooms with credit outstanding, oldest expected date first. */
 receptionRouter.post("/groups/:id/credit-payments", async (req, res, next) => {
+  if (!(await hasPermission(tenantId(req), req.userId, "CREDIT_COLLECT"))) { res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager", code: "CREDIT_COLLECT_REQUIRED" }); return; }
   const data = groupPaymentsSchema.safeParse(req.body ?? {});
   if (!data.success || data.data.payments.length === 0) { invalid(res, "payment", data.success ? { payments: ["Add at least one payment"] } : data.error.flatten()); return; }
   const tid = tenantId(req);

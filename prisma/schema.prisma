@@ -268,6 +268,10 @@ enum Permission {
   // Dispatch Requests): dispatch the items (a stock transfer to the kitchen's
   // location) or reject the request. Typically the storekeeper.
   STORE_DISPATCH
+  // Take payment against a debt: a completed-on-credit order, or a stay checked
+  // out on credit. Deliberately NOT a waiter's right - a waiter clearing their
+  // own tabs corrupts the day's totals. Super Admin always holds it.
+  CREDIT_COLLECT
 }
 
 enum ShiftSessionStatus {

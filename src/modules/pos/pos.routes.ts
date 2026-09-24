@@ -1593,7 +1593,15 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
     taxSettingsFor(tid),
   ]);
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
-  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only take payment on your own orders" }); return; }
+  // Clearing a debt (an order already completed on credit) is the accountant's job: it needs CREDIT_COLLECT and,
+  // unlike ringing up or paying a live bill, is allowed on someone else's order. Anything else stays owner-only.
+  const isDebtPayment = order.status === "COMPLETED" && order.paymentStatus !== "PAID";
+  if (isDebtPayment) {
+    if (!(await hasPermission(tid, req.userId, "CREDIT_COLLECT"))) {
+      res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager", code: "CREDIT_COLLECT_REQUIRED" });
+      return;
+    }
+  } else if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only take payment on your own orders" }); return; }
   if (order.saleType === "COMPLIMENTARY") {
     res.status(409).json({ error: "Complimentary orders do not take payments" });
     return;
