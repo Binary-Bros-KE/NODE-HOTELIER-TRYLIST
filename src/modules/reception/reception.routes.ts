@@ -452,7 +452,6 @@ receptionRouter.patch("/reservations/:id/cancel", async (req, res) => {
   if (!["PENDING", "CONFIRMED", "CHECKED_IN", "CHECKED_OUT"].includes(current.status)) { res.status(409).json({ error: "This stay is already closed" }); return; }
   if (adminCancel && !(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can cancel a checked-in or checked-out stay" }); return; }
   const actor = await resolveActor(tid, req);
-  const reversalNos = adminCancel ? await Promise.all((current.folio?.payments ?? []).map(() => nextTransactionNo(tid))) : [];
   const reservation = await prisma.$transaction(async (tx) => {
     if (adminCancel && current.folio) {
       const paymentIds = current.folio.payments.map((p) => p.id);
@@ -461,23 +460,6 @@ receptionRouter.patch("/reservations/:id/cancel", async (req, res) => {
           where: { tenantId: tid, source: { in: ["FOLIO_DEPOSIT", "FOLIO_SETTLEMENT"] }, sourceRefId: { in: paymentIds }, status: "COMPLETE" },
           data: { status: "VOIDED" },
         });
-        for (const [index, payment] of current.folio.payments.entries()) {
-          await tx.transaction.create({
-            data: {
-              tenantId: tid,
-              transactionNo: reversalNos[index],
-              direction: "OUT",
-              source: payment.kind === "DEPOSIT" ? "FOLIO_DEPOSIT" : "FOLIO_SETTLEMENT",
-              amount: payment.amount,
-              paymentMethodId: payment.paymentMethodId,
-              reference: payment.reference,
-              customerId: current.customerId,
-              employeeId: req.userId,
-              description: `Cancellation reversal - ${current.reservationNo}`,
-              sourceRefId: payment.id,
-            },
-          });
-        }
       }
       const outstanding = (await folioCreditOutstanding(tx, tid, [current.folio.id])).get(current.folio.id) ?? 0;
       if (outstanding > 0.01) {

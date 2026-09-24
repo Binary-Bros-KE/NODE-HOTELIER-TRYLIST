@@ -76,12 +76,18 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
   const [tax, transactions, orders, folioLines, folioCredits, pending] = await Promise.all([
     prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { taxRate: true, taxMode: true, taxTreatment: true } }),
     prisma.transaction.findMany({
-      where: { tenantId: tid, employeeId, createdAt: { gte: from, lte: to } },
+      where: {
+        tenantId: tid,
+        employeeId,
+        status: "COMPLETE",
+        createdAt: { gte: from, lte: to },
+        NOT: { direction: "OUT", source: { in: ["POS_SALE", "FOLIO_DEPOSIT", "FOLIO_SETTLEMENT"] } },
+      },
       include: { paymentMethod: { select: { id: true, name: true } } },
       orderBy: { createdAt: "asc" },
     }),
     prisma.posOrder.findMany({
-      where: { tenantId: tid, createdBy: employeeId, createdAt: { gte: from, lte: to } },
+      where: { tenantId: tid, createdBy: employeeId, status: { notIn: ["CANCELLED", "PENDING_CANCELLATION"] }, createdAt: { gte: from, lte: to } },
       select: {
         id: true,
         orderNumber: true,
@@ -179,7 +185,7 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       taxTreatment: line.taxTreatment,
     })),
   }, taxSettings);
-  const folioSales = folioLines.map((line, index) => {
+  const folioLineSales = folioLines.map((line, index) => {
     const customer = line.folio.reservation.customer;
     const gross = folioFinancials.taxLineItems.find((item) => item.index === index)?.gross ?? Number(line.amount) * Number(line.quantity);
     return {
@@ -196,7 +202,19 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       paid: 0,
     };
   });
-  const totalSales = sales.reduce((s, o) => s + o.total, 0) + folioSales.reduce((s, line) => s + line.total, 0);
+  const folioSales = [...folioLineSales.reduce((map, line) => {
+    const key = line.folioNo;
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, { ...line, id: key, source: "ROOM", total: line.total, label: line.source === "ROOM" ? line.label : `Room ${line.roomNumber}` });
+    } else {
+      existing.total += line.total;
+      if (line.source === "ROOM") existing.label = line.label;
+      if (line.createdAt < existing.createdAt) existing.createdAt = line.createdAt;
+    }
+    return map;
+  }, new Map<string, typeof folioLineSales[number]>()).values()].filter((line) => line.total > 0.01);
+  const totalSales = sales.reduce((s, o) => s + o.total, 0) + folioLineSales.reduce((s, line) => s + line.total, 0);
   const totalPaid = incomingTransactions.reduce((s, t) => s + Number(t.amount), 0);
   const complimentarySales = sales.filter((o) => o.saleType === "COMPLIMENTARY");
   const complimentaryTotal = complimentarySales.reduce((s, o) => s + o.complimentaryValue, 0);

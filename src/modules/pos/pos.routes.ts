@@ -1180,25 +1180,6 @@ async function voidCompletedOrder(
       where: { tenantId: args.tenantId, source: "POS_SALE", sourceRefId: { in: order.payments.map((p) => p.id) }, status: "COMPLETE" },
       data: { status: "VOIDED" },
     });
-    const reversalNos = await Promise.all(order.payments.map(() => nextTransactionNo(args.tenantId)));
-    for (const [index, payment] of order.payments.entries()) {
-      await tx.transaction.create({
-        data: {
-          tenantId: args.tenantId,
-          transactionNo: reversalNos[index],
-          direction: "OUT",
-          source: "POS_SALE",
-          amount: payment.amount,
-          paymentMethodId: payment.paymentMethodId,
-          reference: payment.reference,
-          customerId: order.customerId ?? order.reservation?.customerId ?? null,
-          locationId: order.locationId,
-          employeeId: args.userId,
-          description: `Void/refund POS order #${order.orderNumber}`,
-          sourceRefId: payment.id,
-        },
-      });
-    }
   }
 
   await tx.folioLineItem.deleteMany({ where: { tenantId: args.tenantId, source: "POS_ORDER", sourceRefId: order.id } });
