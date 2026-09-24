@@ -7,7 +7,7 @@ import { requireModule, requirePermission, hasPermission } from "../../middlewar
 import { prisma } from "../../lib/prisma.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { nextTransactionNo } from "../../lib/sequence.js";
-import { resolveEffectiveLocation, employeeLocationId } from "../../lib/location.js";
+import { resolveEffectiveLocation, employeeLocationId, employeeLocationIds } from "../../lib/location.js";
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
 import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger.js";
 import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
@@ -463,6 +463,20 @@ async function canSeeAllOrders(tid: string, userId: string | undefined): Promise
   return viewAll || approveCounter || approveCancellation;
 }
 
+async function scopedLocationIds(tid: string, userId: string | undefined, requestedLocationId: string | undefined) {
+  const assigned = await employeeLocationIds(tid, userId);
+  if (assigned.length === 1) return { ids: [assigned[0]] };
+  if (assigned.length > 1) {
+    if (!requestedLocationId) return { ids: assigned };
+    if (!assigned.includes(requestedLocationId)) return { error: "You can only view locations you're assigned to" };
+    return { ids: [requestedLocationId] };
+  }
+  if (!requestedLocationId) return { ids: null };
+  const location = await prisma.location.findFirst({ where: { id: requestedLocationId, tenantId: tid, isActive: true }, select: { id: true } });
+  if (!location) return { error: "Choose an active location from this property" };
+  return { ids: [requestedLocationId] };
+}
+
 /** Whether this bill is this employee's own — the one check that has NO
  * manager override, unlike canSeeAllOrders above. Editing an order's items,
  * attaching a customer, requesting a return/cancellation, taking a payment,
@@ -517,8 +531,9 @@ posRouter.get("/orders", async (req, res) => {
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
   const tid = tenantIdFor(req);
-  const [fixedLocationId, canSeeAll] = await Promise.all([employeeLocationId(tid, req.userId), canSeeAllOrders(tid, req.userId)]);
-  const effectiveLocationId = fixedLocationId ?? query.data.locationId ?? null;
+  const [locationScope, canSeeAll] = await Promise.all([scopedLocationIds(tid, req.userId, query.data.locationId), canSeeAllOrders(tid, req.userId)]);
+  if ("error" in locationScope) { res.status(403).json({ error: locationScope.error }); return; }
+  const locationWhere = locationScope.ids ? { locationId: { in: locationScope.ids } } : {};
   const [orders, tax] = await Promise.all([
     prisma.posOrder.findMany({
       where: {
@@ -526,7 +541,7 @@ posRouter.get("/orders", async (req, res) => {
         ...(query.data.status ? { status: query.data.status } : {}),
         ...(query.data.channel ? { channel: query.data.channel } : {}),
         ...(query.data.overridden ? { items: { some: { listPrice: { not: null } } } } : {}),
-        ...(effectiveLocationId ? { locationId: effectiveLocationId } : {}),
+        ...locationWhere,
         ...(canSeeAll
           ? (query.data.employeeId ? { createdBy: query.data.employeeId } : {})
           : { createdBy: req.userId ?? "__unauthenticated__" }),
@@ -1958,8 +1973,9 @@ posRouter.get("/product-items", async (req, res) => {
   const tid = tenantIdFor(req);
   const query = z.object({ locationId: z.string().cuid().optional() }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
-  const fixedLocationId = await employeeLocationId(tid, req.userId);
-  const effectiveLocationId = fixedLocationId ?? query.data.locationId ?? null;
+  const scope = await scopedLocationIds(tid, req.userId, query.data.locationId);
+  if ("error" in scope) { res.status(403).json({ error: scope.error }); return; }
+  const effectiveLocationId = scope.ids?.[0] ?? null;
   if (!effectiveLocationId) { res.status(200).json({ items: [] }); return; }
 
   const items = await prisma.product.findMany({
@@ -1973,6 +1989,83 @@ posRouter.get("/product-items", async (req, res) => {
       const packSize = Number(item.packSize) || 0;
       return { ...item, availableQuantity: packSize > 0 ? Math.floor(stockQuantity / packSize) : stockQuantity };
     }),
+  });
+});
+
+posRouter.get("/product-stock", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const query = z.object({
+    locationId: z.string().cuid().optional(),
+    search: z.string().trim().max(100).optional(),
+    categoryId: z.string().cuid().optional(),
+    stock: z.enum(["ALL", "LOW", "OUT"]).default("ALL"),
+  }).safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
+  const scope = await scopedLocationIds(tid, req.userId, query.data.locationId);
+  if ("error" in scope) { res.status(403).json({ error: scope.error }); return; }
+  const locationIds = scope.ids;
+  if (locationIds && locationIds.length === 0) { res.status(200).json({ products: [], categories: [], summary: { totalProducts: 0, totalUnits: 0, lowStock: 0, outOfStock: 0 } }); return; }
+
+  const where: Prisma.ProductWhereInput = {
+    tenantId: tid,
+    isActive: true,
+    ...(query.data.categoryId ? { categoryId: query.data.categoryId } : {}),
+    ...(query.data.search ? { OR: [
+      { name: { contains: query.data.search, mode: "insensitive" } },
+      { sku: { contains: query.data.search, mode: "insensitive" } },
+      { barcode: { contains: query.data.search, mode: "insensitive" } },
+      { brand: { contains: query.data.search, mode: "insensitive" } },
+    ] } : {}),
+  };
+  const [products, categories] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      select: {
+        id: true, name: true, sku: true, barcode: true, brand: true, unit: true,
+        reorderLevel: true, maxStockLevel: true, sellingPrice: true, sellsDirectly: true,
+        packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } },
+        category: { select: { id: true, name: true } },
+        stocks: { where: locationIds ? { locationId: { in: locationIds } } : {}, select: { locationId: true, quantity: true, location: { select: { id: true, name: true } } } },
+      },
+      orderBy: { name: "asc" },
+    }),
+    prisma.category.findMany({ where: { tenantId: tid, scope: "STORE" }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
+  ]);
+
+  const rows = products.map((product) => {
+    const quantity = product.stocks.reduce((sum, stock) => sum + Number(stock.quantity), 0);
+    const reorderLevel = Number(product.reorderLevel);
+    return {
+      id: product.id,
+      name: product.name,
+      sku: product.sku,
+      barcode: product.barcode,
+      brand: product.brand,
+      category: product.category,
+      unit: product.unit,
+      quantity,
+      reorderLevel,
+      maxStockLevel: product.maxStockLevel == null ? null : Number(product.maxStockLevel),
+      sellingPrice: product.sellingPrice == null ? null : Number(product.sellingPrice),
+      sellsDirectly: product.sellsDirectly,
+      packSize: product.packSize == null ? null : Number(product.packSize),
+      packLabel: product.packLabel,
+      packUnit: product.packUnit,
+      low: quantity > 0 && quantity <= reorderLevel,
+      out: quantity <= 0,
+      stockByLocation: product.stocks.map((stock) => ({ locationId: stock.locationId, locationName: stock.location.name, quantity: Number(stock.quantity) })),
+    };
+  });
+  const filtered = rows.filter((row) => query.data.stock === "LOW" ? row.low : query.data.stock === "OUT" ? row.out : true);
+  res.status(200).json({
+    products: filtered,
+    categories,
+    summary: {
+      totalProducts: rows.length,
+      totalUnits: rows.reduce((sum, row) => sum + row.quantity, 0),
+      lowStock: rows.filter((row) => row.low).length,
+      outOfStock: rows.filter((row) => row.out).length,
+    },
   });
 });
 
