@@ -121,6 +121,7 @@ enum StockMovementType {
   RETURN
   DAMAGE_LOSS
   ADJUSTMENT
+  ROOM_CONSUMPTION
   BORROWED_IN
   RETURNED_BORROWED_STOCK
   LENT_OUT
@@ -421,76 +422,78 @@ model Tenant {
   maxDevices        Int           @default(10)
   lastLicenseCheck  DateTime?
 
-  tenantModules          TenantModule[]
-  cafeSettings           CafeSettings?
-  categories             Category[]
-  products               Product[]
-  productStocks          ProductStock[]
-  inventoryMovements     InventoryMovement[]
-  posOrders              PosOrder[]
-  posOrderReturnRequests PosOrderReturnRequest[]
-  complimentarySessions  ComplimentarySession[]
-  addons                 Addon[]
-  menuItems              MenuItem[]
-  menuCategories         MenuCategory[]
-  menuItemVariants       MenuItemVariant[]
-  recipes                Recipe[]
-  tables                 Table[]
-  payments               Payment[]
-  locations              Location[]
-  customers              Customer[]
-  customerCreditEntries  CustomerCreditEntry[]
-  tenantSequences        TenantSequence[]
-  reservationGuests      ReservationGuest[]
-  folios                 Folio[]
-  folioLineItems         FolioLineItem[]
-  folioPayments          FolioPayment[]
-  rooms                  Room[]
-  roomTypes              RoomType[]
-  roomRates              RoomRate[]
-  serviceCategories      ServiceCategory[]
-  unitsOfMeasure         UnitOfMeasure[]
-  services               Service[]
-  reservations           Reservation[]
-  housekeepingTasks      HousekeepingTask[]
-  stockDispatchRequests  StockDispatchRequest[]
-  employees              Employee[]
-  departments            Department[]
-  businessProfile        BusinessProfile?
-  roles                  Role[]
-  sessions               Session[]
-  paymentMethods         PaymentMethod[]
-  transactions           Transaction[]
-  expenseCategories      ExpenseCategory[]
-  expenses               Expense[]
-  lostFoundItems         LostFoundItem[]
-  reservationActivities  ReservationActivity[]
-  assets                 Asset[]
-  assetMovements         AssetMovement[]
-  suppliers              Supplier[]
-  purchases              Purchase[]
-  purchaseRequisitions   PurchaseRequisition[]
-  goodsReceipts          GoodsReceipt[]
-  stockReceipts          StockReceipt[]
-  stockTransfers         StockTransfer[]
-  supplierPayments       SupplierPayment[]
-  supplierBalanceEntries SupplierBalanceEntry[]
-  serviceProviders       ServiceProvider[]
-  memberships            Membership[]
-  membershipPayments     MembershipPayment[]
-  appointments           Appointment[]
-  shiftTemplates         ShiftTemplate[]
-  shiftRotations         EmployeeShiftRotation[]
-  shiftOverrides         EmployeeShiftOverride[]
-  attendanceRecords      AttendanceRecord[]
-  shiftSessions          ShiftSession[]
-  employeeSalaries       EmployeeSalary[]
-  printJobs              PrintJob[]
-  menuLedgerEntries      MenuLedgerEntry[]
-  reservationGroups      ReservationGroup[]
-  serviceVariants        ServiceVariant[]
-  commercialDocuments    CommercialDocument[]
-  commercialDocumentLines CommercialDocumentLine[]
+  tenantModules              TenantModule[]
+  cafeSettings               CafeSettings?
+  categories                 Category[]
+  products                   Product[]
+  productStocks              ProductStock[]
+  inventoryMovements         InventoryMovement[]
+  posOrders                  PosOrder[]
+  posOrderReturnRequests     PosOrderReturnRequest[]
+  complimentarySessions      ComplimentarySession[]
+  addons                     Addon[]
+  menuItems                  MenuItem[]
+  menuCategories             MenuCategory[]
+  menuItemVariants           MenuItemVariant[]
+  recipes                    Recipe[]
+  tables                     Table[]
+  payments                   Payment[]
+  locations                  Location[]
+  customers                  Customer[]
+  customerCreditEntries      CustomerCreditEntry[]
+  tenantSequences            TenantSequence[]
+  reservationGuests          ReservationGuest[]
+  folios                     Folio[]
+  folioLineItems             FolioLineItem[]
+  folioPayments              FolioPayment[]
+  rooms                      Room[]
+  roomTypes                  RoomType[]
+  roomRates                  RoomRate[]
+  serviceCategories          ServiceCategory[]
+  unitsOfMeasure             UnitOfMeasure[]
+  services                   Service[]
+  reservations               Reservation[]
+  housekeepingTasks          HousekeepingTask[]
+  stockDispatchRequests      StockDispatchRequest[]
+  employees                  Employee[]
+  departments                Department[]
+  businessProfile            BusinessProfile?
+  roles                      Role[]
+  sessions                   Session[]
+  paymentMethods             PaymentMethod[]
+  transactions               Transaction[]
+  expenseCategories          ExpenseCategory[]
+  expenses                   Expense[]
+  lostFoundItems             LostFoundItem[]
+  reservationActivities      ReservationActivity[]
+  assets                     Asset[]
+  assetMovements             AssetMovement[]
+  suppliers                  Supplier[]
+  purchases                  Purchase[]
+  purchaseRequisitions       PurchaseRequisition[]
+  goodsReceipts              GoodsReceipt[]
+  stockReceipts              StockReceipt[]
+  stockTransfers             StockTransfer[]
+  supplierPayments           SupplierPayment[]
+  supplierBalanceEntries     SupplierBalanceEntry[]
+  serviceProviders           ServiceProvider[]
+  memberships                Membership[]
+  membershipPayments         MembershipPayment[]
+  appointments               Appointment[]
+  shiftTemplates             ShiftTemplate[]
+  shiftRotations             EmployeeShiftRotation[]
+  shiftOverrides             EmployeeShiftOverride[]
+  attendanceRecords          AttendanceRecord[]
+  shiftSessions              ShiftSession[]
+  employeeSalaries           EmployeeSalary[]
+  printJobs                  PrintJob[]
+  menuLedgerEntries          MenuLedgerEntry[]
+  reservationGroups          ReservationGroup[]
+  roomConsumableStandards    RoomConsumableStandard[]
+  roomConsumableUsages       RoomConsumableUsage[]
+  serviceVariants            ServiceVariant[]
+  commercialDocuments        CommercialDocument[]
+  commercialDocumentLines    CommercialDocumentLine[]
   commercialDocumentPayments CommercialDocumentPayment[]
 }
 
@@ -585,22 +588,22 @@ model Customer {
   // down. Every change is mirrored in CustomerCreditEntry.
   balance Decimal @default(0) @db.Decimal(12, 2)
 
-  createdAt         DateTime              @default(now())
-  updatedAt         DateTime              @updatedAt
-  createdBy         String?
-  updatedBy         String?
-  locationId        String?
-  tenant            Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  reservations      Reservation[]
-  reservationGroups ReservationGroup[]
-  transactions      Transaction[]
-  posOrders         PosOrder[]
-  creditEntries     CustomerCreditEntry[]
-  createdByEmployee Employee?             @relation("CustomerCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
-  updatedByEmployee Employee?             @relation("CustomerUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
-  location          Location?             @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  memberships       Membership[]
-  appointments      Appointment[]
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  createdBy           String?
+  updatedBy           String?
+  locationId          String?
+  tenant              Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reservations        Reservation[]
+  reservationGroups   ReservationGroup[]
+  transactions        Transaction[]
+  posOrders           PosOrder[]
+  creditEntries       CustomerCreditEntry[]
+  createdByEmployee   Employee?             @relation("CustomerCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  updatedByEmployee   Employee?             @relation("CustomerUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
+  location            Location?             @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  memberships         Membership[]
+  appointments        Appointment[]
   commercialDocuments CommercialDocument[]
 
   @@unique([tenantId, customerNo])
@@ -609,7 +612,7 @@ model Customer {
 }
 
 model Room {
-  id                String             @id @default(cuid())
+  id                String                @id @default(cuid())
   tenantId          String
   number            String
   name              String?
@@ -617,21 +620,22 @@ model Room {
   floor             String?
   wing              String?
   notes             String?
-  capacity          Int                @default(2)
-  nightlyRate       Decimal            @db.Decimal(12, 2)
-  status            RoomStatus         @default(VACANT)
-  cleanliness       RoomCleanliness    @default(CLEAN)
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
+  capacity          Int                   @default(2)
+  nightlyRate       Decimal               @db.Decimal(12, 2)
+  status            RoomStatus            @default(VACANT)
+  cleanliness       RoomCleanliness       @default(CLEAN)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
   createdBy         String?
   updatedBy         String?
-  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  roomType          RoomType           @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
+  tenant            Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  roomType          RoomType              @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
   reservations      Reservation[]
   housekeepingTasks HousekeepingTask[]
   lostFoundItems    LostFoundItem[]
-  createdByEmployee Employee?          @relation("RoomCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
-  updatedByEmployee Employee?          @relation("RoomUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
+  consumableUsages  RoomConsumableUsage[]
+  createdByEmployee Employee?             @relation("RoomCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  updatedByEmployee Employee?             @relation("RoomUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
 
   @@unique([tenantId, number])
   @@index([tenantId, roomTypeId])
@@ -672,32 +676,33 @@ model RoomRate {
 }
 
 model RoomType {
-  id                String         @id @default(cuid())
-  tenantId          String
-  name              String
-  description       String?
-  capacity          Int            @default(2)
+  id                  String                   @id @default(cuid())
+  tenantId            String
+  name                String
+  description         String?
+  capacity            Int                      @default(2)
   // Only meaningful when the type has no rate variants (0 otherwise); its
   // unit is priceUnitId.
-  baseRate          Decimal        @db.Decimal(12, 2)
-  priceUnitId       String?
-  amenities         String[]       @default([])
+  baseRate            Decimal                  @db.Decimal(12, 2)
+  priceUnitId         String?
+  amenities           String[]                 @default([])
   // Null inherits the tenant's BusinessProfile default (same convention as
   // MenuItem/Service/Product) — rate variants never carry their own tax.
-  taxRate           Decimal?       @db.Decimal(5, 2)
-  taxMode           TaxMode?
-  taxTreatment      TaxTreatment?
-  isActive          Boolean        @default(true)
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
-  createdBy         String?
-  updatedBy         String?
-  tenant            Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  priceUnit         UnitOfMeasure? @relation("RoomTypePriceUnit", fields: [priceUnitId], references: [id], onDelete: SetNull)
-  rooms             Room[]
-  rates             RoomRate[]
-  createdByEmployee Employee?      @relation("RoomTypeCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
-  updatedByEmployee Employee?      @relation("RoomTypeUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
+  taxRate             Decimal?                 @db.Decimal(5, 2)
+  taxMode             TaxMode?
+  taxTreatment        TaxTreatment?
+  isActive            Boolean                  @default(true)
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+  createdBy           String?
+  updatedBy           String?
+  tenant              Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  priceUnit           UnitOfMeasure?           @relation("RoomTypePriceUnit", fields: [priceUnitId], references: [id], onDelete: SetNull)
+  rooms               Room[]
+  rates               RoomRate[]
+  consumableStandards RoomConsumableStandard[]
+  createdByEmployee   Employee?                @relation("RoomTypeCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  updatedByEmployee   Employee?                @relation("RoomTypeUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
 
   @@unique([tenantId, name])
   @@index([tenantId, isActive])
@@ -741,24 +746,24 @@ enum UnitMeasurementKind {
 }
 
 model UnitOfMeasure {
-  id           String               @id @default(cuid())
-  tenantId     String
-  tenant       Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  name         String
+  id              String               @id @default(cuid())
+  tenantId        String
+  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name            String
   // Built-in units every tenant is seeded with (HOUR, NIGHT, DAY, PERSON,
   // EACH): locked against rename/delete so billing never hinges on how a
   // name is spelled, but no longer the gate on which units are usable for
   // room pricing — that's measurementKind now. A tenant's own custom unit
   // (systemKey null) is just as valid for a RoomType/RoomRate as long as it
   // has a measurementKind, and is fully rename/delete-able like today.
-  systemKey        String?
-  measurementKind  UnitMeasurementKind?
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
-  services     Service[]
-  packProducts Product[]  @relation("ProductPackUnit")
-  roomRates    RoomRate[] @relation("RoomRateUnit")
-  roomTypes    RoomType[] @relation("RoomTypePriceUnit")
+  systemKey       String?
+  measurementKind UnitMeasurementKind?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  services        Service[]
+  packProducts    Product[]            @relation("ProductPackUnit")
+  roomRates       RoomRate[]           @relation("RoomRateUnit")
+  roomTypes       RoomType[]           @relation("RoomTypePriceUnit")
 
   @@unique([tenantId, name])
   @@unique([tenantId, systemKey])
@@ -894,6 +899,7 @@ model HousekeepingTask {
   createdByEmployee Employee?               @relation("HousekeepingTaskCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
   updatedByEmployee Employee?               @relation("HousekeepingTaskUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
   events            HousekeepingTaskEvent[]
+  consumableUsages  RoomConsumableUsage[]
 
   @@index([tenantId, status])
   @@index([tenantId, roomId])
@@ -914,6 +920,69 @@ model HousekeepingTaskEvent {
   task          HousekeepingTask        @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, taskId, occurredAt])
+}
+
+// What a room type should normally be restocked with during housekeeping:
+// sugar sachets, soap, lotion, tissue, cocoa, bottled water, etc. This is a
+// template only; actual stock leaves the shelf through RoomConsumableUsage.
+model RoomConsumableStandard {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  roomTypeId String
+  roomType   RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity   Decimal  @db.Decimal(12, 3)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([tenantId, roomTypeId, productId])
+  @@index([tenantId, roomTypeId])
+  @@index([tenantId, productId])
+}
+
+// A housekeeping replenishment for a specific room. Each item writes a stock
+// ledger movement from the chosen housekeeping/location stock, so included-in-
+// room-rate amenities become a tracked operating expense without becoming a
+// POS sale.
+model RoomConsumableUsage {
+  id         String                    @id @default(cuid())
+  tenantId   String
+  tenant     Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usageNo    String
+  roomId     String
+  room       Room                      @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  taskId     String?
+  task       HousekeepingTask?         @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  locationId String
+  location   Location                  @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  note       String?
+  createdBy  String?
+  employee   Employee?                 @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+  createdAt  DateTime                  @default(now())
+  items      RoomConsumableUsageItem[]
+
+  @@unique([tenantId, usageNo])
+  @@index([tenantId, roomId, createdAt])
+  @@index([tenantId, taskId])
+  @@index([tenantId, locationId, createdAt])
+}
+
+model RoomConsumableUsageItem {
+  id         String              @id @default(cuid())
+  usageId    String
+  usage      RoomConsumableUsage @relation(fields: [usageId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product             @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity   Decimal             @db.Decimal(12, 3)
+  movementId String?
+  movement   InventoryMovement?  @relation(fields: [movementId], references: [id], onDelete: SetNull)
+
+  @@index([usageId])
+  @@index([productId])
+  @@index([movementId])
 }
 
 enum StockDispatchStatus {
@@ -1219,30 +1288,30 @@ enum FolioLineSource {
 }
 
 model FolioLineItem {
-  id          String          @id @default(cuid())
-  tenantId    String
-  folioId     String
-  source      FolioLineSource
-  label       String
-  amount      Decimal         @db.Decimal(12, 2)
+  id           String          @id @default(cuid())
+  tenantId     String
+  folioId      String
+  source       FolioLineSource
+  label        String
+  amount       Decimal         @db.Decimal(12, 2)
   // Decimal, not Int — an auto-calculated HOURS/MINUTES charge (e.g. a 4.3
   // hour stay) is a legitimate quantity on its own, and every quantity here
   // is a user-overridable suggestion in the first place (see
   // UnitMeasurementKind), so it should never be silently rounded on the way
   // in.
-  quantity    Decimal         @default(1) @db.Decimal(12, 3)
+  quantity     Decimal         @default(1) @db.Decimal(12, 3)
   // Tax snapshot at the time the line was charged (resolved: item override ??
   // BusinessProfile default), same convention as PosOrderItem — null only on
   // rows written before this existed. A DISCOUNT line carries the same tax
   // settings as the ROOM charge it writes off, so folioTotals nets correctly.
-  taxRate     Decimal?        @db.Decimal(5, 2)
-  taxMode     TaxMode?
+  taxRate      Decimal?        @db.Decimal(5, 2)
+  taxMode      TaxMode?
   taxTreatment TaxTreatment?
-  sourceRefId String?
-  createdAt   DateTime        @default(now())
-  createdBy   String?
-  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  folio       Folio           @relation(fields: [folioId], references: [id], onDelete: Cascade)
+  sourceRefId  String?
+  createdAt    DateTime        @default(now())
+  createdBy    String?
+  tenant       Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  folio        Folio           @relation(fields: [folioId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, folioId])
 }
@@ -1276,26 +1345,26 @@ model FolioPayment {
 // tenant to match that former enum 1:1 so existing data keeps working, but
 // can still be edited/disabled; only deletion is blocked on them.
 model PaymentMethod {
-  id                 String              @id @default(cuid())
-  tenantId           String
-  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  name               String
-  code               String
-  description        String?
-  isSystem           Boolean             @default(false)
-  isActive           Boolean             @default(true)
-  requiresReference  Boolean             @default(false)
-  sortOrder          Int                 @default(0)
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
-  folioPayments      FolioPayment[]
-  posPayments        Payment[]
-  transactions       Transaction[]
-  expenses           Expense[]
-  assetMovements     AssetMovement[]
-  membershipPayments MembershipPayment[]
-  appointments       Appointment[]
-  supplierPayments   SupplierPayment[]
+  id                         String                      @id @default(cuid())
+  tenantId                   String
+  tenant                     Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name                       String
+  code                       String
+  description                String?
+  isSystem                   Boolean                     @default(false)
+  isActive                   Boolean                     @default(true)
+  requiresReference          Boolean                     @default(false)
+  sortOrder                  Int                         @default(0)
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  folioPayments              FolioPayment[]
+  posPayments                Payment[]
+  transactions               Transaction[]
+  expenses                   Expense[]
+  assetMovements             AssetMovement[]
+  membershipPayments         MembershipPayment[]
+  appointments               Appointment[]
+  supplierPayments           SupplierPayment[]
   commercialDocumentPayments CommercialDocumentPayment[]
 
   @@unique([tenantId, code])
@@ -1328,28 +1397,28 @@ enum TransactionSource {
 // checkout settlements) and POS (bill settlements) both write here as a
 // side effect of the underlying payment, never directly.
 model Transaction {
-  id              String               @id @default(cuid())
-  tenantId        String
-  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  transactionNo   String
-  direction       TransactionDirection
-  source          TransactionSource
-  status          TransactionStatus    @default(COMPLETE)
-  amount          Decimal              @db.Decimal(12, 2)
-  paymentMethodId String?
-  paymentMethod   PaymentMethod?       @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
-  reference       String?
-  customerId      String?
-  customer        Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  supplierId      String?
-  supplier        Supplier?            @relation(fields: [supplierId], references: [id], onDelete: SetNull)
-  locationId      String?
-  location        Location?            @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  employeeId      String?
-  employee        Employee?            @relation(fields: [employeeId], references: [id], onDelete: SetNull)
-  description     String?
-  sourceRefId     String?
-  createdAt       DateTime             @default(now())
+  id                         String                      @id @default(cuid())
+  tenantId                   String
+  tenant                     Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  transactionNo              String
+  direction                  TransactionDirection
+  source                     TransactionSource
+  status                     TransactionStatus           @default(COMPLETE)
+  amount                     Decimal                     @db.Decimal(12, 2)
+  paymentMethodId            String?
+  paymentMethod              PaymentMethod?              @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+  reference                  String?
+  customerId                 String?
+  customer                   Customer?                   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  supplierId                 String?
+  supplier                   Supplier?                   @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  locationId                 String?
+  location                   Location?                   @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  employeeId                 String?
+  employee                   Employee?                   @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  description                String?
+  sourceRefId                String?
+  createdAt                  DateTime                    @default(now())
   commercialDocumentPayments CommercialDocumentPayment[]
 
   @@unique([tenantId, transactionNo])
@@ -2074,6 +2143,8 @@ model Product {
   serviceVariantsStocked     ServiceVariant[]            @relation("ServiceVariantStock")
   serviceVariantIngredients  ServiceVariantIngredient[]  @relation("ServiceVariantIngredientProduct")
   stockReceiptItems          StockReceiptItem[]
+  roomConsumableStandards    RoomConsumableStandard[]
+  roomConsumableUsageItems   RoomConsumableUsageItem[]
 
   @@unique([tenantId, sku])
   @@unique([tenantId, barcode])
@@ -2107,28 +2178,29 @@ model ProductStock {
 // to whole-pack equivalents before applying unitCost. Written only via
 // recordStockMovement().
 model InventoryMovement {
-  id            String            @id @default(cuid())
-  tenantId      String
-  productId     String
-  locationId    String
-  type          StockMovementType
-  quantity      Decimal           @db.Decimal(12, 3)
-  balanceBefore Decimal?          @db.Decimal(12, 3)
-  balanceAfter  Decimal?          @db.Decimal(12, 3)
-  unitCost      Decimal?          @db.Decimal(12, 2)
-  value         Decimal?          @db.Decimal(12, 2)
-  note          String?
+  id                       String                    @id @default(cuid())
+  tenantId                 String
+  productId                String
+  locationId               String
+  type                     StockMovementType
+  quantity                 Decimal                   @db.Decimal(12, 3)
+  balanceBefore            Decimal?                  @db.Decimal(12, 3)
+  balanceAfter             Decimal?                  @db.Decimal(12, 3)
+  unitCost                 Decimal?                  @db.Decimal(12, 2)
+  value                    Decimal?                  @db.Decimal(12, 2)
+  note                     String?
   // Where this movement came from — e.g. POS_ORDER, TRANSFER, GOODS_RECEIVED,
   // PRODUCT_OPENING, MANUAL — plus the id of that source row when there is one.
-  sourceType    String?
-  sourceRefId   String?
-  performedBy   String?
-  employee      Employee?         @relation(fields: [performedBy], references: [id], onDelete: SetNull)
-  occurredAt    DateTime          @default(now())
-  createdAt     DateTime          @default(now())
-  tenant        Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  product       Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
-  location      Location          @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  sourceType               String?
+  sourceRefId              String?
+  performedBy              String?
+  employee                 Employee?                 @relation(fields: [performedBy], references: [id], onDelete: SetNull)
+  occurredAt               DateTime                  @default(now())
+  createdAt                DateTime                  @default(now())
+  tenant                   Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product                  Product                   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  location                 Location                  @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  roomConsumableUsageItems RoomConsumableUsageItem[]
 
   @@index([tenantId, occurredAt])
   @@index([tenantId, productId, occurredAt])
@@ -2280,6 +2352,7 @@ model Location {
   printJobs              PrintJob[]
   appointments           Appointment[]
   commercialDocuments    CommercialDocument[]
+  roomConsumableUsages   RoomConsumableUsage[]
 
   @@unique([tenantId, name])
 }
@@ -2964,6 +3037,7 @@ model Employee {
   updatedRequisitions           PurchaseRequisition[]   @relation("RequisitionUpdatedBy")
   reviewedRequisitions          PurchaseRequisition[]   @relation("RequisitionReviewedBy")
   inventoryMovements            InventoryMovement[]
+  roomConsumableUsages          RoomConsumableUsage[]
   shiftRotation                 EmployeeShiftRotation?
   shiftOverrides                EmployeeShiftOverride[]
   attendanceRecords             AttendanceRecord[]
@@ -3323,37 +3397,37 @@ model PlatformSession {
 }
 
 model ServiceProvider {
-  id           String             @id @default(cuid())
+  id           String        @id @default(cuid())
   tenantId     String
   name         String
   specialty    String?
   phone        String?
-  isActive     Boolean            @default(true)
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
-  tenant       Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   appointments Appointment[]
 
   @@index([tenantId, isActive])
 }
 
 model Membership {
-  id           String              @id @default(cuid())
-  tenantId     String
-  customerId   String
-  planName     String
-  planPrice    Decimal             @default(0) @db.Decimal(12, 2)
-  durationDays Int                 @default(30)
-  discountPercent Decimal          @default(0) @db.Decimal(5, 2)
-  startsAt     DateTime
-  endsAt       DateTime
-  status       MembershipStatus    @default(ACTIVE)
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
-  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer     Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  payments     MembershipPayment[]
-  appointments Appointment[]
+  id              String              @id @default(cuid())
+  tenantId        String
+  customerId      String
+  planName        String
+  planPrice       Decimal             @default(0) @db.Decimal(12, 2)
+  durationDays    Int                 @default(30)
+  discountPercent Decimal             @default(0) @db.Decimal(5, 2)
+  startsAt        DateTime
+  endsAt          DateTime
+  status          MembershipStatus    @default(ACTIVE)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer        Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  payments        MembershipPayment[]
+  appointments    Appointment[]
 
   @@index([tenantId, customerId, status])
 }

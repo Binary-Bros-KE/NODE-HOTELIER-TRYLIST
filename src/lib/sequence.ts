@@ -48,6 +48,10 @@ export async function nextHousekeepingTaskNo(tenantId: string): Promise<string> 
   return nextSequenceNo(tenantId, "housekeeping", "HK", 6);
 }
 
+export async function nextRoomConsumableUsageNo(tenantId: string): Promise<string> {
+  return nextSequenceNo(tenantId, "roomconsumableusage", "RCU", 6);
+}
+
 export async function nextAssetNo(tenantId: string): Promise<string> {
   return nextSequenceNo(tenantId, "asset", "AST", 6);
 }

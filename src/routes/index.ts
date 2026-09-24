@@ -20,6 +20,7 @@ import { transactionsRouter } from "../modules/transactions/transactions.routes.
 import { expenseCategoriesRouter } from "../modules/expense-categories/expense-categories.routes.js";
 import { expensesRouter } from "../modules/expenses/expenses.routes.js";
 import { lostFoundRouter } from "../modules/lost-found/lost-found.routes.js";
+import { roomConsumablesRouter } from "../modules/room-consumables/room-consumables.routes.js";
 import { assetsRouter } from "../modules/assets/assets.routes.js";
 import { suppliersRouter } from "../modules/suppliers/suppliers.routes.js";
 import { purchasesRouter } from "../modules/purchases/purchases.routes.js";
@@ -78,6 +79,7 @@ router.use("/transactions", transactionsRouter);
 router.use("/expense-categories", expenseCategoriesRouter);
 router.use("/expenses", expensesRouter);
 router.use("/lost-found", lostFoundRouter);
+router.use("/room-consumables", roomConsumablesRouter);
 router.use("/assets", assetsRouter);
 router.use("/suppliers", suppliersRouter);
 router.use("/purchases", purchasesRouter);

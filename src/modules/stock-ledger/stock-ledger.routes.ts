@@ -10,7 +10,7 @@ export const stockLedgerRouter = Router();
 
 const STOCK_MOVEMENT_TYPES = [
   "OPENING_STOCK", "PURCHASE", "SALE", "TRANSFER_IN", "TRANSFER_OUT", "RETURN",
-  "DAMAGE_LOSS", "ADJUSTMENT", "BORROWED_IN", "RETURNED_BORROWED_STOCK", "LENT_OUT", "LOAN_RETURNED",
+  "DAMAGE_LOSS", "ADJUSTMENT", "BORROWED_IN", "RETURNED_BORROWED_STOCK", "LENT_OUT", "LOAN_RETURNED", "ROOM_CONSUMPTION",
 ] as const;
 
 const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
