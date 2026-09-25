@@ -296,7 +296,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     ] = await Promise.all([
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
-        where: { tenantId: tid, status: "COMPLETED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
+        where: { tenantId: tid, status: "COMPLETED", completedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
         include: { items: { include: orderItemInclude }, location: { select: { id: true, name: true } }, customer: { select: { id: true, firstName: true, lastName: true } }, complimentarySession: true, payments: { select: { amount: true } } },
       }),
       prisma.posOrder.findMany({
@@ -988,7 +988,7 @@ reportsRouter.get("/tax", async (req, res, next) => {
     const [tax, orders, roomRevenueFolios] = await Promise.all([
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
-        where: { tenantId: tid, status: "COMPLETED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
+        where: { tenantId: tid, status: "COMPLETED", completedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
         include: {
           items: {
             include: {
@@ -1323,7 +1323,7 @@ reportsRouter.get("/products-overview", async (req, res, next) => {
     const [products, completedOrders, lastSoldRows] = await Promise.all([
       prisma.product.findMany({ where: { tenantId: tid, isActive: true }, select: { id: true, name: true, sku: true, category: { select: { name: true } } } }),
       prisma.posOrder.findMany({
-        where: { tenantId: tid, status: "COMPLETED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
+        where: { tenantId: tid, status: "COMPLETED", completedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
         select: { items: { where: { productId: { not: null } }, select: { productId: true, quantity: true, unitPrice: true, product: { select: { unitCost: true, packSize: true } } } } },
       }),
       prisma.posOrderItem.groupBy({

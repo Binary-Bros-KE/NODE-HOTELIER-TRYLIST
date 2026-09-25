@@ -1642,7 +1642,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
           },
         });
         const newStatus = order.status === "SERVED" ? "COMPLETED" : order.status;
-        await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(alreadyPaid, total) } });
+        await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(alreadyPaid, total), ...(newStatus === "COMPLETED" && order.status === "SERVED" ? { completedAt: new Date() } : {}) } });
         if (newStatus === "COMPLETED" && order.status === "SERVED" && order.tableId) await releaseTableIfIdle(tx, order.tableId);
         if (newStatus === "COMPLETED") await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
         return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
@@ -1670,7 +1670,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
         });
         const paidSoFar = alreadyPaid + data.amount;
         const newStatus = order.status === "SERVED" && paidSoFar >= total - 0.01 ? "COMPLETED" : order.status;
-        await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(paidSoFar, total) } });
+        await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(paidSoFar, total), ...(newStatus === "COMPLETED" && order.status === "SERVED" ? { completedAt: new Date() } : {}) } });
         if (newStatus === "COMPLETED" && order.status === "SERVED" && order.tableId) await releaseTableIfIdle(tx, order.tableId);
         if (newStatus === "COMPLETED") await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
         await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: custId, status: newStatus, paid: paidSoFar, total, by: req.userId });
@@ -1721,6 +1721,7 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
       where: { id: order.id },
       data: {
         status: "COMPLETED",
+        completedAt: new Date(),
         paymentStatus: paymentStatusFor(paid, total),
         creditReason: shortfall > 0.01 ? parsed.data.creditReason : null,
         creditExpectedAt: shortfall > 0.01 ? parsed.data.creditExpectedAt : null,

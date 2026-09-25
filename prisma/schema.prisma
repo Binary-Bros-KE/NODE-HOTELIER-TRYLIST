@@ -2639,6 +2639,10 @@ model PosOrder {
   creditReason               String?
   creditExpectedAt           DateTime?
   billedToRoomAt             DateTime?
+  // When the sale was completed (paid in full, put on credit, or billed to a room) - fixed at that
+  // moment and never touched again. Reports place a sale in its business day by this, NOT by
+  // updatedAt, which moves whenever the order is edited or a debt on it is paid off later.
+  completedAt                DateTime?
   billedToRoomBy             String?
   roomBillSettledAt          DateTime?
   roomBillSettledBy          String?
@@ -2673,6 +2677,7 @@ model PosOrder {
   @@index([complimentarySessionId])
   @@index([tenantId, creditExpectedAt])
   @@index([tenantId, billedToRoomAt])
+  @@index([tenantId, status, completedAt])
 }
 
 model ComplimentarySession {
