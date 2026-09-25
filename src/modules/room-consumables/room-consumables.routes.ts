@@ -7,6 +7,7 @@ import { resolveEffectiveLocation } from "../../lib/location.js";
 import { nextRoomConsumableUsageNo } from "../../lib/sequence.js";
 import { InsufficientStockError, recordStockMovement } from "../../lib/stockLedger.js";
 import { requireModule } from "../../middleware/tenantContext.js";
+import { HousekeepingError, loadActor } from "../../lib/housekeeping.js";
 
 export const roomConsumablesRouter = Router();
 roomConsumablesRouter.use(requireModule("HOUSEKEEPING"));
@@ -36,10 +37,17 @@ const standardsQuerySchema = z.object({
   activeOnly: z.preprocess(blankToUndefined, z.coerce.boolean().optional()),
 });
 
-const usageItemSchema = z.object({
-  productId: z.string().trim().min(1),
-  quantity: z.coerce.number().positive().max(1000000),
-});
+// Housekeeping records what LEFT the room (used by a guest, expired, damaged) and what they put back.
+// Replacing is never automatic: only what is recorded here changes the room's count, and the count
+// can never go above the room type's maximum. `quantity` is the old name for `replaced`.
+const usageItemSchema = z.preprocess(
+  (raw) => (raw && typeof raw === "object" && "quantity" in raw && !("replaced" in raw) ? { ...(raw as object), replaced: (raw as { quantity: unknown }).quantity } : raw),
+  z.object({
+    productId: z.string().trim().min(1),
+    used: z.coerce.number().min(0).max(1000000).default(0),
+    replaced: z.coerce.number().min(0).max(1000000).default(0),
+  }).refine((v) => v.used > 0 || v.replaced > 0, { message: "Enter how many were used or replaced", path: ["used"] }),
+);
 
 const usageBodySchema = z.object({
   roomId: z.string().trim().min(1),
@@ -156,6 +164,9 @@ roomConsumablesRouter.get("/standards/for-room/:roomId", async (req, res, next) 
 
 roomConsumablesRouter.put("/standards/:roomTypeId", async (req, res, next) => {
   try {
+    // The maximum a room may hold is a supervisor decision - housekeepers can not raise it to get around the cap.
+    const actor = await loadActor(req.tenantId, req.userId);
+    if (!actor.isManager) { res.status(403).json({ error: "Only a supervisor can set the maximum per room" }); return; }
     const parsed = standardsBodySchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: "Invalid room consumables", details: parsed.error.flatten() }); return; }
     if (!ensureUniqueProducts(parsed.data.items)) { res.status(400).json({ error: "Each product can only appear once" }); return; }
@@ -187,6 +198,7 @@ roomConsumablesRouter.put("/standards/:roomTypeId", async (req, res, next) => {
     });
     res.json({ standards });
   } catch (error) {
+    if (error instanceof HousekeepingError) { res.status(error.status).json({ error: error.message }); return; }
     next(error);
   }
 });
@@ -273,37 +285,51 @@ roomConsumablesRouter.post("/usages", async (req, res, next) => {
     const usageNo = await nextRoomConsumableUsageNo(tid);
 
     const usage = await prisma.$transaction(async (tx) => {
-      const created = await tx.roomConsumableUsage.create({
-        data: {
-          tenantId: tid,
-          usageNo,
-          roomId: room.id,
-          taskId: taskId ?? undefined,
-          locationId: location.id,
-          note,
-          createdBy: req.userId,
-        },
+      const roomFull = await tx.room.findUniqueOrThrow({ where: { id: room.id }, select: { roomTypeId: true } });
+      const [standards, stocks] = await Promise.all([
+        tx.roomConsumableStandard.findMany({ where: { tenantId: tid, roomTypeId: roomFull.roomTypeId, isActive: true, productId: { in: productIds } } }),
+        tx.roomConsumableStock.findMany({ where: { tenantId: tid, roomId: room.id, productId: { in: productIds } } }),
+      ]);
+      const maxBy = new Map(standards.map((s) => [s.productId, Number(s.quantity)]));
+      const stockBy = new Map(stocks.map((s) => [s.productId, Number(s.quantity)]));
+      const fail = (message: string) => Object.assign(new Error(message), { status: 400 });
+      const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
+      // Check every line against what the room holds and its maximum BEFORE anything is written.
+      const plans = items.map((item) => {
+        const name = productLabels.get(item.productId) ?? "item";
+        const onHand = stockBy.get(item.productId) ?? 0;
+        if (item.used > onHand + 0.0005) throw fail(`Room ${room.number} has only ${round3(onHand)} ${name} on record, so ${item.used} can't have been used`);
+        const afterUse = round3(onHand - item.used);
+        const after = round3(afterUse + item.replaced);
+        if (item.replaced > 0) {
+          const max = maxBy.get(item.productId);
+          if (max === undefined) throw fail(`No maximum is set for ${name} in this room type - ask a supervisor to set it before it can be stocked`);
+          if (after > max + 0.0005) throw fail(`Room ${room.number} can hold at most ${max} ${name}: it will have ${afterUse} after use, so you can replace at most ${round3(Math.max(0, max - afterUse))}`);
+        }
+        return { item, name, after };
       });
 
-      for (const item of items) {
-        const productName = productLabels.get(item.productId) ?? "stock";
-        const movement = await recordStockMovement(tx, {
-          tenantId: tid,
-          productId: item.productId,
-          locationId: location.id,
-          type: "ROOM_CONSUMPTION",
-          quantity: -item.quantity,
-          note: note ?? `Room ${room.number} replenishment`,
-          sourceType: "ROOM_CONSUMPTION",
-          sourceRefId: created.id,
-          performedBy: req.userId,
-          label: productName,
-        });
-        await tx.roomConsumableUsageItem.create({
-          data: { usageId: created.id, productId: item.productId, quantity: item.quantity, movementId: movement.id },
+      const created = await tx.roomConsumableUsage.create({
+        data: { tenantId: tid, usageNo, roomId: room.id, taskId: taskId ?? undefined, locationId: location.id, note, createdBy: req.userId },
+      });
+      const now = new Date();
+      for (const { item, name, after } of plans) {
+        let movementId: string | undefined;
+        if (item.replaced > 0) {
+          const movement = await recordStockMovement(tx, {
+            tenantId: tid, productId: item.productId, locationId: location.id, type: "ROOM_CONSUMPTION", quantity: -item.replaced,
+            note: note ?? `Room ${room.number} replenishment`, sourceType: "ROOM_CONSUMPTION", sourceRefId: created.id, performedBy: req.userId, label: name,
+          });
+          movementId = movement.id;
+        }
+        await tx.roomConsumableUsageItem.create({ data: { usageId: created.id, productId: item.productId, quantity: item.replaced, usedQuantity: item.used, movementId } });
+        await tx.roomConsumableStock.upsert({
+          where: { tenantId_roomId_productId: { tenantId: tid, roomId: room.id, productId: item.productId } },
+          create: { tenantId: tid, roomId: room.id, productId: item.productId, quantity: after, firstPlacedAt: now, lastReplacedAt: now },
+          update: { quantity: after, ...(item.replaced > 0 ? { lastReplacedAt: now } : {}) },
         });
       }
-
       return tx.roomConsumableUsage.findUniqueOrThrow({ where: { id: created.id }, include: usageInclude });
     });
 
@@ -313,6 +339,7 @@ roomConsumablesRouter.post("/usages", async (req, res, next) => {
       res.status(409).json({ error: error.message });
       return;
     }
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     next(error);
   }
 });

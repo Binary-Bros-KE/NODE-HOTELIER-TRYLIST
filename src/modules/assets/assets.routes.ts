@@ -127,6 +127,122 @@ assetsRouter.get("/", async (req, res) => {
   res.json({ assets: assets.map(withUnit), summary: { total: assets.length, totalValue, roomAssets: assets.filter((a) => a.roomId).length } });
 });
 
+const CONDITIONS = ["WORKING", "NEEDS_REPAIR", "UNDER_REPAIR", "BROKEN", "MISSING"] as const;
+const EXPIRING_SOON_DAYS = 7;
+
+/** Everything in one room or location: fixed assets with their condition, and (rooms only) the consumables the
+ * room should hold - how many it has against the maximum, when first placed / last replaced, and whether the
+ * shelf life (last replaced + Product.shelfLifeDays) has run out. `issues` lists whatever needs attention. */
+assetsRouter.get("/contents", async (req, res, next) => {
+  try {
+    const query = z.object({ roomId: optionalId, locationId: optionalId }).refine((v) => Boolean(v.roomId) !== Boolean(v.locationId), "Choose a room or a location").safeParse(req.query);
+    if (!query.success) { res.status(400).json({ error: "Choose a room or a location" }); return; }
+    const tid = tenantId(req);
+    const { roomId, locationId } = query.data;
+    let target: { kind: "room" | "location"; id: string; label: string; sub: string | null };
+    let roomTypeId: string | null = null;
+    if (roomId) {
+      const room = await prisma.room.findFirst({ where: { id: roomId, tenantId: tid }, select: { id: true, number: true, name: true, roomTypeId: true, roomType: { select: { name: true } } } });
+      if (!room) { res.status(404).json({ error: "Room not found" }); return; }
+      roomTypeId = room.roomTypeId;
+      target = { kind: "room", id: room.id, label: `Room ${room.number}${room.name ? ` - ${room.name}` : ""}`, sub: room.roomType.name };
+    } else {
+      const location = await prisma.location.findFirst({ where: { id: locationId!, tenantId: tid }, select: { id: true, name: true, type: true } });
+      if (!location) { res.status(404).json({ error: "Location not found" }); return; }
+      target = { kind: "location", id: location.id, label: location.name, sub: location.type ?? null };
+    }
+
+    const assets = await prisma.asset.findMany({
+      where: { tenantId: tid, isActive: true, ...(roomId ? { roomId } : { locationId, roomId: null }) },
+      include: { unitRef: { select: { name: true } }, category: { select: { name: true } }, conditionUpdatedByEmployee: { select: { firstName: true, lastName: true } } },
+      orderBy: [{ category: { name: "asc" } }, { name: "asc" }],
+    });
+    const fixedAssets = assets.map((a) => ({
+      id: a.id, assetNo: a.assetNo, name: a.name, category: a.category?.name ?? null, unit: a.unitRef.name, quantity: Number(a.quantity),
+      condition: a.condition, affectedQuantity: a.affectedQuantity == null ? null : Number(a.affectedQuantity), conditionNote: a.conditionNote,
+      conditionUpdatedAt: a.conditionUpdatedAt, conditionUpdatedBy: a.conditionUpdatedByEmployee ? `${a.conditionUpdatedByEmployee.firstName} ${a.conditionUpdatedByEmployee.lastName}`.trim() : null,
+    }));
+
+    const now = new Date();
+    const consumables: {
+      productId: string; name: string; unit: string; max: number | null; onHand: number; firstPlacedAt: Date | null; lastReplacedAt: Date | null;
+      shelfLifeDays: number | null; expiresAt: Date | null; daysToExpiry: number | null;
+      status: "OK" | "EMPTY" | "EXPIRED" | "EXPIRING_SOON" | "OVER_MAX" | "NO_MAX"; needed: number;
+    }[] = [];
+    if (roomId && roomTypeId) {
+      const [standards, stocks] = await Promise.all([
+        prisma.roomConsumableStandard.findMany({ where: { tenantId: tid, roomTypeId, isActive: true }, include: { product: { select: { id: true, name: true, unit: true, shelfLifeDays: true } } } }),
+        prisma.roomConsumableStock.findMany({ where: { tenantId: tid, roomId }, include: { product: { select: { id: true, name: true, unit: true, shelfLifeDays: true } } } }),
+      ]);
+      const byProduct = new Map<string, { product: { id: string; name: string; unit: string; shelfLifeDays: number | null }; max: number | null; stock: (typeof stocks)[number] | null }>();
+      for (const s of standards) byProduct.set(s.productId, { product: s.product, max: Number(s.quantity), stock: null });
+      for (const st of stocks) {
+        const existing = byProduct.get(st.productId);
+        if (existing) existing.stock = st; else byProduct.set(st.productId, { product: st.product, max: null, stock: st });
+      }
+      for (const { product, max, stock } of byProduct.values()) {
+        const onHand = stock ? Number(stock.quantity) : 0;
+        const expiresAt = stock && product.shelfLifeDays && onHand > 0 ? new Date(stock.lastReplacedAt.getTime() + product.shelfLifeDays * 86_400_000) : null;
+        const daysToExpiry = expiresAt ? Math.ceil((expiresAt.getTime() - now.getTime()) / 86_400_000) : null;
+        const status = expiresAt && expiresAt < now ? "EXPIRED" : max == null ? "NO_MAX" : onHand > max + 0.0005 ? "OVER_MAX" : expiresAt && (daysToExpiry ?? 99) <= EXPIRING_SOON_DAYS ? "EXPIRING_SOON" : onHand <= 0 ? "EMPTY" : "OK";
+        consumables.push({
+          productId: product.id, name: product.name, unit: product.unit, max, onHand: Math.round(onHand * 1000) / 1000,
+          firstPlacedAt: stock?.firstPlacedAt ?? null, lastReplacedAt: stock?.lastReplacedAt ?? null,
+          shelfLifeDays: product.shelfLifeDays, expiresAt, daysToExpiry, status,
+          needed: max == null ? 0 : Math.round(Math.max(0, max - onHand) * 1000) / 1000,
+        });
+      }
+      consumables.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    const issues = [
+      ...fixedAssets.filter((a) => a.condition !== "WORKING").map((a) => ({ kind: "ASSET" as const, severity: a.condition === "BROKEN" || a.condition === "MISSING" ? "high" as const : "medium" as const, title: a.name, detail: `${a.condition.replace("_", " ").toLowerCase()}${a.affectedQuantity != null ? ` (${a.affectedQuantity} of ${a.quantity})` : ""}${a.conditionNote ? ` - ${a.conditionNote}` : ""}` })),
+      ...consumables.filter((c) => c.status === "EXPIRED").map((c) => ({ kind: "CONSUMABLE" as const, severity: "high" as const, title: c.name, detail: `expired ${c.expiresAt ? c.expiresAt.toISOString().slice(0, 10) : ""} - replace` })),
+      ...consumables.filter((c) => c.status === "EXPIRING_SOON").map((c) => ({ kind: "CONSUMABLE" as const, severity: "medium" as const, title: c.name, detail: `expires in ${c.daysToExpiry} day${c.daysToExpiry === 1 ? "" : "s"}` })),
+      ...consumables.filter((c) => c.status === "OVER_MAX").map((c) => ({ kind: "CONSUMABLE" as const, severity: "medium" as const, title: c.name, detail: `${c.onHand} in room, maximum is ${c.max}` })),
+      ...consumables.filter((c) => c.status === "EMPTY").map((c) => ({ kind: "CONSUMABLE" as const, severity: "medium" as const, title: c.name, detail: "none in the room" })),
+    ];
+    res.json({
+      target, fixedAssets, consumables, issues,
+      summary: {
+        fixedAssets: fixedAssets.length, notWorking: fixedAssets.filter((a) => a.condition !== "WORKING").length,
+        consumableLines: consumables.length, expired: consumables.filter((c) => c.status === "EXPIRED").length, expiringSoon: consumables.filter((c) => c.status === "EXPIRING_SOON").length,
+        empty: consumables.filter((c) => c.status === "EMPTY").length, issues: issues.length,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const conditionSchema = z.object({
+  condition: z.enum(CONDITIONS),
+  affectedQuantity: optionalNumber(0.001),
+  note: optionalText(300),
+});
+
+/** Anyone can report an asset's condition (housekeeping notices a broken TV); every change is logged. */
+assetsRouter.patch("/:id/condition", async (req, res, next) => {
+  const data = conditionSchema.safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: "Invalid condition", details: data.error.flatten() }); return; }
+  const tid = tenantId(req);
+  try {
+    const asset = await prisma.asset.findFirst({ where: { id: req.params.id, tenantId: tid } });
+    if (!asset) { res.status(404).json({ error: "Asset not found" }); return; }
+    const { condition, note } = data.data;
+    const affected = condition === "WORKING" ? null : data.data.affectedQuantity ?? null;
+    if (affected != null && affected > Number(asset.quantity)) { res.status(400).json({ error: `Only ${Number(asset.quantity)} ${asset.name} on record` }); return; }
+    await prisma.$transaction(async (tx) => {
+      await tx.asset.update({ where: { id: asset.id }, data: { condition, affectedQuantity: affected, conditionNote: condition === "WORKING" ? null : note ?? null, conditionUpdatedAt: new Date(), conditionUpdatedBy: req.userId, updatedBy: req.userId } });
+      await tx.assetConditionLog.create({ data: { tenantId: tid, assetId: asset.id, fromCondition: asset.condition, toCondition: condition, affectedQuantity: affected, note, changedBy: req.userId } });
+    });
+    const updated = await prisma.asset.findUniqueOrThrow({ where: { id: asset.id }, include: assetInclude });
+    res.json({ asset: withUnit(updated) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 assetsRouter.get("/reports/rooms", async (req, res) => {
   const query = z.object({
     roomId: optionalId,
