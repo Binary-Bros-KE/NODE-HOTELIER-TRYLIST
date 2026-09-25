@@ -1400,13 +1400,14 @@ reportsRouter.get("/assets", async (req, res, next) => {
         include: {
           category: { select: { id: true, name: true } },
           location: { select: { id: true, name: true } },
+          unitRef: { select: { name: true } },
           room: { select: { id: true, number: true, name: true, roomType: { select: { name: true } } } },
         },
       }),
       prisma.assetMovement.findMany({
         where: { tenantId: tid, occurredAt: { gte: start, lte: end }, asset: assetScope },
         include: {
-          asset: { select: { id: true, assetNo: true, name: true, unit: true, unitCost: true, category: { select: { name: true } }, room: { select: { number: true } }, location: { select: { name: true } } } },
+          asset: { select: { id: true, assetNo: true, name: true, unitRef: { select: { name: true } }, unitCost: true, category: { select: { name: true } }, room: { select: { number: true } }, location: { select: { name: true } } } },
           paymentMethod: { select: { name: true } },
           employee: { select: { id: true, firstName: true, lastName: true } },
         },
@@ -1504,7 +1505,7 @@ reportsRouter.get("/assets", async (req, res, next) => {
 
     // ---- the register itself: biggest holdings + things needing attention
     const row = (a: (typeof assets)[number]) => ({
-      id: a.id, assetNo: a.assetNo, name: a.name, unit: a.unit, quantity: Number(a.quantity), unitCost: a.unitCost == null ? null : Number(a.unitCost), value: round2(value(a)),
+      id: a.id, assetNo: a.assetNo, name: a.name, unit: a.unitRef.name, quantity: Number(a.quantity), unitCost: a.unitCost == null ? null : Number(a.unitCost), value: round2(value(a)),
       category: a.category?.name ?? null, placement: a.room ? `Room ${a.room.number}` : a.location?.name ?? null,
     });
     const topAssets = [...active].sort((a, b) => value(b) - value(a)).slice(0, 10).map(row);
@@ -1543,17 +1544,17 @@ reportsRouter.get("/assets", async (req, res, next) => {
       },
       capitalByMethod, lossesByCategory, byEmployee,
       acquisitions: receipts.slice(0, 100).map((m) => ({
-        id: m.id, occurredAt: m.occurredAt, assetNo: m.asset.assetNo, name: m.asset.name, quantity: Number(m.quantity), unit: m.asset.unit,
+        id: m.id, occurredAt: m.occurredAt, assetNo: m.asset.assetNo, name: m.asset.name, quantity: Number(m.quantity), unit: m.asset.unitRef.name,
         unitCost: m.unitCost == null ? null : Number(m.unitCost), value: round2(moveValue(m)), how: m.paymentMethodId ? "Purchased" : "Recorded",
         paymentMethod: m.paymentMethod?.name ?? null, reference: m.reference, placement: m.asset.room ? `Room ${m.asset.room.number}` : m.asset.location?.name ?? null,
         by: m.employee ? fullName(m.employee) : null,
       })),
       writeOffs: writeOffs.slice(0, 100).map((m) => ({
-        id: m.id, occurredAt: m.occurredAt, assetNo: m.asset.assetNo, name: m.asset.name, quantity: Math.abs(Number(m.quantity)), unit: m.asset.unit,
+        id: m.id, occurredAt: m.occurredAt, assetNo: m.asset.assetNo, name: m.asset.name, quantity: Math.abs(Number(m.quantity)), unit: m.asset.unitRef.name,
         value: round2(moveValue(m)), note: m.note, placement: m.asset.room ? `Room ${m.asset.room.number}` : m.asset.location?.name ?? null, by: m.employee ? fullName(m.employee) : null,
       })),
       adjustments: adjustments.slice(0, 100).map((m) => ({
-        id: m.id, occurredAt: m.occurredAt, assetNo: m.asset.assetNo, name: m.asset.name, quantity: Number(m.quantity), unit: m.asset.unit,
+        id: m.id, occurredAt: m.occurredAt, assetNo: m.asset.assetNo, name: m.asset.name, quantity: Number(m.quantity), unit: m.asset.unitRef.name,
         note: m.note, by: m.employee ? fullName(m.employee) : null,
       })),
     });

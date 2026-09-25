@@ -770,6 +770,7 @@ model UnitOfMeasure {
   packProducts    Product[]            @relation("ProductPackUnit")
   roomRates       RoomRate[]           @relation("RoomRateUnit")
   roomTypes       RoomType[]           @relation("RoomTypePriceUnit")
+  assets          Asset[]              @relation("AssetUnit")
 
   @@unique([tenantId, name])
   @@unique([tenantId, systemKey])
@@ -1606,7 +1607,9 @@ model Asset {
   category          Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   name              String
   description       String?
-  unit              String          @default("Each")
+  // Any unit from the tenant's Units of Measure - it is up to the user to pick one that makes sense.
+  unitId            String
+  unitRef           UnitOfMeasure   @relation("AssetUnit", fields: [unitId], references: [id], onDelete: Restrict)
   quantity          Decimal         @default(0) @db.Decimal(12, 3)
   unitCost          Decimal?        @db.Decimal(12, 2)
   locationId        String?

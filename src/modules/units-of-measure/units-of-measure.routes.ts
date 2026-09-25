@@ -28,7 +28,7 @@ unitsOfMeasureRouter.get("/", async (req, res) => {
   await ensureSystemUnits(prisma, tenantId(req));
   const units = await prisma.unitOfMeasure.findMany({
     where: { tenantId: tenantId(req) },
-    select: { id: true, name: true, systemKey: true, measurementKind: true, createdAt: true, updatedAt: true, _count: { select: { services: true } } },
+    select: { id: true, name: true, systemKey: true, measurementKind: true, createdAt: true, updatedAt: true, _count: { select: { services: true, assets: true } } },
     orderBy: { name: "asc" },
   });
   res.json({ units });
@@ -70,10 +70,11 @@ unitsOfMeasureRouter.patch("/:id", async (req, res, next) => {
 
 unitsOfMeasureRouter.delete("/:id", async (req, res) => {
   const tid = tenantId(req);
-  const existing = await prisma.unitOfMeasure.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, systemKey: true, _count: { select: { services: true } } } });
+  const existing = await prisma.unitOfMeasure.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, systemKey: true, _count: { select: { services: true, assets: true } } } });
   if (!existing) { res.status(404).json({ error: "Unit not found" }); return; }
   if (existing.systemKey) { res.status(403).json({ error: LOCKED }); return; }
   if (existing._count.services > 0) { res.status(409).json({ error: "Reassign or remove its services first" }); return; }
+  if (existing._count.assets > 0) { res.status(409).json({ error: "Assets are recorded in this unit - change their unit first" }); return; }
   await prisma.unitOfMeasure.delete({ where: { id: existing.id } });
   res.status(204).send();
 });
