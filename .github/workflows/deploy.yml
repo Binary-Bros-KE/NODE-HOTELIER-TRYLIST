@@ -26,7 +26,11 @@ jobs:
             # A deploy checkout owns no local edits worth keeping — force it
             # to exactly match origin/main. `.env`, node_modules/, dist/ and
             # uploads/ are gitignored, so they survive this.
-            git fetch origin main
+            # Repair stale/corrupt remote-tracking refs before fetching. A
+            # failed/concurrent deploy can leave origin/main in a state where
+            # git refuses to lock it, which blocks the whole live deploy.
+            git update-ref -d refs/remotes/origin/main || true
+            git fetch --prune --force origin +refs/heads/main:refs/remotes/origin/main
             git reset --hard origin/main
             # If a previous npm install was interrupted, node_modules can be
             # left half-mutated (for example missing iconv-lite encodings).
