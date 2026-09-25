@@ -34,12 +34,18 @@ jobs:
             git reset --hard origin/main
             # If a previous npm install was interrupted, node_modules can be
             # left half-mutated (for example missing iconv-lite encodings).
-            # Start from a clean dependency tree so the running server never
-            # inherits a corrupted install.
-            rm -rf node_modules
+            # Move it out of the app folder instead of deleting in place; on
+            # this VPS npm/rm can hit ENOTEMPTY while cleaning deep package
+            # folders, and npm ci then tries to clean the broken tree again.
+            pm2 stop hotelier-server || true
+            stale_node_modules="../NODE-HOTELIER-node_modules-stale-$(date +%s)"
+            if [ -d node_modules ]; then
+              mv node_modules "$stale_node_modules"
+            fi
             # `npm ci` installs from package-lock.json without rewriting it,
             # so it can never drift and block the next `git` step.
             npm ci
+            rm -rf "$stale_node_modules" || true
             # Explicit, even though "postinstall" already runs this — on this
             # host `npm ci` doesn't reliably fire lifecycle scripts, so a
             # schema change silently built against a stale generated client
