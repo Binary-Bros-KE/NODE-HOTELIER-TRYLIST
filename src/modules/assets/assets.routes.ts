@@ -7,7 +7,7 @@ import { partialNoDefaults } from "../../lib/zod.js";
 import { UNITS_OF_MEASURE } from "../products/products.routes.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
-// Durable, owned equipment (chairs, plates, cutlery) bought through Store —
+// Durable, owned equipment (chairs, plates, cutlery) — registering it records ownership only; a purchase is opt-in and is capital invested —
 // distinct from Product (never sold/consumed) and from Expense (the owner
 // still wants the spend tracked in the Transaction ledger, just not lumped
 // in with day-to-day incidental spend). No requireModule gate, matching the
@@ -31,17 +31,21 @@ const createSchema = z.object({
   roomId: optionalId,
   // Only meaningful when quantity + unitCost together represent a real
   // purchase to log — see the "was there money spent" check in POST /.
+  // Registering an asset only records what the property already owns. It is a purchase (money
+  // paid out, written to the ledger as capital invested) ONLY when the user says so explicitly.
+  purchased: z.boolean().default(false),
   paymentMethodId: optionalId,
   reference: optionalText(120),
   notes: optionalText(500),
   isActive: z.boolean().default(true),
 });
-const updateSchema = partialNoDefaults(createSchema.omit({ quantity: true, paymentMethodId: true, reference: true }));
+const updateSchema = partialNoDefaults(createSchema.omit({ quantity: true, purchased: true, paymentMethodId: true, reference: true }));
 
 const movementSchema = z.object({
   type: z.enum(["RECEIPT", "ADJUSTMENT", "WRITE_OFF"]),
   quantity: z.coerce.number().finite().refine((value) => value !== 0, "Quantity cannot be zero"),
   unitCost: optionalNumber(0),
+  purchased: z.boolean().default(false),
   paymentMethodId: optionalId,
   reference: optionalText(120),
   note: optionalText(500),
@@ -163,8 +167,10 @@ assetsRouter.post("/", async (req, res, next) => {
   const data = createSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid asset", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
-  const { quantity, paymentMethodId, reference, categoryId, locationId, roomId, ...rest } = data.data;
-  const hasPurchase = quantity > 0 && rest.unitCost !== undefined && rest.unitCost > 0;
+  const { quantity, purchased, paymentMethodId, reference, categoryId, locationId, roomId, ...rest } = data.data;
+  // Unit cost alone is just the book value of something already owned. Money only moves when `purchased` is set.
+  const hasPurchase = purchased && quantity > 0 && rest.unitCost !== undefined && rest.unitCost > 0;
+  if (purchased && !hasPurchase) { res.status(400).json({ error: "Enter a quantity and unit cost to record a purchase" }); return; }
   try {
     if (categoryId) {
       const category = await prisma.category.findFirst({ where: { id: categoryId, tenantId: tid, scope: "ASSETS" } });
@@ -201,7 +207,7 @@ assetsRouter.post("/", async (req, res, next) => {
               reference: resolvedPayment?.reference,
               locationId,
               employeeId: req.userId,
-              description: `Asset purchase — ${quantity} × ${rest.name}`,
+              description: `Capital purchase (asset, not an expense) — ${quantity} × ${rest.name}`,
               sourceRefId: movement.id,
             },
           });
@@ -274,8 +280,10 @@ assetsRouter.post("/:id/movements", async (req, res) => {
   const tid = tenantId(req);
   const asset = await prisma.asset.findFirst({ where: { id: req.params.id, tenantId: tid } });
   if (!asset) { res.status(404).json({ error: "Asset not found" }); return; }
-  const { type, quantity, unitCost, paymentMethodId, reference, note, occurredAt } = data.data;
-  const hasPurchase = type === "RECEIPT" && unitCost !== undefined && unitCost > 0;
+  const { type, quantity, unitCost, purchased, paymentMethodId, reference, note, occurredAt } = data.data;
+  // A receipt is a purchase only when explicitly marked; otherwise it just records units already owned.
+  const hasPurchase = type === "RECEIPT" && purchased && unitCost !== undefined && unitCost > 0;
+  if (purchased && type === "RECEIPT" && !hasPurchase) { res.status(400).json({ error: "Enter a unit cost to record a purchase" }); return; }
 
   if (quantity < 0 && Number(asset.quantity) + quantity < 0) { res.status(400).json({ error: `Not enough ${asset.name} on hand for this` }); return; }
   if (hasPurchase && !paymentMethodId) { res.status(400).json({ error: "Choose a payment method for this purchase" }); return; }
@@ -284,7 +292,7 @@ assetsRouter.post("/:id/movements", async (req, res) => {
     const resolvedPayment = paymentMethodId ? await resolvePaymentMethod(tid, paymentMethodId, reference) : null;
     const transactionNo = hasPurchase ? await nextTransactionNo(tid) : null;
     const result = await prisma.$transaction(async (tx) => {
-      await tx.asset.update({ where: { id: asset.id }, data: { quantity: { increment: quantity }, ...(hasPurchase ? { unitCost } : {}) } });
+      await tx.asset.update({ where: { id: asset.id }, data: { quantity: { increment: quantity }, ...(type === "RECEIPT" && unitCost !== undefined && unitCost > 0 ? { unitCost } : {}) } });
       const movement = await tx.assetMovement.create({
         data: { tenantId: tid, assetId: asset.id, type, quantity, unitCost, paymentMethodId: hasPurchase ? paymentMethodId : undefined, reference: hasPurchase ? resolvedPayment?.reference : undefined, note, occurredAt, performedBy: req.userId },
         include: { paymentMethod: { select: { id: true, name: true } }, employee: { select: { id: true, firstName: true, lastName: true } } },
@@ -301,7 +309,7 @@ assetsRouter.post("/:id/movements", async (req, res) => {
             reference: resolvedPayment?.reference,
             locationId: asset.locationId,
             employeeId: req.userId,
-            description: `Asset purchase — ${quantity} × ${asset.name}`,
+            description: `Capital purchase (asset, not an expense) — ${quantity} × ${asset.name}`,
             sourceRefId: movement.id,
           },
         });

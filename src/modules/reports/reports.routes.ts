@@ -1375,3 +1375,189 @@ reportsRouter.get("/products-overview", async (req, res, next) => {
     next(error);
   }
 });
+
+// ============================================================================
+// Assets Report - what the property owns and what it is worth (a snapshot of
+// the register), plus what changed in the period: additions, purchases (capital
+// invested, not expense), write-offs, count corrections, and data gaps.
+// Book value = quantity x current unit value; period reconciliation values the
+// movements at the asset's current value, so it is an estimate for old periods.
+// ============================================================================
+
+reportsRouter.get("/assets", async (req, res, next) => {
+  try {
+    const query = salesQuerySchema.safeParse(req.query);
+    if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
+    const { period, date, from, to, locationId } = query.data;
+    const tid = tenantId(req);
+    const startHour = await businessDayStartHourFor(tid);
+    const { start, end } = resolveSalesRange(period, date, from, to, startHour);
+    const assetScope = locationId ? { locationId } : {};
+
+    const [assets, movements, sinceStart, purchases, rooms] = await Promise.all([
+      prisma.asset.findMany({
+        where: { tenantId: tid, ...assetScope },
+        include: {
+          category: { select: { id: true, name: true } },
+          location: { select: { id: true, name: true } },
+          room: { select: { id: true, number: true, name: true, roomType: { select: { name: true } } } },
+        },
+      }),
+      prisma.assetMovement.findMany({
+        where: { tenantId: tid, occurredAt: { gte: start, lte: end }, asset: assetScope },
+        include: {
+          asset: { select: { id: true, assetNo: true, name: true, unit: true, unitCost: true, category: { select: { name: true } }, room: { select: { number: true } }, location: { select: { name: true } } } },
+          paymentMethod: { select: { name: true } },
+          employee: { select: { id: true, firstName: true, lastName: true } },
+        },
+        orderBy: { occurredAt: "desc" },
+      }),
+      prisma.assetMovement.groupBy({ by: ["assetId"], where: { tenantId: tid, occurredAt: { gte: start }, asset: assetScope }, _sum: { quantity: true } }),
+      prisma.transaction.findMany({
+        where: { tenantId: tid, source: "ASSET_PURCHASE", status: "COMPLETE", createdAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
+        include: { paymentMethod: { select: { name: true } } },
+      }),
+      prisma.room.findMany({ where: { tenantId: tid }, select: { id: true, number: true, name: true, roomType: { select: { name: true } } }, orderBy: { number: "asc" } }),
+    ]);
+
+    const value = (a: { quantity: unknown; unitCost: unknown }) => Number(a.quantity) * Number(a.unitCost ?? 0);
+    const active = assets.filter((a) => a.isActive);
+    const totalUnits = active.reduce((s, a) => s + Number(a.quantity), 0);
+    const bookValue = active.reduce((s, a) => s + value(a), 0);
+    const pct = (part: number, whole: number) => (whole > 0 ? round2((part / whole) * 100) : 0);
+
+    // ---- where the value sits
+    type Bucket = { key: string; name: string; assets: number; units: number; value: number };
+    const bucketed = (keyOf: (a: (typeof active)[number]) => { key: string; name: string }) => {
+      const map = new Map<string, Bucket>();
+      for (const a of active) {
+        const { key, name } = keyOf(a);
+        const b = map.get(key) ?? { key, name, assets: 0, units: 0, value: 0 };
+        b.assets += 1; b.units += Number(a.quantity); b.value += value(a);
+        map.set(key, b);
+      }
+      return [...map.values()].map((b) => ({ ...b, units: round2(b.units), value: round2(b.value), percentOfValue: pct(b.value, bookValue) })).sort((a, b) => b.value - a.value);
+    };
+    const byCategory = bucketed((a) => ({ key: a.categoryId ?? "none", name: a.category?.name ?? "Uncategorised" }));
+    const byPlacement = bucketed((a) => (a.roomId ? { key: "rooms", name: "In rooms" } : a.location ? { key: `loc:${a.location.id}`, name: a.location.name } : { key: "unassigned", name: "Not placed anywhere" }));
+
+    // ---- rooms
+    const roomMap = new Map<string, { roomId: string; roomNumber: string; roomName: string | null; roomType: string; assets: number; units: number; value: number }>();
+    for (const a of active) {
+      if (!a.room) continue;
+      const r = roomMap.get(a.room.id) ?? { roomId: a.room.id, roomNumber: a.room.number, roomName: a.room.name, roomType: a.room.roomType.name, assets: 0, units: 0, value: 0 };
+      r.assets += 1; r.units += Number(a.quantity); r.value += value(a);
+      roomMap.set(a.room.id, r);
+    }
+    const roomRows = [...roomMap.values()].map((r) => ({ ...r, units: round2(r.units), value: round2(r.value) }));
+    const roomsWithoutAssets = rooms.filter((r) => !roomMap.has(r.id)).map((r) => ({ roomId: r.id, roomNumber: r.number, roomName: r.name, roomType: r.roomType.name }));
+
+    // ---- period activity
+    const receipts = movements.filter((m) => m.type === "RECEIPT");
+    const writeOffs = movements.filter((m) => m.type === "WRITE_OFF");
+    const adjustments = movements.filter((m) => m.type === "ADJUSTMENT");
+    const moveValue = (m: (typeof movements)[number]) => Math.abs(Number(m.quantity)) * Number(m.unitCost ?? m.asset.unitCost ?? 0);
+    const recordedReceipts = receipts.filter((m) => !m.paymentMethodId);
+    const unitsAdded = receipts.reduce((s, m) => s + Number(m.quantity), 0);
+    const unitsWrittenOff = writeOffs.reduce((s, m) => s + Math.abs(Number(m.quantity)), 0);
+    const adjustmentUnits = adjustments.reduce((s, m) => s + Number(m.quantity), 0);
+    const valueAdded = receipts.reduce((s, m) => s + moveValue(m), 0);
+    const valueWrittenOff = writeOffs.reduce((s, m) => s + moveValue(m), 0);
+    const adjustmentValue = adjustments.reduce((s, m) => s + Number(m.quantity) * Number(m.unitCost ?? m.asset.unitCost ?? 0), 0);
+
+    // ---- opening vs closing (units now, minus everything since the period began)
+    const sinceByAsset = new Map(sinceStart.map((s) => [s.assetId, Number(s._sum.quantity ?? 0)]));
+    let openingUnits = 0; let openingValue = 0;
+    for (const a of active) {
+      const opening = Number(a.quantity) - (sinceByAsset.get(a.id) ?? 0);
+      openingUnits += opening; openingValue += opening * Number(a.unitCost ?? 0);
+    }
+
+    // ---- capital invested (purchases) - not an expense
+    const capital = purchases.reduce((s, t) => s + Number(t.amount), 0);
+    const methodMap = new Map<string, { name: string; count: number; total: number }>();
+    for (const t of purchases) {
+      const name = t.paymentMethod?.name ?? "Unknown";
+      const m = methodMap.get(name) ?? { name, count: 0, total: 0 };
+      m.count += 1; m.total += Number(t.amount); methodMap.set(name, m);
+    }
+    const capitalByMethod = [...methodMap.values()].map((m) => ({ ...m, total: round2(m.total), percentOfTotal: pct(m.total, capital) })).sort((a, b) => b.total - a.total);
+
+    // ---- losses by category and who recorded what
+    const lossMap = new Map<string, { name: string; units: number; value: number; events: number }>();
+    for (const m of writeOffs) {
+      const name = m.asset.category?.name ?? "Uncategorised";
+      const l = lossMap.get(name) ?? { name, units: 0, value: 0, events: 0 };
+      l.units += Math.abs(Number(m.quantity)); l.value += moveValue(m); l.events += 1; lossMap.set(name, l);
+    }
+    const lossesByCategory = [...lossMap.values()].map((l) => ({ ...l, units: round2(l.units), value: round2(l.value) })).sort((a, b) => b.value - a.value);
+    const empMap = new Map<string, { employeeId: string; name: string; movements: number; added: number; writtenOff: number }>();
+    for (const m of movements) {
+      const key = m.employee?.id ?? "system";
+      const e = empMap.get(key) ?? { employeeId: key, name: m.employee ? fullName(m.employee) : "System", movements: 0, added: 0, writtenOff: 0 };
+      e.movements += 1;
+      if (m.type === "RECEIPT") e.added += Number(m.quantity);
+      if (m.type === "WRITE_OFF") e.writtenOff += Math.abs(Number(m.quantity));
+      empMap.set(key, e);
+    }
+    const byEmployee = [...empMap.values()].sort((a, b) => b.movements - a.movements);
+
+    // ---- the register itself: biggest holdings + things needing attention
+    const row = (a: (typeof assets)[number]) => ({
+      id: a.id, assetNo: a.assetNo, name: a.name, unit: a.unit, quantity: Number(a.quantity), unitCost: a.unitCost == null ? null : Number(a.unitCost), value: round2(value(a)),
+      category: a.category?.name ?? null, placement: a.room ? `Room ${a.room.number}` : a.location?.name ?? null,
+    });
+    const topAssets = [...active].sort((a, b) => value(b) - value(a)).slice(0, 10).map(row);
+    const noValue = active.filter((a) => Number(a.quantity) > 0 && !(Number(a.unitCost ?? 0) > 0));
+    const noCategory = active.filter((a) => !a.categoryId);
+    const notPlaced = active.filter((a) => !a.roomId && !a.locationId);
+    const outOfStock = active.filter((a) => Number(a.quantity) <= 0);
+
+    res.json({
+      range: { period, start: start.toISOString(), end: end.toISOString() },
+      cards: {
+        assets: active.length, inactiveAssets: assets.length - active.length,
+        totalUnits: round2(totalUnits), bookValue: round2(bookValue),
+        roomAssets: active.filter((a) => a.roomId).length, roomsWithAssets: roomMap.size, roomsWithoutAssets: roomsWithoutAssets.length,
+        unitsAdded: round2(unitsAdded), valueAdded: round2(valueAdded),
+        unitsWrittenOff: round2(unitsWrittenOff), valueWrittenOff: round2(valueWrittenOff),
+        capitalInvested: round2(capital), purchaseCount: purchases.length,
+        recordedWithoutPurchase: round2(recordedReceipts.reduce((s, m) => s + moveValue(m), 0)),
+        writeOffRate: pct(unitsWrittenOff, openingUnits + unitsAdded),
+        movements: movements.length,
+      },
+      reconciliation: {
+        openingUnits: round2(openingUnits), openingValue: round2(openingValue),
+        added: round2(unitsAdded), addedValue: round2(valueAdded),
+        writtenOff: round2(unitsWrittenOff), writtenOffValue: round2(valueWrittenOff),
+        adjustments: round2(adjustmentUnits), adjustmentValue: round2(adjustmentValue),
+        closingUnits: round2(totalUnits), closingValue: round2(bookValue),
+      },
+      byCategory, byPlacement,
+      rooms: roomRows.sort((a, b) => b.value - a.value), roomsWithoutAssets,
+      topAssets,
+      attention: {
+        counts: { noValue: noValue.length, noCategory: noCategory.length, notPlaced: notPlaced.length, outOfStock: outOfStock.length },
+        noValue: noValue.slice(0, 50).map(row), noCategory: noCategory.slice(0, 50).map(row),
+        notPlaced: notPlaced.slice(0, 50).map(row), outOfStock: outOfStock.slice(0, 50).map(row),
+      },
+      capitalByMethod, lossesByCategory, byEmployee,
+      acquisitions: receipts.slice(0, 100).map((m) => ({
+        id: m.id, occurredAt: m.occurredAt, assetNo: m.asset.assetNo, name: m.asset.name, quantity: Number(m.quantity), unit: m.asset.unit,
+        unitCost: m.unitCost == null ? null : Number(m.unitCost), value: round2(moveValue(m)), how: m.paymentMethodId ? "Purchased" : "Recorded",
+        paymentMethod: m.paymentMethod?.name ?? null, reference: m.reference, placement: m.asset.room ? `Room ${m.asset.room.number}` : m.asset.location?.name ?? null,
+        by: m.employee ? fullName(m.employee) : null,
+      })),
+      writeOffs: writeOffs.slice(0, 100).map((m) => ({
+        id: m.id, occurredAt: m.occurredAt, assetNo: m.asset.assetNo, name: m.asset.name, quantity: Math.abs(Number(m.quantity)), unit: m.asset.unit,
+        value: round2(moveValue(m)), note: m.note, placement: m.asset.room ? `Room ${m.asset.room.number}` : m.asset.location?.name ?? null, by: m.employee ? fullName(m.employee) : null,
+      })),
+      adjustments: adjustments.slice(0, 100).map((m) => ({
+        id: m.id, occurredAt: m.occurredAt, assetNo: m.asset.assetNo, name: m.asset.name, quantity: Number(m.quantity), unit: m.asset.unit,
+        note: m.note, by: m.employee ? fullName(m.employee) : null,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
