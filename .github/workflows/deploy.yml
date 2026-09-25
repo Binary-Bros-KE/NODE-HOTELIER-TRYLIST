@@ -28,6 +28,11 @@ jobs:
             # uploads/ are gitignored, so they survive this.
             git fetch origin main
             git reset --hard origin/main
+            # If a previous npm install was interrupted, node_modules can be
+            # left half-mutated (for example missing iconv-lite encodings).
+            # Start from a clean dependency tree so the running server never
+            # inherits a corrupted install.
+            rm -rf node_modules
             # `npm ci` installs from package-lock.json without rewriting it,
             # so it can never drift and block the next `git` step.
             npm ci
