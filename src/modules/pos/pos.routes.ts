@@ -2024,6 +2024,7 @@ posRouter.get("/product-stock", async (req, res) => {
     search: z.string().trim().max(100).optional(),
     categoryId: z.string().cuid().optional(),
     stock: z.enum(["ALL", "LOW", "OUT"]).default("ALL"),
+    inStockOnly: z.coerce.boolean().default(false),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
   const scope = await scopedLocationIds(tid, req.userId, query.data.locationId);
@@ -2081,15 +2082,16 @@ posRouter.get("/product-stock", async (req, res) => {
       stockByLocation: product.stocks.map((stock) => ({ locationId: stock.locationId, locationName: stock.location.name, quantity: Number(stock.quantity) })),
     };
   });
-  const filtered = rows.filter((row) => query.data.stock === "LOW" ? row.low : query.data.stock === "OUT" ? row.out : true);
+  const visibleRows = query.data.inStockOnly ? rows.filter((row) => row.quantity > 0) : rows;
+  const filtered = visibleRows.filter((row) => query.data.stock === "LOW" ? row.low : query.data.stock === "OUT" ? row.out : true);
   res.status(200).json({
     products: filtered,
     categories,
     summary: {
-      totalProducts: rows.length,
-      totalUnits: rows.reduce((sum, row) => sum + row.quantity, 0),
-      lowStock: rows.filter((row) => row.low).length,
-      outOfStock: rows.filter((row) => row.out).length,
+      totalProducts: visibleRows.length,
+      totalUnits: visibleRows.reduce((sum, row) => sum + row.quantity, 0),
+      lowStock: visibleRows.filter((row) => row.low).length,
+      outOfStock: visibleRows.filter((row) => row.out).length,
     },
   });
 });

@@ -64,6 +64,7 @@ const productsQuerySchema = z.object({
   locationId: optionalId,
   search: optionalText(120),
   categoryId: optionalId,
+  inStockOnly: z.coerce.boolean().default(true),
   page: z.preprocess(blankToUndefined, z.coerce.number().int().min(1).default(1)),
   pageSize: z.preprocess(blankToUndefined, z.coerce.number().int().min(1).max(200).default(50)),
 });
@@ -194,7 +195,7 @@ roomConsumablesRouter.get("/products", async (req, res, next) => {
   try {
     const parsed = productsQuerySchema.safeParse(req.query);
     if (!parsed.success) { res.status(400).json({ error: "Invalid filters", details: parsed.error.flatten() }); return; }
-    const { locationId, search, categoryId, page, pageSize } = parsed.data;
+    const { locationId, search, categoryId, inStockOnly, page, pageSize } = parsed.data;
     const tid = tenantId(req);
     const resolved = await resolveEffectiveLocation(tid, req.userId, locationId);
     if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
@@ -203,6 +204,7 @@ roomConsumablesRouter.get("/products", async (req, res, next) => {
     const where: Prisma.ProductWhereInput = {
       tenantId: tid,
       isActive: true,
+      ...(inStockOnly ? { stocks: { some: { tenantId: tid, locationId: resolved.location.id, quantity: { gt: 0 } } } } : {}),
       ...(categoryId ? { categoryId } : {}),
       ...(search
         ? { OR: [
