@@ -4,6 +4,7 @@ import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { nextLostFoundNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
+import { HousekeepingError, loadActor } from "../../lib/housekeeping.js";
 
 export const lostFoundRouter = Router();
 lostFoundRouter.use(requireModule("HOUSEKEEPING"));
@@ -42,6 +43,12 @@ const itemInclude = {
 async function assertRoomInTenant(roomId: string, tid: string) {
   const room = await prisma.room.findFirst({ where: { id: roomId, tenantId: tid }, select: { id: true } });
   if (!room) throw Object.assign(new Error("Choose a room from this property"), { status: 400 });
+}
+
+async function requireSupervisor(req: { tenantId?: string; userId?: string }) {
+  const actor = await loadActor(req.tenantId, req.userId);
+  if (!actor.isManager) throw new HousekeepingError("Only a supervisor can change recorded lost and found items", 403);
+  return actor;
 }
 
 // Collected items sink out of the default view entirely — the frontend must
@@ -90,6 +97,7 @@ lostFoundRouter.patch("/:id", async (req, res) => {
   const data = updateSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid item", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
+  try { await requireSupervisor(req); } catch (error) { res.status(error instanceof HousekeepingError ? error.status : 500).json({ error: error instanceof Error ? error.message : "Not allowed" }); return; }
   if (data.data.roomId) await assertRoomInTenant(data.data.roomId, tid);
   const updated = await prisma.lostFoundItem.updateMany({ where: { id: req.params.id, tenantId: tid }, data: data.data });
   if (!updated.count) { res.status(404).json({ error: "Item not found" }); return; }
@@ -101,6 +109,7 @@ lostFoundRouter.patch("/:id/collect", async (req, res) => {
   const data = collectSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid collection details", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
+  try { await requireSupervisor(req); } catch (error) { res.status(error instanceof HousekeepingError ? error.status : 500).json({ error: error instanceof Error ? error.message : "Not allowed" }); return; }
   const existing = await prisma.lostFoundItem.findFirst({ where: { id: req.params.id, tenantId: tid } });
   if (!existing) { res.status(404).json({ error: "Item not found" }); return; }
   if (existing.status !== "UNCLAIMED") { res.status(409).json({ error: "This item has already been marked as collected" }); return; }
@@ -114,6 +123,7 @@ lostFoundRouter.patch("/:id/collect", async (req, res) => {
 
 lostFoundRouter.patch("/:id/reopen", async (req, res) => {
   const tid = tenantId(req);
+  try { await requireSupervisor(req); } catch (error) { res.status(error instanceof HousekeepingError ? error.status : 500).json({ error: error instanceof Error ? error.message : "Not allowed" }); return; }
   const existing = await prisma.lostFoundItem.findFirst({ where: { id: req.params.id, tenantId: tid } });
   if (!existing) { res.status(404).json({ error: "Item not found" }); return; }
   if (existing.status !== "COLLECTED") { res.status(409).json({ error: "This item is not marked as collected" }); return; }
@@ -126,6 +136,7 @@ lostFoundRouter.patch("/:id/reopen", async (req, res) => {
 });
 
 lostFoundRouter.delete("/:id", async (req, res) => {
+  try { await requireSupervisor(req); } catch (error) { res.status(error instanceof HousekeepingError ? error.status : 500).json({ error: error instanceof Error ? error.message : "Not allowed" }); return; }
   const deleted = await prisma.lostFoundItem.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } });
   if (!deleted.count) { res.status(404).json({ error: "Item not found" }); return; }
   res.status(204).send();

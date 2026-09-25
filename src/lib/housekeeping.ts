@@ -37,7 +37,7 @@ export async function loadActor(tenantId: string | undefined, userId: string | u
   return {
     id: employee.id,
     name: `${employee.firstName} ${employee.lastName}`.trim(),
-    isManager: roleName === "Super Admin" || roleName === "Manager" || employee.isSupervisor,
+    isManager: roleName === "Super Admin" || employee.isSupervisor,
   };
 }
 
