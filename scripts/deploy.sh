@@ -19,8 +19,11 @@ PREV_MODULES="$HOME/NODE-HOTELIER-node_modules.prev"
 PREV_DIST="$HOME/NODE-HOTELIER-dist.prev"
 PM2_NAME="hotelier-server"
 
-exec 9>"$HOME/.hotelier-deploy.lock"
-flock -w 1200 9 || { echo "Another deploy is still running after 20 minutes - giving up"; exit 1; }
+# The workflow already holds the lock while it fetches, so it sets HOTELIER_DEPLOY_LOCKED; a manual run takes it here.
+if [ "${HOTELIER_DEPLOY_LOCKED:-0}" != "1" ]; then
+  exec 9>"$HOME/.hotelier-deploy.lock"
+  flock -w 1500 9 || { echo "Another deploy is still running after 25 minutes - giving up"; exit 1; }
+fi
 
 # rm -rf can hit ENOTEMPTY on this host; if it does, move the folder out of the way instead.
 discard() {

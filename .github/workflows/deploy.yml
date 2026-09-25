@@ -27,6 +27,11 @@ jobs:
           script_stop: true
           script: |
             set -e
+            # Take the server-wide deploy lock BEFORE touching git, so a second deploy (e.g. from the other
+            # remote) waits its turn instead of colliding on .git/index.lock or node_modules.
+            exec 9>"$HOME/.hotelier-deploy.lock"
+            flock -w 1500 9 || { echo "Another deploy is still running - giving up"; exit 1; }
+            export HOTELIER_DEPLOY_LOCKED=1
             cd ~/NODE-HOTELIER
             # Fetch and take ONLY the deploy script from the new commit. The live folder is otherwise
             # left alone: the script builds the new version in a staging copy, keeps the old code
