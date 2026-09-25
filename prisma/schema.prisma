@@ -444,6 +444,7 @@ model Tenant {
   payments                   Payment[]
   locations                  Location[]
   customers                  Customer[]
+  serviceCustomerGroups      ServiceCustomerGroup[]
   customerCreditEntries      CustomerCreditEntry[]
   tenantSequences            TenantSequence[]
   reservationGuests          ReservationGuest[]
@@ -598,6 +599,7 @@ model Customer {
   createdBy           String?
   updatedBy           String?
   locationId          String?
+  serviceGroupId      String?
   tenant              Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   reservations        Reservation[]
   reservationGroups   ReservationGroup[]
@@ -607,6 +609,7 @@ model Customer {
   createdByEmployee   Employee?             @relation("CustomerCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
   updatedByEmployee   Employee?             @relation("CustomerUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
   location            Location?             @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  serviceGroup        ServiceCustomerGroup? @relation(fields: [serviceGroupId], references: [id], onDelete: SetNull)
   memberships         Membership[]
   appointments        Appointment[]
   commercialDocuments CommercialDocument[]
@@ -614,6 +617,22 @@ model Customer {
   @@unique([tenantId, customerNo])
   @@index([tenantId, lastName, firstName])
   @@index([tenantId, status])
+  @@index([tenantId, serviceGroupId])
+}
+
+model ServiceCustomerGroup {
+  id          String     @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customers   Customer[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, isActive])
 }
 
 model Room {

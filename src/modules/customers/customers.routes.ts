@@ -63,6 +63,8 @@ const createSchema = z.object({
   emergencyContactName: optionalText(80),
   emergencyContactRelationship: optionalText(60),
   emergencyContactPhone: optionalText(30),
+
+  serviceGroupId: z.preprocess((v) => (v === "" || v === null ? null : v), z.string().cuid().nullable()).optional(),
 });
 const updateSchema = partialNoDefaults(createSchema);
 
@@ -75,24 +77,27 @@ const listSchema = z.object({
   search: optionalText(120),
   status: optionalEnum(customerStatuses),
   customerType: optionalEnum(customerTypes),
+  serviceGroupId: z.preprocess((v) => (v === "" ? undefined : v), z.string().cuid().optional()),
 });
 
 const auditInclude = {
   createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
   updatedByEmployee: { select: { id: true, firstName: true, lastName: true } },
   location: { select: { id: true, name: true } },
+  serviceGroup: { select: { id: true, name: true, isActive: true } },
 } satisfies Prisma.CustomerInclude;
 
 customersRouter.get("/", async (req, res) => {
   const query = listSchema.safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid query" }); return; }
-  const { search, status, customerType } = query.data;
+  const { search, status, customerType, serviceGroupId } = query.data;
 
   const customers = await prisma.customer.findMany({
     where: {
       tenantId: tenantId(req),
       status,
       customerType,
+      serviceGroupId,
       ...(search
         ? {
             OR: [

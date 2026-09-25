@@ -23,6 +23,12 @@ serviceCenterRouter.use(requireModule("SERVICE_CENTER"));
 const appointmentStatus = z.enum(["BOOKED", "CONFIRMED", "IN_PROGRESS", "COMPLETED", "CANCELLED", "NO_SHOW"]);
 const paymentStatus = z.enum(["PENDING", "PAID", "REFUNDED", "FAILED"]);
 const membershipStatus = z.enum(["ACTIVE", "PAUSED", "EXPIRED", "CANCELLED"]);
+const groupSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  description: z.string().trim().max(300).nullable().optional(),
+  isActive: z.boolean().default(true),
+});
+const groupFilterSchema = z.object({ groupId: z.string().cuid().optional() });
 const planSchema = z.object({
   name: z.string().trim().min(2).max(80),
   price: z.coerce.number().min(0).max(100_000_000).default(0),
@@ -90,8 +96,10 @@ const serviceStaffWhere = (tid: string, locationId?: string | null) => ({
   locations: { some: locationId ? { id: locationId, canSellServices: true } : { canSellServices: true, isActive: true } },
 });
 
+const serviceGroupSelect = { id: true, name: true, isActive: true } as const;
+const customerInclude = { serviceGroup: { select: serviceGroupSelect } } as const;
 const include = {
-  customer: true,
+  customer: { include: customerInclude },
   service: { include: { variants: { where: { isActive: true } }, locations: { select: { id: true } } } },
   serviceVariant: true,
   provider: { select: providerSelect },
@@ -102,7 +110,7 @@ const include = {
   order: { select: { id: true, orderNumber: true, status: true } },
 } as const;
 const membershipInclude = {
-  customer: true,
+  customer: { include: customerInclude },
   payments: { include: { paymentMethod: true }, orderBy: { createdAt: "desc" as const } },
   visits: { select: { id: true, visitedAt: true, note: true }, orderBy: { visitedAt: "desc" as const }, take: 500 },
   _count: { select: { appointments: true } },
@@ -129,10 +137,59 @@ function withAppointmentMembershipPlan<T extends { provider?: unknown; membershi
   return { ...appointment, provider: toProvider(appointment.provider as ProviderRow | null | undefined), membership: appointment.membership ? withPlanSnapshot(appointment.membership) : null };
 }
 
+serviceCenterRouter.get("/customer-groups", async (req, res) => {
+  const tid = tenantId(req);
+  const groups = await prisma.serviceCustomerGroup.findMany({
+    where: { tenantId: tid },
+    include: { _count: { select: { customers: true } } },
+    orderBy: [{ isActive: "desc" }, { name: "asc" }],
+  });
+  res.json({ groups });
+});
+
+serviceCenterRouter.post("/customer-groups", async (req, res) => {
+  const parsed = groupSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid group", details: parsed.error.flatten() }); return; }
+  try {
+    const group = await prisma.serviceCustomerGroup.create({ data: { tenantId: tenantId(req), ...parsed.data }, include: { _count: { select: { customers: true } } } });
+    res.status(201).json({ group });
+  } catch (error) {
+    if ((error as { code?: string }).code === "P2002") { res.status(409).json({ error: "A group with this name already exists" }); return; }
+    throw error;
+  }
+});
+
+serviceCenterRouter.patch("/customer-groups/:id", async (req, res) => {
+  const parsed = partialNoDefaults(groupSchema).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid group", details: parsed.error.flatten() }); return; }
+  const tid = tenantId(req);
+  try {
+    const updated = await prisma.serviceCustomerGroup.updateMany({ where: { id: req.params.id, tenantId: tid }, data: parsed.data });
+    if (!updated.count) { res.status(404).json({ error: "Group not found" }); return; }
+    const group = await prisma.serviceCustomerGroup.findUniqueOrThrow({ where: { id: req.params.id }, include: { _count: { select: { customers: true } } } });
+    res.json({ group });
+  } catch (error) {
+    if ((error as { code?: string }).code === "P2002") { res.status(409).json({ error: "A group with this name already exists" }); return; }
+    throw error;
+  }
+});
+
+serviceCenterRouter.delete("/customer-groups/:id", async (req, res) => {
+  const tid = tenantId(req);
+  const group = await prisma.serviceCustomerGroup.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { _count: { select: { customers: true } } } });
+  if (!group) { res.status(404).json({ error: "Group not found" }); return; }
+  if (group._count.customers > 0) { res.status(409).json({ error: "This group still has customers. Move them first or deactivate it." }); return; }
+  await prisma.serviceCustomerGroup.delete({ where: { id: group.id } });
+  res.status(204).send();
+});
+
 serviceCenterRouter.get("/memberships", async (req, res) => {
   const tid = tenantId(req);
+  const query = groupFilterSchema.safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Invalid membership filters" }); return; }
+  const groupId = query.data.groupId;
   const memberships = await prisma.membership.findMany({
-    where: { tenantId: tid },
+    where: { tenantId: tid, ...(groupId ? { customer: { serviceGroupId: groupId } } : {}) },
     include: membershipInclude,
     orderBy: { createdAt: "desc" },
   });
@@ -280,15 +337,18 @@ serviceCenterRouter.delete("/memberships/:id", async (req, res) => {
 
 serviceCenterRouter.get("/membership-options", async (req, res) => {
   const tid = tenantId(req);
-  const customers = await prisma.customer.findMany({ where: { tenantId: tid }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] });
-  res.json({ customers });
+  const [customers, groups] = await Promise.all([
+    prisma.customer.findMany({ where: { tenantId: tid }, include: customerInclude, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
+    prisma.serviceCustomerGroup.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
+  ]);
+  res.json({ customers, groups });
 });
 
 const membershipPaymentInclude = {
   paymentMethod: true,
   membership: {
     include: {
-      customer: true,
+      customer: { include: customerInclude },
       appointments: { include: { service: true, provider: { select: providerSelect } }, orderBy: { startsAt: "desc" as const } },
     },
   },
@@ -300,7 +360,10 @@ function withPaymentMembershipPlan<T extends { membership: { id: string; planNam
 
 serviceCenterRouter.get("/membership-payments", async (req, res) => {
   const tid = tenantId(req);
-  const membershipPayments = await prisma.membershipPayment.findMany({ where: { tenantId: tid }, include: membershipPaymentInclude, orderBy: { createdAt: "desc" } });
+  const query = groupFilterSchema.safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Invalid payment filters" }); return; }
+  const groupId = query.data.groupId;
+  const membershipPayments = await prisma.membershipPayment.findMany({ where: { tenantId: tid, ...(groupId ? { membership: { customer: { serviceGroupId: groupId } } } : {}) }, include: membershipPaymentInclude, orderBy: { createdAt: "desc" } });
   res.json({ membershipPayments: membershipPayments.map(withPaymentMembershipPlan) });
 });
 
@@ -406,11 +469,12 @@ serviceCenterRouter.delete("/membership-payments/:id", async (req, res) => {
 
 serviceCenterRouter.get("/membership-payment-options", async (req, res) => {
   const tid = tenantId(req);
-  const [memberships, paymentMethods] = await Promise.all([
-    prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: true, appointments: { select: { id: true, startsAt: true, service: { select: { name: true } } } } }, orderBy: { createdAt: "desc" } }),
+  const [memberships, paymentMethods, groups] = await Promise.all([
+    prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: { include: customerInclude }, appointments: { select: { id: true, startsAt: true, service: { select: { name: true } } } } }, orderBy: { createdAt: "desc" } }),
     prisma.paymentMethod.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
+    prisma.serviceCustomerGroup.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
   ]);
-  res.json({ memberships: memberships.map(withPlanSnapshot), paymentMethods });
+  res.json({ memberships: memberships.map(withPlanSnapshot), paymentMethods, groups });
 });
 
 serviceCenterRouter.get("/payment-methods", async (req, res) => {
@@ -470,7 +534,10 @@ serviceCenterRouter.delete("/payment-methods/:id", async (req, res) => {
 
 serviceCenterRouter.get("/appointments", async (req, res) => {
   const tid = tenantId(req);
-  const appointments = await prisma.appointment.findMany({ where: { tenantId: tid }, include, orderBy: { startsAt: "asc" } });
+  const query = groupFilterSchema.safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Invalid appointment filters" }); return; }
+  const groupId = query.data.groupId;
+  const appointments = await prisma.appointment.findMany({ where: { tenantId: tid, ...(groupId ? { customer: { serviceGroupId: groupId } } : {}) }, include, orderBy: { startsAt: "asc" } });
   const now = new Date();
   res.json({ appointments: appointments.map(withAppointmentMembershipPlan), summary: { total: appointments.length, today: appointments.filter((item) => item.startsAt.toDateString() === now.toDateString() && !["CANCELLED", "NO_SHOW"].includes(item.status)).length, upcoming: appointments.filter((item) => item.startsAt > now && !["CANCELLED", "NO_SHOW"].includes(item.status)).length, completed: appointments.filter((item) => item.status === "COMPLETED").length } });
 });
@@ -612,14 +679,15 @@ serviceCenterRouter.post("/appointments/:id/complete", async (req, res) => {
 
 serviceCenterRouter.get("/appointment-options", async (req, res) => {
   const tid = tenantId(req);
-  const [customers, services, providers, memberships, paymentMethods, membershipPayments, locations] = await Promise.all([
-    prisma.customer.findMany({ where: { tenantId: tid }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
+  const [customers, services, providers, memberships, paymentMethods, membershipPayments, locations, groups] = await Promise.all([
+    prisma.customer.findMany({ where: { tenantId: tid }, include: customerInclude, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
     prisma.service.findMany({ where: { tenantId: tid, isActive: true }, include: { variants: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] }, locations: { select: { id: true } } }, orderBy: { name: "asc" } }),
     prisma.employee.findMany({ where: serviceStaffWhere(tid), select: { ...providerSelect, locations: { select: { id: true } } }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
-    prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: true }, orderBy: { endsAt: "desc" } }),
+    prisma.membership.findMany({ where: { tenantId: tid }, include: { customer: { include: customerInclude } }, orderBy: { endsAt: "desc" } }),
     prisma.paymentMethod.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
-    prisma.membershipPayment.findMany({ where: { tenantId: tid }, include: { membership: { include: { customer: true } }, paymentMethod: true }, orderBy: { createdAt: "desc" }, take: 100 }),
+    prisma.membershipPayment.findMany({ where: { tenantId: tid }, include: { membership: { include: { customer: { include: customerInclude } } }, paymentMethod: true }, orderBy: { createdAt: "desc" }, take: 100 }),
     prisma.location.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
+    prisma.serviceCustomerGroup.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
   ]);
-  res.json({ customers, services, providers: providers.map((p) => ({ ...toProvider(p)!, locationIds: p.locations.map((l) => l.id) })), memberships: memberships.map(withPlanSnapshot), paymentMethods, membershipPayments: membershipPayments.map(withPaymentMembershipPlan), locations });
+  res.json({ customers, services, providers: providers.map((p) => ({ ...toProvider(p)!, locationIds: p.locations.map((l) => l.id) })), memberships: memberships.map(withPlanSnapshot), paymentMethods, membershipPayments: membershipPayments.map(withPaymentMembershipPlan), locations, groups });
 });
