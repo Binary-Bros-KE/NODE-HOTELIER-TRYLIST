@@ -5,6 +5,12 @@ on:
     branches:
       - main
 
+# One deploy at a time per repo. (The VPS also takes a lock of its own, so two repos deploying to the
+# same server queue up instead of colliding.)
+concurrency:
+  group: vps-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -16,43 +22,17 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
-          # Abort (and fail the workflow) the moment any command below errors,
-          # instead of ploughing on and reporting a green "deploy" that did
-          # nothing.
+          command_timeout: 30m
+          # Abort (and fail the workflow) the moment any command below errors.
           script_stop: true
           script: |
             set -e
             cd ~/NODE-HOTELIER
-            # A deploy checkout owns no local edits worth keeping — force it
-            # to exactly match origin/main. `.env`, node_modules/, dist/ and
-            # uploads/ are gitignored, so they survive this.
-            # Repair stale/corrupt remote-tracking refs before fetching. A
-            # failed/concurrent deploy can leave origin/main in a state where
-            # git refuses to lock it, which blocks the whole live deploy.
+            # Fetch and take ONLY the deploy script from the new commit. The live folder is otherwise
+            # left alone: the script builds the new version in a staging copy, keeps the old code
+            # running the whole time, and only swaps it in (with an automatic rollback) once the new
+            # build succeeded and is healthy. A failed deploy therefore never takes the server down.
             git update-ref -d refs/remotes/origin/main || true
             git fetch --prune --force origin +refs/heads/main:refs/remotes/origin/main
-            git reset --hard origin/main
-            # If a previous npm install was interrupted, node_modules can be
-            # left half-mutated (for example missing iconv-lite encodings).
-            # Move it out of the app folder instead of deleting in place; on
-            # this VPS npm/rm can hit ENOTEMPTY while cleaning deep package
-            # folders, and npm ci then tries to clean the broken tree again.
-            pm2 stop hotelier-server || true
-            stale_node_modules="../NODE-HOTELIER-node_modules-stale-$(date +%s)"
-            if [ -d node_modules ]; then
-              mv node_modules "$stale_node_modules"
-            fi
-            # `npm ci` installs from package-lock.json without rewriting it,
-            # so it can never drift and block the next `git` step.
-            npm ci
-            rm -rf "$stale_node_modules" || true
-            # Explicit, even though "postinstall" already runs this — on this
-            # host `npm ci` doesn't reliably fire lifecycle scripts, so a
-            # schema change silently built against a stale generated client
-            # and failed `tsc` with errors pointing at fields/models that no
-            # longer exist. This has no DB dependency, so it's safe here
-            # even before migrate deploy has run.
-            npx prisma generate
-            npx prisma migrate deploy
-            npm run build
-            pm2 restart hotelier-server --update-env
+            git checkout origin/main -- scripts/deploy.sh
+            bash scripts/deploy.sh
