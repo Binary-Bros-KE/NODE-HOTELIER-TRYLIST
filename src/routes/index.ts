@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { posRouter } from "../modules/pos/pos.routes.js";
+import { mpesaRouter } from "../modules/mpesa/mpesa.routes.js";
 import { kitchenRouter } from "../modules/kitchen/kitchen.routes.js";
 import { roomsRouter } from "../modules/rooms/rooms.routes.js";
 import { receptionRouter } from "../modules/reception/reception.routes.js";
@@ -60,6 +61,7 @@ router.use("/auth", authRouter);
 router.use(enforceShiftAccess);
 
 router.use("/pos", posRouter);
+router.use("/mpesa", mpesaRouter);
 router.use("/kitchen", kitchenRouter);
 router.use("/rooms", roomsRouter);
 router.use("/reception", receptionRouter);

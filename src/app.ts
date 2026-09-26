@@ -13,6 +13,7 @@ import { router } from "./routes/index.js";
 import { platformRouter } from "./modules/platform/platform.routes.js";
 import { publicReceiptsRouter } from "./modules/public-receipts/public-receipts.routes.js";
 import { downloadsRouter } from "./modules/downloads/downloads.routes.js";
+import { mpesaCallbackRouter } from "./modules/mpesa/mpesa-callback.routes.js";
 
 export function createApp(): Application {
   const app = express();
@@ -69,6 +70,10 @@ export function createApp(): Application {
   // server.hoteliermanagement.app/download/print-bridge — same "no tenant"
   // reasoning as above.
   app.use("/download", downloadsRouter);
+
+  // Safaricom's STK push callback — identified by its own globally-unique
+  // CheckoutRequestID, same "no tenant header" reasoning as public-receipts.
+  app.use("/public/mpesa", mpesaCallbackRouter);
 
   app.use(tenantContext);
 

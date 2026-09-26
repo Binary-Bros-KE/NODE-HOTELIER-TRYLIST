@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { randomBytes } from "node:crypto";
-import { Prisma } from "@prisma/client";
+import { Prisma, type PosOrderStatus } from "@prisma/client";
 import { z } from "zod";
 
 import { requireModule, requirePermission, hasPermission } from "../../middleware/tenantContext.js";
@@ -372,7 +372,7 @@ export function withFinancials<T extends FinancialOrder>(order: T, tax: Awaited<
   return { ...order, financials, total: financials.total, paid };
 }
 
-function hasPendingReturnRequests(order: { returnRequests?: { status: string }[]; items?: { returnRequests?: { status: string }[] }[] }) {
+export function hasPendingReturnRequests(order: { returnRequests?: { status: string }[]; items?: { returnRequests?: { status: string }[] }[] }) {
   return Boolean(
     order.returnRequests?.some((request) => request.status === "PENDING")
     || order.items?.some((item) => item.returnRequests?.some((request) => request.status === "PENDING")),
@@ -498,7 +498,7 @@ async function scopedLocationIds(tid: string, userId: string | undefined, reques
  * all. An order from before createdBy existed (null) has no owner to
  * restrict to, so it's left open rather than permanently unmanageable.
  */
-function ownsOrder(order: { createdBy: string | null }, req: { userId?: string }): boolean {
+export function ownsOrder(order: { createdBy: string | null }, req: { userId?: string }): boolean {
   return !order.createdBy || order.createdBy === req.userId;
 }
 
@@ -1584,6 +1584,54 @@ posRouter.post("/return-requests/:id/reject", requirePermission("POS_APPROVE_CAN
   res.status(200).json({ request: await prisma.posOrderReturnRequest.findUniqueOrThrow({ where: { id } }) });
 });
 
+/** Records one non-ROOM money payment against an order and moves it toward
+ * COMPLETED/PAID — the same steps whether a cashier typed it in or an M-Pesa
+ * STK push just succeeded (modules/mpesa/mpesa.routes.ts calls this too), so
+ * the two paths can never drift apart. Caller has already validated the
+ * order is payable and resolved/deduped the reference. */
+export async function applyOrderPayment(
+  tx: Prisma.TransactionClient,
+  args: {
+    tenantId: string;
+    order: { id: string; orderNumber: number; status: PosOrderStatus; tableId: string | null; locationId: string | null; customerId: string | null; reservation?: { customerId: string } | null };
+    total: number;
+    alreadyPaid: number;
+    paymentMethodId: string;
+    amount: number;
+    reference: string | undefined;
+    employeeId: string | undefined;
+    transactionNo: string;
+    description?: string;
+  },
+): Promise<{ paidSoFar: number; newStatus: string }> {
+  const { tenantId: tid, order, total, alreadyPaid, paymentMethodId, amount, reference, employeeId, transactionNo } = args;
+  const custId = order.customerId ?? order.reservation?.customerId ?? null;
+  const payment = await tx.payment.create({ data: { tenantId: tid, orderId: order.id, paymentMethodId, amount, reference, receivedBy: employeeId } });
+  await tx.transaction.create({
+    data: {
+      tenantId: tid,
+      transactionNo,
+      direction: "IN",
+      source: "POS_SALE",
+      amount,
+      paymentMethodId,
+      reference,
+      customerId: custId,
+      locationId: order.locationId,
+      employeeId,
+      description: args.description ?? `POS order #${order.orderNumber} payment`,
+      sourceRefId: payment.id,
+    },
+  });
+  const paidSoFar = alreadyPaid + amount;
+  const newStatus = order.status === "SERVED" && paidSoFar >= total - 0.01 ? "COMPLETED" : order.status;
+  await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(paidSoFar, total), ...(newStatus === "COMPLETED" && order.status === "SERVED" ? { completedAt: new Date() } : {}) } });
+  if (newStatus === "COMPLETED" && order.status === "SERVED" && order.tableId) await releaseTableIfIdle(tx, order.tableId);
+  if (newStatus === "COMPLETED") await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
+  await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: custId, status: newStatus, paid: paidSoFar, total, by: employeeId });
+  return { paidSoFar, newStatus };
+}
+
 posRouter.post("/orders/:id/payments", async (req, res) => {
   const parsed = paymentSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid payment", details: parsed.error.flatten() }); return; }
@@ -1620,7 +1668,6 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
   const alreadyPaid = order.payments.reduce((s, p) => s + Number(p.amount), 0);
   const remaining = Math.round((total - alreadyPaid) * 100) / 100;
   if (parsed.data.amount > remaining + 0.01) { res.status(400).json({ error: `Amount exceeds the remaining balance of ${remaining.toFixed(2)}` }); return; }
-  const custId = order.customerId ?? order.reservation?.customerId ?? null;
 
   try {
     let updatedOrder;
@@ -1651,29 +1698,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
       const resolvedPayment = await resolvePaymentMethod(tid, data.paymentMethodId, data.reference);
       const transactionNo = await nextTransactionNo(tid);
       updatedOrder = await prisma.$transaction(async (tx) => {
-        const payment = await tx.payment.create({ data: { tenantId: tid, orderId: order.id, paymentMethodId: data.paymentMethodId, amount: data.amount, reference: resolvedPayment.reference, receivedBy: req.userId } });
-        await tx.transaction.create({
-          data: {
-            tenantId: tid,
-            transactionNo,
-            direction: "IN",
-            source: "POS_SALE",
-            amount: data.amount,
-            paymentMethodId: data.paymentMethodId,
-            reference: resolvedPayment.reference,
-            customerId: order.customerId ?? order.reservation?.customerId ?? null,
-            locationId: order.locationId,
-            employeeId: req.userId,
-            description: `POS order #${order.orderNumber} payment`,
-            sourceRefId: payment.id,
-          },
-        });
-        const paidSoFar = alreadyPaid + data.amount;
-        const newStatus = order.status === "SERVED" && paidSoFar >= total - 0.01 ? "COMPLETED" : order.status;
-        await tx.posOrder.update({ where: { id: order.id }, data: { status: newStatus, paymentStatus: paymentStatusFor(paidSoFar, total), ...(newStatus === "COMPLETED" && order.status === "SERVED" ? { completedAt: new Date() } : {}) } });
-        if (newStatus === "COMPLETED" && order.status === "SERVED" && order.tableId) await releaseTableIfIdle(tx, order.tableId);
-        if (newStatus === "COMPLETED") await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
-        await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: custId, status: newStatus, paid: paidSoFar, total, by: req.userId });
+        await applyOrderPayment(tx, { tenantId: tid, order, total, alreadyPaid, paymentMethodId: data.paymentMethodId, amount: data.amount, reference: resolvedPayment.reference, employeeId: req.userId, transactionNo });
         return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
       });
     }

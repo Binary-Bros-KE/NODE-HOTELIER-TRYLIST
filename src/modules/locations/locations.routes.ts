@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { partialNoDefaults } from "../../lib/zod.js";
+import { loadActor } from "../../lib/housekeeping.js";
+import { decryptSecret, encryptSecret, maskSecret } from "../../lib/secretBox.js";
 
 // Locations are core tenant configuration (which selling points exist),
 // not tied to any one operational module, so this router — like
@@ -166,3 +168,113 @@ locationsRouter.delete("/:id", async (req, res) => {
   await prisma.location.delete({ where: { id: existing.id } });
   res.status(204).send();
 });
+
+// ============================================================================
+// M-Pesa (Safaricom Daraja) STK push config — one per location, deliberately:
+// each outlet has its own Paybill/Till and its own Daraja app credentials.
+// Reading/writing is supervisor-only (real production secrets); secrets are
+// stored encrypted (lib/secretBox.ts) and never returned in full.
+// ============================================================================
+
+const mpesaAccountTypes = ["PAYBILL", "TILL"] as const;
+const mpesaEnvironments = ["SANDBOX", "PRODUCTION"] as const;
+// Secrets are optional on write: blank means "leave the stored value alone" —
+// a supervisor editing the shortcode shouldn't be forced to retype the
+// consumer secret every time.
+const mpesaConfigSchema = z.object({
+  accountType: z.enum(mpesaAccountTypes),
+  shortcode: z.string().trim().min(1).max(20),
+  tillNumber: optionalText(20),
+  passkey: optionalText(200),
+  consumerKey: optionalText(200),
+  consumerSecret: optionalText(200),
+  environment: z.enum(mpesaEnvironments).default("SANDBOX"),
+  isActive: z.boolean().default(true),
+});
+
+async function requireSupervisor(req: { tenantId?: string; userId?: string }) {
+  const actor = await loadActor(req.tenantId, req.userId);
+  if (!actor.isManager) throw Object.assign(new Error("Only a supervisor can view or change M-Pesa settings"), { status: 403 });
+}
+
+function maskedMpesaConfig(config: {
+  accountType: string; shortcode: string; tillNumber: string | null; environment: string; isActive: boolean;
+  passkeyEncrypted: string; consumerKeyEncrypted: string; consumerSecretEncrypted: string;
+} | null) {
+  if (!config) return null;
+  return {
+    accountType: config.accountType,
+    shortcode: config.shortcode,
+    tillNumber: config.tillNumber,
+    environment: config.environment,
+    isActive: config.isActive,
+    passkeyMasked: maskSecret(decryptSecret(config.passkeyEncrypted)),
+    consumerKeyMasked: maskSecret(decryptSecret(config.consumerKeyEncrypted)),
+    consumerSecretMasked: maskSecret(decryptSecret(config.consumerSecretEncrypted)),
+  };
+}
+
+locationsRouter.get("/:id/mpesa-config", async (req, res, next) => {
+  try {
+    await requireSupervisor(req);
+    const tid = tenantId(req);
+    const config = await prisma.locationMpesaConfig.findFirst({ where: { locationId: req.params.id, tenantId: tid } });
+    res.json({ config: maskedMpesaConfig(config) });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    next(error);
+  }
+});
+
+locationsRouter.put("/:id/mpesa-config", async (req, res, next) => {
+  const data = mpesaConfigSchema.safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: "Invalid M-Pesa settings", details: data.error.flatten() }); return; }
+  try {
+    await requireSupervisor(req);
+    const tid = tenantId(req);
+    const location = await prisma.location.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
+    if (!location) { res.status(404).json({ error: "Location not found" }); return; }
+    const existing = await prisma.locationMpesaConfig.findUnique({ where: { locationId: location.id } });
+    if (!existing && (!data.data.passkey || !data.data.consumerKey || !data.data.consumerSecret)) {
+      res.status(400).json({ error: "Enter the passkey, consumer key and consumer secret to set up M-Pesa for this location" });
+      return;
+    }
+    const { passkey, consumerKey, consumerSecret, ...rest } = data.data;
+    const config = await prisma.locationMpesaConfig.upsert({
+      where: { locationId: location.id },
+      create: {
+        tenantId: tid, locationId: location.id, ...rest,
+        passkeyEncrypted: encryptSecret(passkey!), consumerKeyEncrypted: encryptSecret(consumerKey!), consumerSecretEncrypted: encryptSecret(consumerSecret!),
+        createdBy: req.userId, updatedBy: req.userId,
+      },
+      update: {
+        ...rest,
+        ...(passkey ? { passkeyEncrypted: encryptSecret(passkey) } : {}),
+        ...(consumerKey ? { consumerKeyEncrypted: encryptSecret(consumerKey) } : {}),
+        ...(consumerSecret ? { consumerSecretEncrypted: encryptSecret(consumerSecret) } : {}),
+        updatedBy: req.userId,
+      },
+    });
+    res.json({ config: maskedMpesaConfig(config) });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    next(error);
+  }
+});
+
+/** Decrypted credentials for actually calling Safaricom — used by the STK
+ * push routes, never exposed over the API. Returns null when unconfigured or
+ * disabled, so callers can give one clear "M-Pesa isn't set up here" error. */
+export async function resolveMpesaCredentials(tid: string, locationId: string) {
+  const config = await prisma.locationMpesaConfig.findFirst({ where: { tenantId: tid, locationId, isActive: true } });
+  if (!config) return null;
+  return {
+    environment: config.environment,
+    accountType: config.accountType,
+    shortcode: config.shortcode,
+    tillNumber: config.tillNumber,
+    passkey: decryptSecret(config.passkeyEncrypted),
+    consumerKey: decryptSecret(config.consumerKeyEncrypted),
+    consumerSecret: decryptSecret(config.consumerSecretEncrypted),
+  };
+}

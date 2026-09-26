@@ -16,6 +16,10 @@ const envSchema = z.object({
   PLATFORM_ADMIN_EMAIL: z.string().trim().toLowerCase().email().optional(),
   PLATFORM_ADMIN_PASSWORD: z.string().min(8).optional(),
   PLATFORM_ADMIN_NAME: z.string().trim().min(1).optional(),
+  // Encrypts per-location M-Pesa Daraja secrets at rest (lib/secretBox.ts) —
+  // any long random string; changing it makes existing encrypted rows
+  // unreadable, so treat it like a database credential, not a rotatable key.
+  SECRETS_ENCRYPTION_KEY: z.string().min(16, "SECRETS_ENCRYPTION_KEY must be at least 16 characters"),
 });
 
 const parsed = envSchema.safeParse(process.env);

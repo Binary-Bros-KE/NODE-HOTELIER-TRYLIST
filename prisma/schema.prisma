@@ -499,6 +499,8 @@ model Tenant {
   roomConsumableUsages       RoomConsumableUsage[]
   roomConsumableStocks       RoomConsumableStock[]
   assetConditionLogs         AssetConditionLog[]
+  mpesaConfigs               LocationMpesaConfig[]
+  mpesaStkRequests           MpesaStkRequest[]
   serviceVariants            ServiceVariant[]
   commercialDocuments        CommercialDocument[]
   commercialDocumentLines    CommercialDocumentLine[]
@@ -2449,8 +2451,99 @@ model Location {
   appointments           Appointment[]
   commercialDocuments    CommercialDocument[]
   roomConsumableUsages   RoomConsumableUsage[]
+  mpesaConfig            LocationMpesaConfig?
+  mpesaStkRequests       MpesaStkRequest[]
 
   @@unique([tenantId, name])
+}
+
+enum MpesaAccountType {
+  PAYBILL
+  TILL
+}
+
+enum MpesaEnvironment {
+  SANDBOX
+  PRODUCTION
+}
+
+// Safaricom Daraja credentials for taking STK push payments at this specific
+// location — deliberately one config PER LOCATION, not one per tenant: each
+// outlet has its own Paybill/Till and its own Daraja app. Secrets are stored
+// encrypted (lib/secretBox.ts) and the API only ever returns a masked form;
+// see the audit-trail convention already used on Asset/RoomType for
+// createdBy/updatedBy.
+model LocationMpesaConfig {
+  id                      String           @id @default(cuid())
+  tenantId                String
+  tenant                  Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  locationId              String           @unique
+  location                Location         @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  accountType             MpesaAccountType
+  // The shortcode used for auth/Password generation. For a Paybill this IS
+  // the Paybill number; for a Till it's usually the same as tillNumber but
+  // some Buy-Goods setups use a separate API shortcode, hence both fields.
+  shortcode               String
+  // Only meaningful when accountType = TILL; falls back to shortcode if null.
+  tillNumber              String?
+  passkeyEncrypted        String
+  consumerKeyEncrypted    String
+  consumerSecretEncrypted String
+  environment             MpesaEnvironment @default(SANDBOX)
+  isActive                Boolean          @default(true)
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+  createdBy               String?
+  createdByEmployee       Employee?        @relation("MpesaConfigCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  updatedBy               String?
+  updatedByEmployee       Employee?        @relation("MpesaConfigUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+}
+
+enum MpesaStkPurpose {
+  POS_ORDER
+  FOLIO_DEPOSIT
+  FOLIO_SETTLEMENT
+  GROUP_CHECKOUT
+  MEMBERSHIP_PAYMENT
+}
+
+enum MpesaStkStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+  TIMEOUT
+}
+
+// One STK push attempt and its outcome — the audit trail for a customer
+// payment prompt. `purpose` + `purposeRefId` is the same polymorphic-by-string
+// convention Transaction.sourceRefId already uses, so later phases (folio
+// deposits, group checkout...) reuse this table with no schema change.
+model MpesaStkRequest {
+  id                  String          @id @default(cuid())
+  tenantId            String
+  tenant              Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  locationId          String
+  location            Location        @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  purpose             MpesaStkPurpose
+  purposeRefId        String
+  phoneNumber         String
+  amount              Decimal         @db.Decimal(12, 2)
+  merchantRequestId   String?
+  checkoutRequestId   String?         @unique
+  status              MpesaStkStatus  @default(PENDING)
+  resultCode          Int?
+  resultDesc          String?
+  mpesaReceiptNumber  String?
+  initiatedBy         String?
+  employee            Employee?       @relation(fields: [initiatedBy], references: [id], onDelete: SetNull)
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  @@index([tenantId, purpose, purposeRefId])
+  @@index([tenantId, status])
 }
 
 // The Menu module's own category table (Menu ▸ Categories). Replaces the
@@ -3136,6 +3229,9 @@ model Employee {
   createdAssets                 Asset[]                 @relation("AssetCreatedBy")
   conditionUpdatedAssets        Asset[]                 @relation("AssetConditionBy")
   assetConditionLogs            AssetConditionLog[]     @relation("AssetConditionLogBy")
+  createdMpesaConfigs           LocationMpesaConfig[]   @relation("MpesaConfigCreatedBy")
+  updatedMpesaConfigs           LocationMpesaConfig[]   @relation("MpesaConfigUpdatedBy")
+  mpesaStkRequests              MpesaStkRequest[]
   updatedAssets                 Asset[]                 @relation("AssetUpdatedBy")
   assetMovements                AssetMovement[]
   createdSuppliers              Supplier[]              @relation("SupplierCreatedBy")
