@@ -20,6 +20,11 @@ const envSchema = z.object({
   // any long random string; changing it makes existing encrypted rows
   // unreadable, so treat it like a database credential, not a rotatable key.
   SECRETS_ENCRYPTION_KEY: z.string().min(16, "SECRETS_ENCRYPTION_KEY must be at least 16 characters"),
+  // The API's own public origin (e.g. https://server.hoteliermanagement.app) — deliberately
+  // separate from APP_DOMAIN, which is the tenant-subdomain wildcard for CORS, not necessarily
+  // where this server itself is reachable. Used to build the M-Pesa STK callback URL Safaricom
+  // posts results to; optional because a dev box normally has no public URL to give it at all.
+  MPESA_CALLBACK_BASE_URL: z.string().trim().url().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

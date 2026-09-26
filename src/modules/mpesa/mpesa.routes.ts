@@ -20,8 +20,8 @@ function tenantId(req: { tenantId?: string }): string {
 }
 
 function callbackUrl(): string {
-  if (!env.APP_DOMAIN) throw Object.assign(new Error("APP_DOMAIN must be set to take M-Pesa payments (Safaricom needs a public callback URL)"), { status: 500 });
-  return `https://${env.APP_DOMAIN}/public/mpesa/callback`;
+  if (!env.MPESA_CALLBACK_BASE_URL) throw Object.assign(new Error("MPESA_CALLBACK_BASE_URL must be set to take M-Pesa payments (Safaricom needs a public callback URL for this server)"), { status: 500 });
+  return `${env.MPESA_CALLBACK_BASE_URL.replace(/\/+$/, "")}/public/mpesa/callback`;
 }
 
 const stkSchema = z.object({
