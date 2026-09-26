@@ -569,10 +569,11 @@ reportsRouter.get("/sales", async (req, res, next) => {
 
     const employeeName = new Map(employeesForBranch.map((e) => [e.id, `${e.firstName} ${e.lastName}`.trim()]));
     const employeeBranch = new Map(employeesForBranch.map((e) => [e.id, e.defaultLocation?.name ?? "—"]));
-    const byEmployeeMap = new Map<string, { name: string; branch: string; count: number; total: number }>();
+    const byEmployeeMap = new Map<string, { employeeId: string | null; name: string; branch: string; count: number; total: number }>();
     for (const t of newSaleTransactions) {
       const key = t.employeeId ?? "unattributed";
       const bucket = byEmployeeMap.get(key) ?? {
+        employeeId: t.employeeId ?? null,
         name: t.employeeId ? employeeName.get(t.employeeId) ?? "Unknown" : "Unattributed",
         branch: t.employeeId ? employeeBranch.get(t.employeeId) ?? "—" : "—",
         count: 0, total: 0,
@@ -584,6 +585,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       const employeeId = credit.createdBy ?? credit.order?.createdBy ?? null;
       const key = employeeId ?? "unattributed";
       const bucket = byEmployeeMap.get(key) ?? {
+        employeeId,
         name: employeeId ? employeeName.get(employeeId) ?? "Unknown" : "Unattributed",
         branch: employeeId ? employeeBranch.get(employeeId) ?? "—" : "—",
         count: 0, total: 0,
@@ -699,6 +701,106 @@ reportsRouter.get("/sales", async (req, res, next) => {
       creditors,
       expectedProfit,
       taxBreakdown,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Backs "click an employee's revenue figure to see what it's made of" on the
+ * Sales Report — reconciles exactly against byEmployee above (same
+ * attribution: cash collected via transaction.employeeId, plus credit given
+ * via creditEntry.createdBy/order.createdBy, for the same [from, to]), unlike
+ * a ShiftSession's own summary which is scoped to one shift's clock window
+ * and attributes by order.createdBy instead. Two employees can legitimately
+ * disagree about "whose sale" a payment was (a debt collected later by
+ * someone else), and one employee can work more than one shift — or a shift
+ * spanning the business-day rollover hour — inside a single reporting
+ * window, so neither of those numbers is expected to match this one's
+ * shift-summary total. This is the one that reconciles with the report. */
+const employeeBreakdownQuerySchema = z.object({ from: z.coerce.date(), to: z.coerce.date() });
+reportsRouter.get("/employees/:employeeId/breakdown", async (req, res, next) => {
+  const query = employeeBreakdownQuerySchema.safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Choose a valid window", details: query.error.flatten() }); return; }
+  const tid = tenantId(req);
+  const { from, to } = query.data;
+  try {
+    const employee = await prisma.employee.findFirst({ where: { id: req.params.employeeId, tenantId: tid }, select: { id: true, firstName: true, lastName: true } });
+    if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
+
+    const transactionsIn = await prisma.transaction.findMany({
+      where: { tenantId: tid, employeeId: employee.id, direction: "IN", status: "COMPLETE", createdAt: { gte: from, lte: to } },
+      include: { paymentMethod: { select: { name: true } } },
+    });
+    const repaymentTxnIds = await creditRepaymentTxnIds(tid, transactionsIn);
+    const newSaleTransactions = transactionsIn.filter((t) => !repaymentTxnIds.has(t.id));
+
+    const creditEntries = await prisma.customerCreditEntry.findMany({
+      where: {
+        tenantId: tid, type: "CREDIT", createdAt: { gte: from, lte: to },
+        OR: [{ createdBy: employee.id }, { createdBy: null, order: { createdBy: employee.id } }],
+      },
+      select: { amount: true, orderId: true },
+    });
+
+    // Orders behind these transactions/credits, for the "Sales" list — POS_SALE
+    // txns point at a Payment (sourceRefId), which points at the order.
+    const paymentIds = newSaleTransactions.filter((t) => t.source === "POS_SALE" && t.sourceRefId).map((t) => t.sourceRefId!);
+    const paymentOrderIds = paymentIds.length
+      ? (await prisma.payment.findMany({ where: { tenantId: tid, id: { in: paymentIds } }, select: { orderId: true } })).map((p) => p.orderId)
+      : [];
+    const creditOrderIds = creditEntries.filter((c) => c.orderId).map((c) => c.orderId!);
+    const orderIds = [...new Set([...paymentOrderIds, ...creditOrderIds])];
+    const orders = orderIds.length ? await prisma.posOrder.findMany({
+      where: { tenantId: tid, id: { in: orderIds } },
+      select: {
+        id: true, orderNumber: true, status: true, paymentStatus: true, saleType: true,
+        complimentaryOrderRole: true, complimentaryRecipientName: true, createdAt: true,
+        items: { select: { quantity: true, unitPrice: true } }, payments: { select: { amount: true } },
+      },
+    }) : [];
+
+    const byPaymentMethod = new Map<string, { paymentMethodId: string | null; name: string; total: number; count: number }>();
+    for (const t of newSaleTransactions) {
+      const key = t.paymentMethodId ?? "unknown";
+      const bucket = byPaymentMethod.get(key) ?? { paymentMethodId: t.paymentMethodId, name: t.paymentMethod?.name ?? "Unknown", total: 0, count: 0 };
+      bucket.total += Number(t.amount);
+      bucket.count += 1;
+      byPaymentMethod.set(key, bucket);
+    }
+    const creditTotal = creditEntries.reduce((s, c) => s + Number(c.amount), 0);
+    const byPaymentMethodRows = [...byPaymentMethod.values()];
+    if (creditTotal > 0.01) byPaymentMethodRows.push({ paymentMethodId: null, name: "Credit", total: round2(creditTotal), count: creditEntries.length });
+
+    const totalPaid = round2(newSaleTransactions.reduce((s, t) => s + Number(t.amount), 0));
+    const totalSales = round2(totalPaid + creditTotal);
+
+    res.json({
+      employee,
+      summary: {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        hours: 0,
+        totalSales,
+        totalPaid,
+        complimentaryTotal: 0,
+        complimentaryCount: 0,
+        creditSales: round2(creditTotal),
+        pendingOrders: 0,
+        byPaymentMethod: byPaymentMethodRows.map((b) => ({ ...b, total: round2(b.total) })),
+        transactions: newSaleTransactions.map((t) => ({
+          id: t.id, transactionNo: t.transactionNo, direction: t.direction, source: t.source,
+          amount: Number(t.amount), paymentMethod: t.paymentMethod?.name ?? null,
+          reference: t.reference, description: t.description, createdAt: t.createdAt,
+        })),
+        sales: orders.map((o) => ({
+          id: o.id, orderNumber: o.orderNumber, status: o.status, paymentStatus: o.paymentStatus, saleType: o.saleType,
+          complimentaryOrderRole: o.complimentaryOrderRole, complimentaryRecipientName: o.complimentaryRecipientName,
+          createdAt: o.createdAt,
+          total: o.items.reduce((s, i) => s + Number(i.unitPrice) * i.quantity, 0),
+          paid: o.payments.reduce((s, p) => s + Number(p.amount), 0),
+        })),
+      },
     });
   } catch (error) {
     next(error);
