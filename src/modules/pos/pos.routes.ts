@@ -18,7 +18,7 @@ import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
 import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, resolveStockLocationId, settleServedAdditions } from "../../lib/orderStock.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
-import { businessDayWindowForDateOnly } from "../../lib/businessDay.js";
+import { businessDayStart, businessDayWindowForDateOnly } from "../../lib/businessDay.js";
 import { dateOnlyStamp, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
 
 // POS configuration, stores, and stock all remain scoped to the tenant supplied
@@ -504,6 +504,27 @@ export function ownsOrder(order: { createdBy: string | null }, req: { userId?: s
   return !order.createdBy || order.createdBy === req.userId;
 }
 
+/** A shift that started before today's business-day rollover and is still
+ * running once it hits — e.g. a 6pm-2am shift with a 9am cutover — would
+ * otherwise ring up sales that land on two different financial days,
+ * permanently splitting one shift's totals across two Sales Reports. Rather
+ * than force an end (the employee may still have orders to finish and pay
+ * out), only NEW order creation is blocked once that boundary is crossed;
+ * completing/paying what's already open is untouched, since ending a shift
+ * requires clearing those first anyway. Null (no active shift, or the
+ * employee doesn't use shift tracking at all — e.g. Super Admin) never blocks. */
+async function shiftPastBusinessDayCutover(tid: string, userId: string | undefined): Promise<boolean> {
+  if (!userId) return false;
+  const session = await prisma.shiftSession.findFirst({
+    where: { tenantId: tid, employeeId: userId, status: "ACTIVE" },
+    select: { approvedStartAt: true },
+  });
+  if (!session?.approvedStartAt) return false;
+  const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessDayStartHour: true } });
+  const startHour = profile?.businessDayStartHour ?? 0;
+  return businessDayStart(startHour, new Date()).getTime() !== businessDayStart(startHour, session.approvedStartAt).getTime();
+}
+
 /** Super Admin is the one role that may reverse a bill it didn't ring up, or
  * one past the waiters' return window — for the genuine mistake nobody else
  * can fix. Used only by the cancel/return-request paths; it still goes
@@ -602,6 +623,10 @@ posRouter.post("/orders", async (req, res) => {
   const parsed = orderSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid order", details: parsed.error.flatten() }); return; }
   const tid = tenantIdFor(req);
+  if (await shiftPastBusinessDayCutover(tid, req.userId)) {
+    res.status(409).json({ error: "Your shift has run past today's business-day cutover. Finish and pay out your open orders, then end your shift — new orders can't be started until then.", code: "SHIFT_PAST_BUSINESS_DAY" });
+    return;
+  }
   const tax = await taxSettingsFor(tid);
   let resolvedLines: ResolvedLine[];
   let menuItemsById: Awaited<ReturnType<typeof resolveMenuLines>>["menuItemsById"];
@@ -2184,6 +2209,10 @@ posRouter.post("/retail-orders", async (req, res) => {
   const parsed = retailOrderSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid order", details: parsed.error.flatten() }); return; }
   const tid = tenantIdFor(req);
+  if (await shiftPastBusinessDayCutover(tid, req.userId)) {
+    res.status(409).json({ error: "Your shift has run past today's business-day cutover. Finish and pay out your open orders, then end your shift — new orders can't be started until then.", code: "SHIFT_PAST_BUSINESS_DAY" });
+    return;
+  }
 
   const locationResult = await resolveEffectiveLocation(tid, req.userId, parsed.data.locationId);
   if ("error" in locationResult) { res.status(400).json({ error: locationResult.error }); return; }

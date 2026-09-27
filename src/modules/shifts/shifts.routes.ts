@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma.js";
 import { requireModule, requirePermission } from "../../middleware/tenantContext.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { resolveShiftFor, isWithinShift } from "../../lib/shifts.js";
+import { businessDayWindow } from "../../lib/businessDay.js";
 import { computeOrderFinancials, type TaxSettings } from "../../lib/orderTotals.js";
 
 export const shiftsRouter = Router();
@@ -375,6 +376,15 @@ shiftsRouter.post("/start-request", async (req, res, next) => {
     const existing = await prisma.shiftSession.findFirst({ where: { tenantId: tid, employeeId: employee.id, status: { in: ["REQUESTED_START", "ACTIVE", "REQUESTED_END"] } } });
     if (existing) { res.status(409).json({ error: "You already have an open shift request or active shift" }); return; }
     const now = new Date();
+    // At most 2 shifts per business day — otherwise nothing stops someone
+    // clocking in and out all day, and it stops mattering which one a given
+    // sale belongs to.
+    const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessDayStartHour: true } });
+    const businessDay = businessDayWindow(profile?.businessDayStartHour ?? 0, now);
+    const shiftsToday = await prisma.shiftSession.count({
+      where: { tenantId: tid, employeeId: employee.id, approvedStartAt: { gte: businessDay.start, lte: businessDay.end } },
+    });
+    if (shiftsToday >= 2) { res.status(409).json({ error: "You've already had 2 shifts today — that's the most allowed in one business day." }); return; }
     const autoApprove = employee.isSupervisor;
     const session = await prisma.shiftSession.create({
       data: {
