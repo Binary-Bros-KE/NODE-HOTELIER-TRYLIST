@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { businessDayWindowForDateOnly } from "../../lib/businessDay.js";
-import { nairobiWallClockToUtc } from "../../lib/shifts.js";
+import { blankToUndefined, dateOnlyStamp, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
 
 // Read-only view over InventoryMovement — the chronological record of every
 // change to any product's stock at any location. Nothing writes here; rows
@@ -15,26 +15,8 @@ const STOCK_MOVEMENT_TYPES = [
   "DAMAGE_LOSS", "ADJUSTMENT", "BORROWED_IN", "RETURNED_BORROWED_STOCK", "LENT_OUT", "LOAN_RETURNED", "ROOM_CONSUMPTION",
 ] as const;
 
-const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 const optionalText = (max: number) => z.preprocess(blankToUndefined, z.string().trim().max(max).optional());
 const optionalId = z.preprocess(blankToUndefined, z.string().trim().optional());
-// from/to are Nairobi wall-clock: a plain date (YYYY-MM-DD) or a date and time (YYYY-MM-DDTHH:mm).
-// A plain `to` date means the end of that day; a date+time is used exactly as given.
-const localStamp = z.preprocess(blankToUndefined, z.string().trim().regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/, "Use YYYY-MM-DD or YYYY-MM-DDTHH:mm").optional());
-const dateOnlyStamp = z.preprocess(blankToUndefined, z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional());
-
-function parseLocalStamp(value: string, endOfDay: boolean): Date {
-  const [datePart, timePart] = value.split("T");
-  const [y, m, d] = datePart.split("-").map(Number);
-  if (timePart) {
-    const [hh, mm] = timePart.split(":").map(Number);
-    // A date+time "to" is inclusive of that whole minute.
-    const at = nairobiWallClockToUtc(y, m, d, hh, mm);
-    return endOfDay ? new Date(at.getTime() + 60_000 - 1) : at;
-  }
-  const at = nairobiWallClockToUtc(y, m, d, 0, 0);
-  return endOfDay ? new Date(at.getTime() + 24 * 60 * 60 * 1000 - 1) : at;
-}
 
 const tenantId = (req: { tenantId?: string }) => {
   if (!req.tenantId) throw new Error("Tenant context is required");

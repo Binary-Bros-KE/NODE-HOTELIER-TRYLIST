@@ -18,6 +18,8 @@ import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
 import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, resolveStockLocationId, settleServedAdditions } from "../../lib/orderStock.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
+import { businessDayWindowForDateOnly } from "../../lib/businessDay.js";
+import { dateOnlyStamp, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
 
 // POS configuration, stores, and stock all remain scoped to the tenant supplied
 // by the authenticated request context (currently x-tenant-id during scaffolding).
@@ -534,17 +536,29 @@ posRouter.get("/orders", async (req, res) => {
     // Cap the rows returned (most recent first) so a long-lived POS screen
     // doesn't drag in thousands of historical orders. Omitted = no cap.
     limit: z.coerce.number().int().min(1).max(500).optional(),
-    // Same from/to convention as GET /transactions — date-only strings,
-    // inclusive on both ends (the day named by `to` is fully included, not
-    // cut off at its midnight).
-    from: z.coerce.date().optional(),
-    to: z.coerce.date().optional(),
+    // Nairobi wall-clock: a plain date (whole day) or a date+time (exact
+    // instant), same convention as the stock ledger's filters.
+    from: localStamp,
+    to: localStamp,
+    // A business day (e.g. 09:00 to 09:00 next day, per Business Information)
+    // — the day that STARTS on this date. Wins over from/to when given, same
+    // as the stock ledger's "shift" period mode.
+    shiftDate: dateOnlyStamp,
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
   const tid = tenantIdFor(req);
   const [locationScope, canSeeAll] = await Promise.all([scopedLocationIds(tid, req.userId, query.data.locationId), canSeeAllOrders(tid, req.userId)]);
   if ("error" in locationScope) { res.status(403).json({ error: locationScope.error }); return; }
   const locationWhere = locationScope.ids ? { locationId: { in: locationScope.ids } } : {};
+  let dateStart: Date | undefined;
+  let dateEnd: Date | undefined;
+  if (query.data.shiftDate) {
+    const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessDayStartHour: true } });
+    ({ start: dateStart, end: dateEnd } = businessDayWindowForDateOnly(profile?.businessDayStartHour ?? 0, new Date(`${query.data.shiftDate}T00:00:00.000Z`)));
+  } else {
+    dateStart = query.data.from ? parseLocalStamp(query.data.from, false) : undefined;
+    dateEnd = query.data.to ? parseLocalStamp(query.data.to, true) : undefined;
+  }
   const [orders, tax] = await Promise.all([
     prisma.posOrder.findMany({
       where: {
@@ -556,12 +570,7 @@ posRouter.get("/orders", async (req, res) => {
         ...(canSeeAll
           ? (query.data.employeeId ? { createdBy: query.data.employeeId } : {})
           : { createdBy: req.userId ?? "__unauthenticated__" }),
-        ...(query.data.from || query.data.to ? {
-          createdAt: {
-            ...(query.data.from ? { gte: query.data.from } : {}),
-            ...(query.data.to ? { lt: new Date(query.data.to.getTime() + 24 * 60 * 60 * 1000) } : {}),
-          },
-        } : {}),
+        ...(dateStart || dateEnd ? { createdAt: { ...(dateStart ? { gte: dateStart } : {}), ...(dateEnd ? { lte: dateEnd } : {}) } } : {}),
       },
       include: orderInclude,
       orderBy: { createdAt: "desc" },
