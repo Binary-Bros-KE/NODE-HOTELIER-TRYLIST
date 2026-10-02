@@ -72,6 +72,11 @@ const membershipPaymentSchema = z.object({
   status: paymentStatus.default("PAID"),
   reference: z.string().trim().max(120).nullable().optional(),
   paidAt: z.coerce.date().nullable().optional(),
+  // Overrides the auto-computed renewal end date (see nextTermEndsAt) - lets
+  // staff correct the term when recording a late payment well after the
+  // fact, instead of being stuck with whatever "now" happens to be at that
+  // moment. Only used when this payment actually renews (2nd+ paid payment).
+  termEndsAt: z.coerce.date().optional(),
 });
 const membershipVisitSchema = z.object({
   visitedAt: z.coerce.date().optional(),
@@ -347,10 +352,25 @@ serviceCenterRouter.patch("/memberships/:id", async (req, res) => {
   // membership whose visible terms (from its new plan) and whose actual
   // validity window (from its old one) silently disagree, which is exactly
   // the kind of drift this lockdown exists to prevent.
-  const endsAt = isSwitch ? new Date(Date.now() + resolved.terms.durationDays * 86_400_000) : resolved.endsAt;
+  let endsAt = isSwitch ? new Date(Date.now() + resolved.terms.durationDays * 86_400_000) : resolved.endsAt;
+  // Pausing/resuming doesn't touch endsAt by itself - a paused membership's
+  // clock keeps the date it was paused at. Resuming then pushes that date
+  // out by exactly how long it was paused, so time spent paused is never
+  // silently deducted from what the member paid for.
+  const wasPaused = current.status === "PAUSED";
+  const willBePaused = merged.status === "PAUSED";
+  let pausedAt = current.pausedAt;
+  if (!wasPaused && willBePaused) {
+    pausedAt = new Date();
+  } else if (wasPaused && !willBePaused) {
+    if (merged.status === "ACTIVE" && current.pausedAt) {
+      endsAt = new Date(endsAt.getTime() + (Date.now() - current.pausedAt.getTime()));
+    }
+    pausedAt = null;
+  }
   const membership = await prisma.membership.update({
     where: { id: current.id },
-    data: { customerId: merged.customerId, planId: finalPlanId, ...resolved.terms, startsAt: merged.startsAt, status: merged.status, endsAt },
+    data: { customerId: merged.customerId, planId: finalPlanId, ...resolved.terms, startsAt: merged.startsAt, status: merged.status, endsAt, pausedAt },
     include: membershipInclude,
   });
   res.json({ membership: withPlanSnapshot(membership) });
@@ -458,6 +478,10 @@ serviceCenterRouter.post("/membership-payments", async (req, res) => {
   }
   const reference = await resolveMembershipPaymentReference(tid, resolved.paymentMethod, parsed.data.reference);
   const paidAt = parsed.data.paidAt ?? new Date();
+  if (parsed.data.termEndsAt && parsed.data.termEndsAt <= paidAt) {
+    res.status(400).json({ error: "The term's end date must be after the payment date" });
+    return;
+  }
   const transactionNo = await nextTransactionNo(tid);
   const membershipPayment = await prisma.$transaction(async (tx) => {
     const created = await tx.membershipPayment.create({ data: { tenantId: tid, membershipId: parsed.data.membershipId, paymentMethodId: parsed.data.paymentMethodId, amount, status: "PAID", reference, paidAt }, include: membershipPaymentInclude });
@@ -465,12 +489,16 @@ serviceCenterRouter.post("/membership-payments", async (req, res) => {
     // The membership's first payment settles the term it was created with —
     // that term is already on the row, so it isn't extended again here.
     // Every payment after that is a renewal: it pays for, and grants, one
-    // more full term from whichever is later, today or the current end date.
+    // more full term from whichever is later, the payment date or the
+    // current end date (keyed off paidAt, not literal "now", so a renewal
+    // entered after the fact still starts from when it was actually paid -
+    // never from whatever day staff happened to get around to recording it).
     // A cancelled membership never auto-reactivates from a payment alone.
     if (resolved.membership.status !== "CANCELLED") {
       const priorPaidCount = await tx.membershipPayment.count({ where: { tenantId: tid, membershipId: parsed.data.membershipId, status: "PAID", id: { not: created.id } } });
       if (priorPaidCount > 0) {
-        await tx.membership.update({ where: { id: parsed.data.membershipId }, data: { status: "ACTIVE", endsAt: nextTermEndsAt(resolved.membership) } });
+        const endsAt = parsed.data.termEndsAt ?? nextTermEndsAt(resolved.membership, paidAt);
+        await tx.membership.update({ where: { id: parsed.data.membershipId }, data: { status: "ACTIVE", endsAt } });
       }
     }
     return created;

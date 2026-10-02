@@ -3625,6 +3625,10 @@ model Membership {
   startsAt        DateTime
   endsAt          DateTime
   status          MembershipStatus    @default(ACTIVE)
+  // Set the moment a membership is paused, cleared on resume - lets a resume
+  // push endsAt out by exactly how long it was paused, so paused days are
+  // never silently eaten out of a member's paid-for term.
+  pausedAt        DateTime?
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
   tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
