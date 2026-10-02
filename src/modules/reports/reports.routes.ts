@@ -1689,6 +1689,173 @@ reportsRouter.get("/expenses", async (req, res, next) => {
 });
 
 // ============================================================================
+// Purchases Report - what was actually bought: by supplier, by product
+// ("how much of X did I buy this month"), by category and by location.
+// Built from GoodsReceiptItem, not PurchaseItem - stock (and the supplier's
+// balance) only moves when goods are actually received, so a PO still
+// sitting as DRAFT/ORDERED hasn't really been "bought" yet. Those still-open
+// orders show up separately, in the live Awaiting Delivery snapshot below.
+// Quantities are stored in base units (same convention as everywhere else
+// stock is tracked) - the frontend's packAndUnit() converts to packs/bottles
+// for display, same as the Purchases and Products pages already do.
+// ============================================================================
+reportsRouter.get("/purchases", async (req, res, next) => {
+  try {
+    const query = salesQuerySchema.safeParse(req.query);
+    if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
+    const { period, date, from, to, locationId } = query.data;
+    const tid = tenantId(req);
+    const startHour = await businessDayStartHourFor(tid);
+    const { start, end } = resolveSalesRange(period, date, from, to, startHour);
+    const trendAnchor = businessDateOnly(startHour, end);
+    const trendStart = businessDayWindowForDateOnly(startHour, addBusinessDays(trendAnchor, -5)).start;
+    const trendEnd = businessDayWindowForDateOnly(startHour, addBusinessDays(trendAnchor, 5)).end;
+    // See the Expenses Report for why this has to be a union, not just the
+    // trend band - a week/month period is routinely wider than 11 days.
+    const fetchStart = start < trendStart ? start : trendStart;
+    const fetchEnd = end > trendEnd ? end : trendEnd;
+    const inPeriod = (d: Date) => d >= start && d <= end;
+    const inTrendBand = (d: Date) => d >= trendStart && d <= trendEnd;
+
+    const [itemsFetched, openPurchases, creditorSuppliers] = await Promise.all([
+      prisma.goodsReceiptItem.findMany({
+        where: {
+          goodsReceipt: { tenantId: tid, receivedAt: { gte: fetchStart, lte: fetchEnd }, ...(locationId ? { locationId } : {}) },
+        },
+        include: {
+          product: { select: { id: true, name: true, sku: true, unit: true, packSize: true, packLabel: true, category: { select: { id: true, name: true } } } },
+          goodsReceipt: {
+            select: {
+              receivedAt: true, locationId: true, location: { select: { name: true } }, createdByEmployee: { select: { firstName: true, lastName: true } },
+              purchase: { select: { id: true, purchaseNo: true, paymentStatus: true, supplierId: true, supplier: { select: { name: true } } } },
+            },
+          },
+        },
+      }),
+      // Live snapshot (not period-scoped) - purchases still waiting on
+      // delivery, same convention as Debtors/Creditors on the Sales Report.
+      prisma.purchase.findMany({
+        where: { tenantId: tid, status: { in: ["ORDERED", "PARTIALLY_RECEIVED"] }, ...(locationId ? { locationId } : {}) },
+        include: {
+          supplier: { select: { name: true } },
+          items: { select: { quantity: true, unitCost: true, receivedQuantity: true, product: { select: { name: true, packSize: true, packLabel: true, unit: true } } } },
+        },
+        orderBy: { orderDate: "asc" },
+      }),
+      prisma.supplier.findMany({ where: { tenantId: tid, balance: { gt: 0 } }, select: { id: true, name: true, balance: true }, orderBy: { balance: "desc" } }),
+    ]);
+    const items = itemsFetched.filter((i) => inPeriod(i.goodsReceipt.receivedAt));
+    const itemsInTrendBand = itemsFetched.filter((i) => inTrendBand(i.goodsReceipt.receivedAt));
+
+    const pct = (part: number, whole: number) => (whole > 0 ? round2((part / whole) * 100) : 0);
+    const lineValue = (i: (typeof items)[number]) => stockValue(i.quantity, i.unitCost, i.product.packSize) ?? 0;
+
+    // ---- Cards ----
+    const totalPurchased = round2(items.reduce((s, i) => s + lineValue(i), 0));
+    const receiptIds = new Set(items.map((i) => i.goodsReceiptId));
+    const supplierIds = new Set(items.map((i) => i.goodsReceipt.purchase.supplierId));
+    const productIds = new Set(items.map((i) => i.productId));
+    const outstandingToSuppliers = round2(creditorSuppliers.reduce((s, sup) => s + Number(sup.balance), 0));
+    const awaitingValue = (p: (typeof openPurchases)[number]) => p.items.reduce((s, it) => {
+      const outstandingQty = Math.max(0, Number(it.quantity) - Number(it.receivedQuantity));
+      return s + (stockValue(outstandingQty, it.unitCost, it.product.packSize) ?? 0);
+    }, 0);
+    const awaitingDeliveryValue = round2(openPurchases.reduce((s, p) => s + awaitingValue(p), 0));
+
+    // ---- Breakdowns ----
+    type NameBucket = { key: string; name: string; count: number; value: number; percentOfTotal: number };
+    const bucketBy = (keyOf: (i: (typeof items)[number]) => { key: string; name: string }): NameBucket[] => {
+      const map = new Map<string, { name: string; count: number; value: number }>();
+      for (const i of items) {
+        const { key, name } = keyOf(i);
+        const b = map.get(key) ?? { name, count: 0, value: 0 };
+        b.count += 1; b.value += lineValue(i);
+        map.set(key, b);
+      }
+      return [...map.entries()].map(([key, b]) => ({ key, ...b, value: round2(b.value), percentOfTotal: pct(b.value, totalPurchased) })).sort((a, b) => b.value - a.value);
+    };
+    const bySupplier = bucketBy((i) => ({ key: i.goodsReceipt.purchase.supplierId, name: i.goodsReceipt.purchase.supplier.name }));
+    const byCategory = bucketBy((i) => ({ key: i.product.category?.id ?? "none", name: i.product.category?.name ?? "Uncategorised" }));
+    const byLocation = bucketBy((i) => ({ key: i.goodsReceipt.locationId, name: i.goodsReceipt.location.name }));
+
+    // ---- By product - the one the client actually asked for: "how much of
+    // this product did I buy this period". Quantity is a base-unit sum;
+    // packSize/packLabel/unit ride along so the frontend can show it the
+    // same pack-aware way the Purchases/Products pages already do. ----
+    const productMap = new Map<string, { name: string; sku: string | null; category: string | null; unit: string; packSize: number | null; packLabel: string | null; quantity: number; value: number; count: number }>();
+    for (const i of items) {
+      const b = productMap.get(i.productId) ?? {
+        name: i.product.name, sku: i.product.sku, category: i.product.category?.name ?? null,
+        unit: i.product.unit, packSize: i.product.packSize == null ? null : Number(i.product.packSize), packLabel: i.product.packLabel,
+        quantity: 0, value: 0, count: 0,
+      };
+      b.quantity += Number(i.quantity); b.value += lineValue(i); b.count += 1;
+      productMap.set(i.productId, b);
+    }
+    const byProduct = [...productMap.entries()].map(([productId, b]) => ({
+      productId, ...b, quantity: round2(b.quantity), value: round2(b.value), percentOfTotal: pct(b.value, totalPurchased),
+      avgUnitCost: b.quantity > 0 ? round2(b.value / (b.packSize && b.packSize > 0 ? b.quantity / b.packSize : b.quantity)) : 0,
+    })).sort((a, b) => b.value - a.value);
+
+    // ---- By payment status - bucketed by purchase, not line, so a PO with
+    // several product lines only counts once. ----
+    const purchaseTotals = new Map<string, { paymentStatus: string; value: number }>();
+    for (const i of items) {
+      const p = i.goodsReceipt.purchase;
+      const b = purchaseTotals.get(p.id) ?? { paymentStatus: p.paymentStatus, value: 0 };
+      b.value += lineValue(i);
+      purchaseTotals.set(p.id, b);
+    }
+    const paymentStatusMap = new Map<string, { count: number; value: number }>();
+    for (const { paymentStatus, value } of purchaseTotals.values()) {
+      const b = paymentStatusMap.get(paymentStatus) ?? { count: 0, value: 0 };
+      b.count += 1; b.value += value;
+      paymentStatusMap.set(paymentStatus, b);
+    }
+    const byPaymentStatus = [...paymentStatusMap.entries()].map(([status, b]) => ({ status, ...b, value: round2(b.value), percentOfTotal: pct(b.value, totalPurchased) })).sort((a, b) => b.value - a.value);
+
+    // ---- Trend: value received per business day, 11 days centered on the range's end ----
+    const trendMap = new Map<string, number>();
+    for (let d = trendStart; d <= trendEnd; d = addBusinessDays(d, 1)) trendMap.set(businessDayKey(startHour, d), 0);
+    for (const i of itemsInTrendBand) trendMap.set(businessDayKey(startHour, i.goodsReceipt.receivedAt), (trendMap.get(businessDayKey(startHour, i.goodsReceipt.receivedAt)) ?? 0) + lineValue(i));
+    const trend = [...trendMap.entries()].map(([trendDate, value]) => ({ date: trendDate, value: round2(value) }));
+
+    res.json({
+      range: { period, start: start.toISOString(), end: end.toISOString() },
+      cards: {
+        totalPurchased, receiptsCount: receiptIds.size, lineItemsCount: items.length,
+        suppliersCount: supplierIds.size, productsCount: productIds.size,
+        avgReceiptValue: receiptIds.size ? round2(totalPurchased / receiptIds.size) : 0,
+        outstandingToSuppliers, awaitingDeliveryValue, awaitingDeliveryCount: openPurchases.length,
+      },
+      trend,
+      bySupplier,
+      byProduct,
+      byCategory,
+      byLocation,
+      byPaymentStatus,
+      receiptLines: items.map((i) => ({
+        id: i.id, receivedAt: i.goodsReceipt.receivedAt.toISOString(), purchaseNo: i.goodsReceipt.purchase.purchaseNo,
+        supplier: i.goodsReceipt.purchase.supplier.name, productName: i.product.name, sku: i.product.sku,
+        quantity: Number(i.quantity), unit: i.product.unit, packSize: i.product.packSize == null ? null : Number(i.product.packSize), packLabel: i.product.packLabel,
+        unitCost: Number(i.unitCost), value: round2(lineValue(i)), location: i.goodsReceipt.location.name,
+        recordedBy: i.goodsReceipt.createdByEmployee ? fullName(i.goodsReceipt.createdByEmployee) : null,
+      })),
+      awaitingDelivery: openPurchases.map((p) => ({
+        id: p.id, purchaseNo: p.purchaseNo, supplier: p.supplier.name, status: p.status, orderDate: p.orderDate.toISOString(), expectedDate: p.expectedDate?.toISOString() ?? null,
+        outstandingValue: round2(awaitingValue(p)),
+        lines: p.items.filter((it) => Number(it.quantity) - Number(it.receivedQuantity) > 0.0005).map((it) => ({
+          productName: it.product.name, outstandingQty: round2(Number(it.quantity) - Number(it.receivedQuantity)), unit: it.product.unit,
+          packSize: it.product.packSize == null ? null : Number(it.product.packSize), packLabel: it.product.packLabel,
+        })),
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============================================================================
 // Assets Report - what the property owns and what it is worth (a snapshot of
 // the register), plus what changed in the period: additions, purchases (capital
 // invested, not expense), write-offs, count corrections, and data gaps.
