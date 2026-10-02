@@ -73,6 +73,8 @@ async function assertCanView(tid: string, actorId: string | undefined, target: {
   throw Object.assign(new Error("You cannot view this employee's shift"), { status: 403 });
 }
 
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
 async function shiftSummary(tid: string, employeeId: string, from: Date, to: Date) {
   const [tax, transactions, orders, folioLines, folioCredits, pending] = await Promise.all([
     prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { taxRate: true, taxMode: true, taxTreatment: true } }),
@@ -95,6 +97,7 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
         status: true,
         paymentStatus: true,
         saleType: true,
+        channel: true,
         complimentaryOrderRole: true,
         complimentaryRecipientName: true,
         discount: true,
@@ -167,6 +170,7 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       status: o.status,
       paymentStatus: o.paymentStatus,
       saleType: o.saleType,
+      channel: o.channel,
       complimentaryOrderRole: o.complimentaryOrderRole,
       complimentaryRecipientName: o.complimentaryRecipientName,
       createdAt: o.createdAt,
@@ -228,6 +232,46 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
   const byPaymentMethodRows = [...byPaymentMethod.values()];
   if (creditSales > 0.01) byPaymentMethodRows.push({ paymentMethodId: null, name: "Credit", total: creditSales, count: creditOrders.length });
   if (complimentaryTotal > 0.01) byPaymentMethodRows.push({ paymentMethodId: null, name: "Complimentary", total: complimentaryTotal, count: complimentarySales.length });
+
+  // ---- What this employee actually did, broken into the sections every
+  // shift summary shows (only the ones that apply) regardless of which
+  // location or role they were working — a receptionist who also sells
+  // products on the Products POS and records memberships sees Rooms,
+  // Products and Memberships all show up here, the same as anyone else
+  // who touched those. Built from the un-merged per-line data (not the
+  // folioNo-merged `sales`/`folioSales` above, which exists only for the
+  // flat "Sales" table and deliberately collapses a room + its own
+  // discount into one row) so a room charge and an in-folio service on the
+  // same visit are never counted as the same thing. ----
+  type CategoryRow = { id: string; label: string; detail: string | null; createdAt: Date; total: number };
+  const categorized = { rooms: [] as CategoryRow[], food: [] as CategoryRow[], products: [] as CategoryRow[], services: [] as CategoryRow[], memberships: [] as CategoryRow[] };
+  for (const o of sales) {
+    const bucket = o.channel === "FOOD" ? categorized.food : o.channel === "PRODUCTS" ? categorized.products : categorized.services;
+    bucket.push({
+      id: o.id,
+      label: `Order #${o.orderNumber}`,
+      detail: o.saleType === "COMPLIMENTARY" ? `Complimentary${o.complimentaryRecipientName ? ` - ${o.complimentaryRecipientName}` : ""}` : o.paymentStatus,
+      createdAt: o.createdAt,
+      total: o.total,
+    });
+  }
+  for (const line of folioLineSales) {
+    const row: CategoryRow = { id: line.id, label: line.source === "SERVICE" ? line.label : `Room ${line.roomNumber}`, detail: `${line.guestName} (${line.reservationNo})`, createdAt: line.createdAt, total: line.total };
+    (line.source === "SERVICE" ? categorized.services : categorized.rooms).push(row);
+  }
+  for (const t of incomingTransactions) {
+    if (t.source !== "MEMBERSHIP_PAYMENT") continue;
+    categorized.memberships.push({ id: t.id, label: t.description ?? "Membership payment", detail: t.reference, createdAt: t.createdAt, total: Number(t.amount) });
+  }
+  const sum = (rows: CategoryRow[]) => round2(rows.reduce((s, r) => s + r.total, 0));
+  const byCategory = {
+    rooms: { total: sum(categorized.rooms), count: categorized.rooms.length },
+    food: { total: sum(categorized.food), count: categorized.food.length },
+    products: { total: sum(categorized.products), count: categorized.products.length },
+    services: { total: sum(categorized.services), count: categorized.services.length },
+    memberships: { total: sum(categorized.memberships), count: categorized.memberships.length },
+  };
+
   return {
     from,
     to,
@@ -239,6 +283,8 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
     creditSales,
     pendingOrders: pending,
     byPaymentMethod: byPaymentMethodRows,
+    byCategory,
+    categorizedSales: categorized,
     transactions: transactions.map((t) => ({
       id: t.id,
       transactionNo: t.transactionNo,
