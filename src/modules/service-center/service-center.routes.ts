@@ -332,12 +332,25 @@ serviceCenterRouter.patch("/memberships/:id", async (req, res) => {
   const parsed = partialNoDefaults(membershipSchema).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid membership", details: parsed.error.flatten() }); return; }
   const merged = membershipSchema.parse({ ...current, ...parsed.data });
-  const newPlan = parsed.data.planId && parsed.data.planId !== current.planId ? parsed.data.planId : null;
-  const resolved = await resolveMembership(tid, { ...merged, planId: newPlan });
+  // A plan-backed membership's name/price/duration/discount/visit limit are
+  // never freeform - they always come straight from whichever plan it's on
+  // right now, switching or not (resolveMembership re-fetches them below
+  // whenever a plan id is set). The only way to actually change them is to
+  // switch to a different plan or edit the plan itself - never by PATCHing
+  // those fields directly, no matter what a client sends.
+  const finalPlanId = parsed.data.planId !== undefined ? parsed.data.planId : current.planId;
+  const isSwitch = Boolean(finalPlanId) && finalPlanId !== current.planId;
+  const resolved = await resolveMembership(tid, { ...merged, planId: finalPlanId });
   if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
+  // Switching plans restarts the current term under the new plan's own
+  // duration, from today - keeping the old end date would leave a
+  // membership whose visible terms (from its new plan) and whose actual
+  // validity window (from its old one) silently disagree, which is exactly
+  // the kind of drift this lockdown exists to prevent.
+  const endsAt = isSwitch ? new Date(Date.now() + resolved.terms.durationDays * 86_400_000) : resolved.endsAt;
   const membership = await prisma.membership.update({
     where: { id: current.id },
-    data: { customerId: merged.customerId, planId: parsed.data.planId !== undefined ? parsed.data.planId : current.planId, ...resolved.terms, startsAt: merged.startsAt, status: merged.status, endsAt: resolved.endsAt },
+    data: { customerId: merged.customerId, planId: finalPlanId, ...resolved.terms, startsAt: merged.startsAt, status: merged.status, endsAt },
     include: membershipInclude,
   });
   res.json({ membership: withPlanSnapshot(membership) });
