@@ -289,7 +289,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
 
     const [
       tax, completedOrders, cancelledOrders, transactionsIn, trendTransactions,
-      appointmentsPaid, membershipPayments, expenses, goodsReceiptItems,
+      membershipPayments, expenses, goodsReceiptItems,
       cancelledPurchases, supplierPayments, debtorCustomers, openFolios,
       creditorSuppliers, employeesForBranch, creditEntries, trendCreditEntries,
       roomRevenueFolios,
@@ -311,7 +311,6 @@ reportsRouter.get("/sales", async (req, res, next) => {
         where: { tenantId: tid, direction: "IN", status: "COMPLETE", createdAt: { gte: trendStart, lte: trendEnd }, ...(locationId ? { locationId } : {}) },
         select: { id: true, source: true, sourceRefId: true, amount: true, createdAt: true },
       }),
-      locationId ? Promise.resolve([]) : prisma.appointment.findMany({ where: { tenantId: tid, paymentStatus: "PAID", updatedAt: { gte: start, lte: end } }, select: { amount: true } }),
       locationId ? Promise.resolve([]) : prisma.membershipPayment.findMany({ where: { tenantId: tid, status: "PAID", createdAt: { gte: start, lte: end } }, select: { amount: true } }),
       prisma.expense.findMany({ where: { tenantId: tid, status: "ACTIVE", expenseDate: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) }, include: { category: { select: { name: true } } } }),
       prisma.goodsReceiptItem.findMany({
@@ -346,10 +345,23 @@ reportsRouter.get("/sales", async (req, res, next) => {
           folio: { reservation: { status: { notIn: ["CANCELLED", "NO_SHOW"] }, ...(locationId ? { locationId } : {}) } },
         },
         distinct: ["folioId"],
-        select: { folioId: true },
+        select: {
+          folioId: true,
+          folio: { select: { reservation: { select: {
+            locationId: true, location: { select: { name: true } },
+            customerId: true, customer: { select: { firstName: true, lastName: true } },
+          } } } },
+        },
       }),
     ]);
     const roomRevenueFolioIds = roomRevenueFolios.map((f) => f.folioId);
+    // Which location/customer each room folio belongs to — a folio has one reservation, so this is 1:1.
+    const roomFolioAttribution = new Map(roomRevenueFolios.map((f) => [f.folioId, {
+      locationId: f.folio.reservation.locationId,
+      locationName: f.folio.reservation.location?.name ?? null,
+      customerId: f.folio.reservation.customerId,
+      customerName: fullName(f.folio.reservation.customer),
+    }]));
     const roomRevenueLines = roomRevenueFolioIds.length ? await prisma.folioLineItem.findMany({
       where: { tenantId: tid, folioId: { in: roomRevenueFolioIds }, source: { in: ["ROOM", "DISCOUNT"] } },
       select: { folioId: true, source: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true },
@@ -363,7 +375,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const posSalesCash = round2(transactionsIn.filter((t) => t.source === "POS_SALE").reduce((s, t) => s + Number(t.amount), 0));
     const folioDepositsCash = round2(transactionsIn.filter((t) => t.source === "FOLIO_DEPOSIT").reduce((s, t) => s + Number(t.amount), 0));
     const folioSettlementsCash = round2(transactionsIn.filter((t) => t.source === "FOLIO_SETTLEMENT").reduce((s, t) => s + Number(t.amount), 0));
-    const serviceCenterCash = round2(appointmentsPaid.reduce((s, a) => s + Number(a.amount), 0) + membershipPayments.reduce((s, m) => s + Number(m.amount), 0));
+    const serviceCenterCash = round2(membershipPayments.reduce((s, m) => s + Number(m.amount), 0));
     // Revenue = money taken in for sales made, plus sales given on credit —
     // minus cash that merely repaid earlier credit (already counted then).
     const allTxns = [...new Map([...transactionsIn, ...trendTransactions].map((t) => [t.id, t])).values()];
@@ -484,6 +496,22 @@ reportsRouter.get("/sales", async (req, res, next) => {
     }
     taxCollected = round2(taxCollected);
 
+    for (const [folioId, lines] of linesByFolio(roomRevenueLines)) {
+      const fin = folioLinesFinancials(lines, tax);
+      const attribution = roomFolioAttribution.get(folioId);
+      const locKey = attribution?.locationId ?? "unassigned";
+      const locBucket = byLocationMap.get(locKey) ?? { name: attribution?.locationName ?? "Unassigned", count: 0, revenue: 0, cogs: 0 };
+      locBucket.count += 1;
+      locBucket.revenue += fin.total; // rooms carry no cost of goods
+      byLocationMap.set(locKey, locBucket);
+
+      const custKey = attribution?.customerId ?? "walk-in";
+      const custBucket = byCustomerMap.get(custKey) ?? { name: attribution?.customerName || "Walk-in", count: 0, revenue: 0 };
+      custBucket.count += 1;
+      custBucket.revenue += fin.total;
+      byCustomerMap.set(custKey, custBucket);
+    }
+
     const soldItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).map((i) => ({ ...i, revenue: round2(i.revenue) }));
     const topItems = soldItems.slice(0, 10);
     const taxBreakdown = [...taxBuckets.values()].map((b) => ({ ...b, net: round2(b.net), tax: round2(b.tax), gross: round2(b.gross) })).sort((a, b) => b.gross - a.gross);
@@ -514,8 +542,10 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const cancelledPurchasesSummary = { count: cancelledPurchases.length, value: round2(cancelledPurchases.reduce((s, p) => s + Number(p.total), 0)) };
     const capitalInvested = round2(supplierPayments.reduce((s, p) => s + Number(p.amount), 0));
 
-    // ---- Net Revenue / Net Profit ----
-    const netRevenue = round2(completedSalesValue - cogsTotal);
+    // ---- Net Revenue / Net Profit: everything sold this period across POS, Rooms and Service
+    // Center membership payments, less the cost of goods sold (rooms and memberships carry none). ----
+    const totalSoldValue = round2(completedSalesValue + roomSalesValue + serviceCenterCash);
+    const netRevenue = round2(totalSoldValue - cogsTotal);
     const netProfit = round2(netRevenue - totalExpenses);
 
     // ---- Cards ----
@@ -533,7 +563,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         transactions: b.count,
         revenue: round2(b.revenue),
         avgSale: b.count ? round2(b.revenue / b.count) : 0,
-        percentOfTotal: completedSalesValue ? round2((b.revenue / completedSalesValue) * 100) : 0,
+        percentOfTotal: totalSoldValue ? round2((b.revenue / totalSoldValue) * 100) : 0,
         expenses: locExpenses,
         netProfit: netProfitHere,
         profitPercent: b.revenue ? round2((netProfitHere / b.revenue) * 100) : 0,
@@ -601,7 +631,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // sale counts here even before it's paid), top 10 by revenue plus a
     // combined tail so the percentages still foot to 100%. ----
     const byCustomerSorted = [...byCustomerMap.values()]
-      .map((b) => ({ ...b, revenue: round2(b.revenue), percentOfTotal: completedSalesValue ? round2((b.revenue / completedSalesValue) * 100) : 0 }))
+      .map((b) => ({ ...b, revenue: round2(b.revenue), percentOfTotal: totalSoldValue ? round2((b.revenue / totalSoldValue) * 100) : 0 }))
       .sort((a, b) => b.revenue - a.revenue);
     const byCustomer = byCustomerSorted.slice(0, 10);
     if (byCustomerSorted.length > 10) {
@@ -670,7 +700,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         complimentaryValue, complimentaryCogs,
         creditGiven, creditCount, creditRepaymentsCash,
         roomSalesValue, roomSalesCount, roomDiscountsGiven,
-        completedSalesValue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
+        completedSalesValue, totalSoldValue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
         serviceCenterExcludedByLocationFilter: !!locationId,
       },
       complimentarySessions: [...compSessions.values()].map((s) => ({
