@@ -114,13 +114,14 @@ async function assertCanReview(req: { tenantId?: string; userId?: string }) {
   if (!allowed) throw new HttpError(403, "You don't have permission to approve or reject a requisition");
 }
 
-/** Cost is set at the point of requisition (whoever raises it prices it
- * themselves — REQUISITION_CREATE), and a reviewer can still adjust it
- * before approving (REQUISITION_APPROVE). Redacted only from someone with
- * neither permission (e.g. a pure approver-only role viewing requisitions
- * raised by someone else isn't a real case here, but this stays a holder of
- * either side of the workflow, not a bystander). */
-async function canSeeRequisitionCost(tid: string, userId: string | undefined) {
+/** Holds either side of the requisition workflow — raising (REQUISITION_CREATE)
+ * or reviewing (REQUISITION_APPROVE). Used both to decide who can see cost
+ * (redacted only from someone with neither — a true bystander) and who can
+ * convert an approved requisition into a purchase: the same storekeeper who
+ * raises requisitions is often also the one who places the actual order, so
+ * that isn't approve-only either. Actually approving/rejecting stays its own
+ * stricter check (assertCanReview, REQUISITION_APPROVE alone). */
+async function canCreateOrApproveRequisitions(tid: string, userId: string | undefined) {
   const [canCreate, canApprove] = await Promise.all([
     hasPermission(tid, userId, "REQUISITION_CREATE"),
     hasPermission(tid, userId, "REQUISITION_APPROVE"),
@@ -171,7 +172,7 @@ purchaseRequisitionsRouter.get("/", async (req, res, next) => {
     };
     const [requisitions, canSeeCost] = await Promise.all([
       prisma.purchaseRequisition.findMany({ where, include: requisitionInclude, orderBy: { createdAt: "desc" } }),
-      canSeeRequisitionCost(tid, req.userId),
+      canCreateOrApproveRequisitions(tid, req.userId),
     ]);
     const byStatus = Object.fromEntries(REQUISITION_STATUSES.map((s) => [s, 0])) as Record<RequisitionStatus, number>;
     for (const r of requisitions) byStatus[r.status] += 1;
@@ -187,7 +188,7 @@ purchaseRequisitionsRouter.get("/:id", async (req, res, next) => {
     const tid = tenantId(req);
     const [requisition, canSeeCost] = await Promise.all([
       prisma.purchaseRequisition.findFirst({ where: { id: req.params.id, tenantId: tid }, include: requisitionInclude }),
-      canSeeRequisitionCost(tid, req.userId),
+      canCreateOrApproveRequisitions(tid, req.userId),
     ]);
     if (!requisition) { res.status(404).json({ error: "Requisition not found" }); return; }
     res.json({ requisition: redactCostIfNeeded(requisition, canSeeCost) });
@@ -223,7 +224,7 @@ purchaseRequisitionsRouter.post("/", requirePermission("REQUISITION_CREATE"), as
       },
       include: requisitionInclude,
     });
-    const canSeeCost = await canSeeRequisitionCost(tid, req.userId);
+    const canSeeCost = await canCreateOrApproveRequisitions(tid, req.userId);
     res.status(201).json({ requisition: redactCostIfNeeded(requisition, canSeeCost) });
   } catch (error) {
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
@@ -288,7 +289,7 @@ purchaseRequisitionsRouter.patch("/:id", async (req, res, next) => {
         include: requisitionInclude,
       });
     });
-    const canSeeCost = await canSeeRequisitionCost(tid, req.userId);
+    const canSeeCost = await canCreateOrApproveRequisitions(tid, req.userId);
     res.json({ requisition: redactCostIfNeeded(requisition, canSeeCost) });
   } catch (error) {
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
@@ -332,7 +333,7 @@ purchaseRequisitionsRouter.post("/:id/status", async (req, res, next) => {
       },
       include: requisitionInclude,
     });
-    const canSeeCost = await canSeeRequisitionCost(tid, req.userId);
+    const canSeeCost = await canCreateOrApproveRequisitions(tid, req.userId);
     res.json({ requisition: redactCostIfNeeded(requisition, canSeeCost) });
   } catch (error) {
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
@@ -343,13 +344,14 @@ purchaseRequisitionsRouter.post("/:id/status", async (req, res, next) => {
 /** Raise a DRAFT Purchase (PO) from an APPROVED requisition, copying its
  * line items (estimated unit cost becomes the PO's starting unit cost) and
  * marking the requisition CONVERTED. One requisition -> at most one PO. */
-purchaseRequisitionsRouter.post("/:id/convert", requirePermission("REQUISITION_APPROVE"), async (req, res, next) => {
+purchaseRequisitionsRouter.post("/:id/convert", async (req, res, next) => {
   const data = convertSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid conversion", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   const id = req.params.id as string;
   const { supplierId, expectedDate, reference, notes } = data.data;
   try {
+    if (!(await canCreateOrApproveRequisitions(tid, req.userId))) { res.status(403).json({ error: "You don't have permission to convert a requisition to a purchase" }); return; }
     const existing = await prisma.purchaseRequisition.findFirst({
       where: { id, tenantId: tid },
       include: { items: { include: { product: { select: { packSize: true, unitCost: true, taxRate: true, taxMode: true, taxTreatment: true } } } } },
