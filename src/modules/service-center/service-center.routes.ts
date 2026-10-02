@@ -17,6 +17,12 @@ import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 
+/** Extends from the later of now and the current end date, so an early renewal loses no days. */
+function nextTermEndsAt(current: { endsAt: Date; durationDays: number }, now = new Date()) {
+  const from = current.endsAt > now ? current.endsAt : now;
+  return new Date(from.getTime() + current.durationDays * 86_400_000);
+}
+
 export const serviceCenterRouter = Router();
 serviceCenterRouter.use(requireModule("SERVICE_CENTER"));
 
@@ -298,11 +304,9 @@ serviceCenterRouter.post("/memberships/:id/renew", async (req, res) => {
   const current = await prisma.membership.findFirst({ where: { id: req.params.id, tenantId: tid } });
   if (!current) { res.status(404).json({ error: "Membership not found" }); return; }
   if (current.status === "CANCELLED") { res.status(409).json({ error: "A cancelled membership can't be renewed — sell a new one" }); return; }
-  const now = new Date();
-  const from = current.endsAt > now ? current.endsAt : now;
   const membership = await prisma.membership.update({
     where: { id: current.id },
-    data: { status: "ACTIVE", endsAt: new Date(from.getTime() + current.durationDays * 86_400_000) },
+    data: { status: "ACTIVE", endsAt: nextTermEndsAt(current) },
     include: membershipInclude,
   });
   res.json({ membership: withPlanSnapshot(membership) });
@@ -445,9 +449,21 @@ serviceCenterRouter.post("/membership-payments", async (req, res) => {
   const membershipPayment = await prisma.$transaction(async (tx) => {
     const created = await tx.membershipPayment.create({ data: { tenantId: tid, membershipId: parsed.data.membershipId, paymentMethodId: parsed.data.paymentMethodId, amount, status: "PAID", reference, paidAt }, include: membershipPaymentInclude });
     await syncPaymentLedger(tx, tid, created, resolved.membership.customerId, transactionNo, req.userId);
+    // The membership's first payment settles the term it was created with —
+    // that term is already on the row, so it isn't extended again here.
+    // Every payment after that is a renewal: it pays for, and grants, one
+    // more full term from whichever is later, today or the current end date.
+    // A cancelled membership never auto-reactivates from a payment alone.
+    if (resolved.membership.status !== "CANCELLED") {
+      const priorPaidCount = await tx.membershipPayment.count({ where: { tenantId: tid, membershipId: parsed.data.membershipId, status: "PAID", id: { not: created.id } } });
+      if (priorPaidCount > 0) {
+        await tx.membership.update({ where: { id: parsed.data.membershipId }, data: { status: "ACTIVE", endsAt: nextTermEndsAt(resolved.membership) } });
+      }
+    }
     return created;
   });
-  res.status(201).json({ membershipPayment: withPaymentMembershipPlan(membershipPayment) });
+  const membership = await prisma.membership.findUniqueOrThrow({ where: { id: parsed.data.membershipId }, include: membershipInclude });
+  res.status(201).json({ membershipPayment: withPaymentMembershipPlan(membershipPayment), membership: withPlanSnapshot(membership) });
 });
 
 serviceCenterRouter.patch("/membership-payments/:id", async (_req, res) => {
