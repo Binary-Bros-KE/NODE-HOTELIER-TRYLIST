@@ -292,7 +292,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       membershipPayments, expenses, goodsReceiptItems,
       cancelledPurchases, supplierPayments, debtorCustomers, openFolios,
       creditorSuppliers, employeesForBranch, creditEntries, trendCreditEntries,
-      roomRevenueFolios,
+      roomRevenueFolios, salaryPayments,
     ] = await Promise.all([
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
@@ -353,6 +353,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
           } } } },
         },
       }),
+      prisma.employeeSalary.findMany({ where: { tenantId: tid, status: "COMPLETE", paidAt: { gte: start, lte: end } }, select: { netPay: true } }),
     ]);
     const roomRevenueFolioIds = roomRevenueFolios.map((f) => f.folioId);
     // Which location/customer each room folio belongs to — a folio has one reservation, so this is 1:1.
@@ -516,8 +517,17 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const topItems = soldItems.slice(0, 10);
     const taxBreakdown = [...taxBuckets.values()].map((b) => ({ ...b, net: round2(b.net), tax: round2(b.tax), gross: round2(b.gross) })).sort((a, b) => b.gross - a.gross);
 
-    // ---- Expenses ----
-    const totalExpenses = round2(expenses.reduce((s, e) => s + Number(e.amount), 0));
+    // ---- Expenses. Salaries are a real operating cost same as anything in
+    // the Expense tab, so they belong in Net Profit too — tracked separately
+    // from expensesOnly/expensesByCategory (which stay Expense-tab-only,
+    // the Comprehensive Expenses Report is where the full payroll breakdown
+    // lives) but folded into the one totalExpenses that feeds netProfit. Not
+    // location-split like expensesByLocationMap below: an employee's
+    // defaultLocationId is informational, not a hard assignment, so per-
+    // location net profit (salesByLocation) stays Expense-tab-only too. ----
+    const expensesOnly = round2(expenses.reduce((s, e) => s + Number(e.amount), 0));
+    const salariesPaid = round2(salaryPayments.reduce((s, sp) => s + Number(sp.netPay), 0));
+    const totalExpenses = round2(expensesOnly + salariesPaid);
     const expensesByCategoryMap = new Map<string, { name: string; count: number; total: number }>();
     const expensesByLocationMap = new Map<string, number>();
     for (const e of expenses) {
@@ -702,6 +712,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         roomSalesValue, roomSalesCount, roomDiscountsGiven,
         completedSalesValue, totalSoldValue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
         serviceCenterExcludedByLocationFilter: !!locationId,
+        expensesOnly, salariesPaid,
       },
       complimentarySessions: [...compSessions.values()].map((s) => ({
         ...s,
@@ -1502,6 +1513,175 @@ reportsRouter.get("/products-overview", async (req, res, next) => {
         byProfit: [...rows].sort((a, b) => b.profit - a.profit).slice(0, limit),
       },
       slowest: [...rows].sort((a, b) => a.qty - b.qty).slice(0, limit),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============================================================================
+// Expenses Report - every real cash outflow across the business, in one
+// place. Mirrors the Transaction ledger's own OUT-direction sources:
+//   - Expenses (day-to-day, the Expenses tab) and Salaries paid are
+//     OPERATING costs - they reduce Net Profit on the Sales Report.
+//   - Supplier payments (stock) and Asset purchases (equipment) are CAPITAL
+//     outflows - real cash out, but not a P&L expense (stock becomes COGS
+//     when sold, equipment is a durable asset) - same "capital, not expense"
+//     convention as the Assets Report's own Capital Invested card.
+// Each of the 4 is queried from its own model (not the flat Transaction
+// ledger) so this can show the real detail - category, department, supplier,
+// asset - a plain Transaction row with a string sourceRefId can't give.
+// ============================================================================
+reportsRouter.get("/expenses", async (req, res, next) => {
+  try {
+    const query = salesQuerySchema.safeParse(req.query);
+    if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
+    const { period, date, from, to, locationId } = query.data;
+    const tid = tenantId(req);
+    const startHour = await businessDayStartHourFor(tid);
+    const { start, end } = resolveSalesRange(period, date, from, to, startHour);
+    const trendAnchor = businessDateOnly(startHour, end);
+    const trendStart = businessDayWindowForDateOnly(startHour, addBusinessDays(trendAnchor, -5)).start;
+    const trendEnd = businessDayWindowForDateOnly(startHour, addBusinessDays(trendAnchor, 5)).end;
+    // The reporting period (week/month) can be wider than the fixed 11-day
+    // trend band, so the actual fetch has to cover the union of both -
+    // fetching only the trend band would silently drop everything in the
+    // period that falls outside it (e.g. the first three weeks of a month).
+    // Fetched once over that union, then split in-memory three ways: the
+    // period itself (cards/breakdowns/detail tables), and the narrower trend
+    // band (the chart, always an 11-day window regardless of period).
+    const fetchStart = start < trendStart ? start : trendStart;
+    const fetchEnd = end > trendEnd ? end : trendEnd;
+    const inPeriod = (d: Date) => d >= start && d <= end;
+    const inTrendBand = (d: Date) => d >= trendStart && d <= trendEnd;
+
+    const [expensesFetched, salariesFetched, supplierPaymentsFetched, assetMovementsFetched] = await Promise.all([
+      prisma.expense.findMany({
+        where: { tenantId: tid, status: "ACTIVE", expenseDate: { gte: fetchStart, lte: fetchEnd }, ...(locationId ? { locationId } : {}) },
+        include: { category: { select: { name: true } }, paymentMethod: { select: { name: true } }, location: { select: { name: true } }, createdByEmployee: { select: { firstName: true, lastName: true } } },
+        orderBy: { expenseDate: "desc" },
+      }),
+      prisma.employeeSalary.findMany({
+        where: { tenantId: tid, status: "COMPLETE", paidAt: { gte: fetchStart, lte: fetchEnd }, ...(locationId ? { employee: { defaultLocationId: locationId } } : {}) },
+        include: { employee: { select: { firstName: true, lastName: true, department: { select: { name: true } }, defaultLocation: { select: { name: true } } } } },
+        orderBy: { paidAt: "desc" },
+      }),
+      prisma.supplierPayment.findMany({
+        where: { tenantId: tid, paidAt: { gte: fetchStart, lte: fetchEnd }, ...(locationId ? { purchase: { locationId } } : {}) },
+        include: { supplier: { select: { name: true } }, purchase: { select: { purchaseNo: true } }, paymentMethod: { select: { name: true } }, createdByEmployee: { select: { firstName: true, lastName: true } } },
+        orderBy: { paidAt: "desc" },
+      }),
+      prisma.assetMovement.findMany({
+        where: { tenantId: tid, type: "RECEIPT", paymentMethodId: { not: null }, occurredAt: { gte: fetchStart, lte: fetchEnd }, asset: locationId ? { locationId } : {} },
+        include: { asset: { select: { name: true, assetNo: true, category: { select: { name: true } }, location: { select: { name: true } }, room: { select: { number: true } } } }, paymentMethod: { select: { name: true } }, employee: { select: { firstName: true, lastName: true } } },
+        orderBy: { occurredAt: "desc" },
+      }),
+    ]);
+    const expenses = expensesFetched.filter((e) => inPeriod(e.expenseDate));
+    const salaries = salariesFetched.filter((s) => s.paidAt && inPeriod(s.paidAt));
+    const supplierPayments = supplierPaymentsFetched.filter((p) => inPeriod(p.paidAt));
+    const assetMovements = assetMovementsFetched.filter((m) => inPeriod(m.occurredAt));
+    const expensesInTrendBand = expensesFetched.filter((e) => inTrendBand(e.expenseDate));
+    const salariesInTrendBand = salariesFetched.filter((s) => s.paidAt && inTrendBand(s.paidAt));
+    const supplierPaymentsInTrendBand = supplierPaymentsFetched.filter((p) => inTrendBand(p.paidAt));
+    const assetMovementsInTrendBand = assetMovementsFetched.filter((m) => inTrendBand(m.occurredAt));
+
+    const pct = (part: number, whole: number) => (whole > 0 ? round2((part / whole) * 100) : 0);
+    const salaryMethodLabel: Record<string, string> = { BANK_TRANSFER: "Bank Transfer", MPESA: "M-Pesa", CASH: "Cash", CHEQUE: "Cheque", CARD: "Card" };
+
+    // ---- Totals ----
+    const expensesTotal = round2(expenses.reduce((s, e) => s + Number(e.amount), 0));
+    const salariesTotal = round2(salaries.reduce((s, sal) => s + Number(sal.netPay), 0));
+    const supplierPaymentsTotal = round2(supplierPayments.reduce((s, p) => s + Number(p.amount), 0));
+    const assetMovementValue = (m: (typeof assetMovements)[number]) => Number(m.quantity) * Number(m.unitCost ?? 0);
+    const assetPurchasesTotal = round2(assetMovements.reduce((s, m) => s + assetMovementValue(m), 0));
+    const operatingExpenses = round2(expensesTotal + salariesTotal);
+    const capitalOutflows = round2(supplierPaymentsTotal + assetPurchasesTotal);
+    const totalCashOut = round2(operatingExpenses + capitalOutflows);
+
+    // ---- Breakdowns ----
+    type NameBucket = { name: string; count: number; total: number; percentOfTotal: number };
+    const bucketBy = <T,>(rows: T[], keyOf: (r: T) => { key: string; name: string }, amountOf: (r: T) => number, whole: number): NameBucket[] => {
+      const map = new Map<string, { name: string; count: number; total: number }>();
+      for (const r of rows) {
+        const { key, name } = keyOf(r);
+        const b = map.get(key) ?? { name, count: 0, total: 0 };
+        b.count += 1; b.total += amountOf(r);
+        map.set(key, b);
+      }
+      return [...map.values()].map((b) => ({ ...b, total: round2(b.total), percentOfTotal: pct(b.total, whole) })).sort((a, b) => b.total - a.total);
+    };
+    const expensesByCategory = bucketBy(expenses, (e) => ({ key: e.categoryId, name: e.category.name }), (e) => Number(e.amount), expensesTotal);
+    const expensesByRecordedBy = bucketBy(
+      expenses.filter((e) => e.createdByEmployee),
+      (e) => ({ key: e.createdBy!, name: fullName(e.createdByEmployee!) }),
+      (e) => Number(e.amount),
+      expensesTotal,
+    );
+    const salariesByDepartment = bucketBy(salaries, (s) => ({ key: s.employee.department.name, name: s.employee.department.name }), (s) => Number(s.netPay), salariesTotal);
+    const supplierPaymentsBySupplier = bucketBy(supplierPayments, (p) => ({ key: p.supplierId, name: p.supplier.name }), (p) => Number(p.amount), supplierPaymentsTotal);
+    const assetPurchasesByCategory = bucketBy(assetMovements, (m) => ({ key: m.asset.category?.name ?? "none", name: m.asset.category?.name ?? "Uncategorised" }), (m) => assetMovementValue(m), assetPurchasesTotal);
+
+    const methodMap = new Map<string, { name: string; count: number; total: number }>();
+    const addMethod = (name: string, amount: number) => {
+      const b = methodMap.get(name) ?? { name, count: 0, total: 0 };
+      b.count += 1; b.total += amount;
+      methodMap.set(name, b);
+    };
+    for (const e of expenses) addMethod(e.paymentMethod.name, Number(e.amount));
+    for (const s of salaries) addMethod(s.paymentMethod ? salaryMethodLabel[s.paymentMethod] ?? s.paymentMethod : "Not set", Number(s.netPay));
+    for (const p of supplierPayments) addMethod(p.paymentMethod?.name ?? "Unknown", Number(p.amount));
+    for (const m of assetMovements) addMethod(m.paymentMethod?.name ?? "Unknown", assetMovementValue(m));
+    const byPaymentMethod = [...methodMap.values()].map((b) => ({ ...b, total: round2(b.total), percentOfTotal: pct(b.total, totalCashOut) })).sort((a, b) => b.total - a.total);
+
+    // ---- Trend: cash out per business day, 11 days centered on the range's end ----
+    const trendMap = new Map<string, number>();
+    for (let d = trendStart; d <= trendEnd; d = addBusinessDays(d, 1)) trendMap.set(businessDayKey(startHour, d), 0);
+    const addToTrend = (date: Date, amount: number) => trendMap.set(businessDayKey(startHour, date), (trendMap.get(businessDayKey(startHour, date)) ?? 0) + amount);
+    for (const e of expensesInTrendBand) addToTrend(e.expenseDate, Number(e.amount));
+    for (const s of salariesInTrendBand) if (s.paidAt) addToTrend(s.paidAt, Number(s.netPay));
+    for (const p of supplierPaymentsInTrendBand) addToTrend(p.paidAt, Number(p.amount));
+    for (const m of assetMovementsInTrendBand) addToTrend(m.occurredAt, assetMovementValue(m));
+    const trend = [...trendMap.entries()].map(([trendDate, value]) => ({ date: trendDate, total: round2(value) }));
+
+    res.json({
+      range: { period, start: start.toISOString(), end: end.toISOString() },
+      cards: {
+        totalCashOut, operatingExpenses, capitalOutflows,
+        expensesTotal, expensesCount: expenses.length,
+        salariesTotal, salariesCount: salaries.length,
+        supplierPaymentsTotal, supplierPaymentsCount: supplierPayments.length,
+        assetPurchasesTotal, assetPurchasesCount: assetMovements.length,
+      },
+      trend,
+      expensesByCategory,
+      expensesByRecordedBy,
+      salariesByDepartment,
+      supplierPaymentsBySupplier,
+      assetPurchasesByCategory,
+      byPaymentMethod,
+      expensesList: expenses.map((e) => ({
+        id: e.id, expenseNo: e.expenseNo, date: e.expenseDate.toISOString(), category: e.category.name,
+        amount: round2(Number(e.amount)), paymentMethod: e.paymentMethod.name, reference: e.reference, description: e.description,
+        location: e.location?.name ?? null, recordedBy: e.createdByEmployee ? fullName(e.createdByEmployee) : null,
+      })),
+      salariesList: salaries.map((s) => ({
+        id: s.id, payslipNo: s.payslipNo, payPeriod: s.payPeriod.toISOString(), employeeName: fullName(s.employee), department: s.employee.department.name,
+        location: s.employee.defaultLocation?.name ?? null, grossPay: round2(Number(s.grossPay)), totalDeductions: round2(Number(s.totalDeductions)),
+        netPay: round2(Number(s.netPay)), paymentMethod: s.paymentMethod ? salaryMethodLabel[s.paymentMethod] ?? s.paymentMethod : null, paidAt: s.paidAt?.toISOString() ?? null,
+      })),
+      supplierPaymentsList: supplierPayments.map((p) => ({
+        id: p.id, paymentNo: p.paymentNo, supplier: p.supplier.name, purchaseNo: p.purchase?.purchaseNo ?? null,
+        amount: round2(Number(p.amount)), paymentMethod: p.paymentMethod?.name ?? "Unknown", reference: p.reference,
+        paidAt: p.paidAt.toISOString(), recordedBy: p.createdByEmployee ? fullName(p.createdByEmployee) : null,
+      })),
+      assetPurchasesList: assetMovements.map((m) => ({
+        id: m.id, occurredAt: m.occurredAt.toISOString(), assetName: m.asset.name, assetNo: m.asset.assetNo, category: m.asset.category?.name ?? null,
+        quantity: Number(m.quantity), unitCost: m.unitCost == null ? null : Number(m.unitCost), value: round2(assetMovementValue(m)),
+        paymentMethod: m.paymentMethod?.name ?? "Unknown", reference: m.reference,
+        placement: m.asset.room ? `Room ${m.asset.room.number}` : m.asset.location?.name ?? null,
+        recordedBy: m.employee ? fullName(m.employee) : null,
+      })),
     });
   } catch (error) {
     next(error);
