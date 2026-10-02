@@ -114,10 +114,22 @@ async function assertCanReview(req: { tenantId?: string; userId?: string }) {
   if (!allowed) throw new HttpError(403, "You don't have permission to approve or reject a requisition");
 }
 
-/** Cost (estimated unit cost, line total, requisition total) is only for
- * whoever can approve — the raiser only ever deals in product + quantity.
- * Rather than trust the client to hide a field the API already sent, this
- * strips it server-side for anyone without REQUISITION_APPROVE. */
+/** Cost is set at the point of requisition (whoever raises it prices it
+ * themselves — REQUISITION_CREATE), and a reviewer can still adjust it
+ * before approving (REQUISITION_APPROVE). Redacted only from someone with
+ * neither permission (e.g. a pure approver-only role viewing requisitions
+ * raised by someone else isn't a real case here, but this stays a holder of
+ * either side of the workflow, not a bystander). */
+async function canSeeRequisitionCost(tid: string, userId: string | undefined) {
+  const [canCreate, canApprove] = await Promise.all([
+    hasPermission(tid, userId, "REQUISITION_CREATE"),
+    hasPermission(tid, userId, "REQUISITION_APPROVE"),
+  ]);
+  return canCreate || canApprove;
+}
+
+/** Rather than trust the client to hide a field the API already sent, this
+ * strips it server-side for anyone without either requisition permission. */
 function redactCostIfNeeded<T extends { estimatedTotal: unknown; items: { estimatedUnitCost: unknown; lineTotal: unknown }[] }>(
   requisition: T,
   canSeeCost: boolean,
@@ -159,7 +171,7 @@ purchaseRequisitionsRouter.get("/", async (req, res, next) => {
     };
     const [requisitions, canSeeCost] = await Promise.all([
       prisma.purchaseRequisition.findMany({ where, include: requisitionInclude, orderBy: { createdAt: "desc" } }),
-      hasPermission(tid, req.userId, "REQUISITION_APPROVE"),
+      canSeeRequisitionCost(tid, req.userId),
     ]);
     const byStatus = Object.fromEntries(REQUISITION_STATUSES.map((s) => [s, 0])) as Record<RequisitionStatus, number>;
     for (const r of requisitions) byStatus[r.status] += 1;
@@ -175,7 +187,7 @@ purchaseRequisitionsRouter.get("/:id", async (req, res, next) => {
     const tid = tenantId(req);
     const [requisition, canSeeCost] = await Promise.all([
       prisma.purchaseRequisition.findFirst({ where: { id: req.params.id, tenantId: tid }, include: requisitionInclude }),
-      hasPermission(tid, req.userId, "REQUISITION_APPROVE"),
+      canSeeRequisitionCost(tid, req.userId),
     ]);
     if (!requisition) { res.status(404).json({ error: "Requisition not found" }); return; }
     res.json({ requisition: redactCostIfNeeded(requisition, canSeeCost) });
@@ -211,7 +223,7 @@ purchaseRequisitionsRouter.post("/", requirePermission("REQUISITION_CREATE"), as
       },
       include: requisitionInclude,
     });
-    const canSeeCost = await hasPermission(tid, req.userId, "REQUISITION_APPROVE");
+    const canSeeCost = await canSeeRequisitionCost(tid, req.userId);
     res.status(201).json({ requisition: redactCostIfNeeded(requisition, canSeeCost) });
   } catch (error) {
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
@@ -276,7 +288,7 @@ purchaseRequisitionsRouter.patch("/:id", async (req, res, next) => {
         include: requisitionInclude,
       });
     });
-    const canSeeCost = await hasPermission(tid, req.userId, "REQUISITION_APPROVE");
+    const canSeeCost = await canSeeRequisitionCost(tid, req.userId);
     res.json({ requisition: redactCostIfNeeded(requisition, canSeeCost) });
   } catch (error) {
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
@@ -320,7 +332,7 @@ purchaseRequisitionsRouter.post("/:id/status", async (req, res, next) => {
       },
       include: requisitionInclude,
     });
-    const canSeeCost = await hasPermission(tid, req.userId, "REQUISITION_APPROVE");
+    const canSeeCost = await canSeeRequisitionCost(tid, req.userId);
     res.json({ requisition: redactCostIfNeeded(requisition, canSeeCost) });
   } catch (error) {
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
