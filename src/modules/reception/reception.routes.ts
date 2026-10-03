@@ -1,3 +1,4 @@
+import { refreshStayInvoicesForFolio } from "../commercial-documents/commercial-documents.routes.js";
 import { Router } from "express";
 import { z } from "zod";
 import type { Prisma, ReservationActivityAction } from "@prisma/client";
@@ -775,6 +776,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
     }
     if (data.data.amount > 0) {
       const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: current.folio!.id, kind: "SETTLEMENT", paymentMethodId: data.data.paymentMethodId!, amount: data.data.amount, reference: resolvedPayment?.reference, createdBy: req.userId } });
+      await refreshStayInvoicesForFolio(tx, created.folioId);
       await tx.transaction.create({
         data: {
           tenantId: tid,
@@ -936,6 +938,7 @@ receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
       data: { tenantId: tid, folioId: reservation.folio!.id, kind: "DEPOSIT", ...data.data, reference: resolvedPayment.reference, createdBy: req.userId },
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
+    await refreshStayInvoicesForFolio(tx, created.folioId);
     await tx.transaction.create({
       data: {
         tenantId: tid,
@@ -1010,6 +1013,7 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
       data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", ...data.data, reference: resolvedPayment.reference, createdBy: req.userId },
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
+    await refreshStayInvoicesForFolio(tx, created.folioId);
     await tx.transaction.create({
       data: {
         tenantId: tid,
@@ -1397,6 +1401,7 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
       for (const [index, alloc] of allocations.entries()) {
         const reservation = byId.get(alloc.roomId)!;
         const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", paymentMethodId: alloc.paymentMethodId, amount: alloc.amount, reference: alloc.reference, createdBy: req.userId } });
+        await refreshStayInvoicesForFolio(tx, created.folioId);
         await tx.transaction.create({
           data: {
             tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount,
@@ -1459,6 +1464,7 @@ receptionRouter.post("/groups/:id/credit-payments", async (req, res, next) => {
       for (const [index, alloc] of allocations.entries()) {
         const reservation = byId.get(alloc.roomId)!;
         const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", paymentMethodId: alloc.paymentMethodId, amount: alloc.amount, reference: alloc.reference, createdBy: req.userId } });
+        await refreshStayInvoicesForFolio(tx, created.folioId);
         await tx.transaction.create({
           data: {
             tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount,

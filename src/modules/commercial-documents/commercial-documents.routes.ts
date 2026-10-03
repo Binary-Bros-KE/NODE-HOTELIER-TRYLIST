@@ -252,7 +252,9 @@ async function refreshDocumentTotals(tx: Tx, documentId: string) {
 /** A stay invoice takes its money from its folio: the folio's payments are
  * the invoice's payments, so paid, balance, status and the payments list
  * always agree with the stay, whichever side a payment was taken on. */
-async function refreshStayInvoicePaid(client: Tx, documentId: string) {
+type StayClient = Pick<typeof prisma, "commercialDocument" | "folioPayment">;
+
+async function refreshStayInvoicePaid(client: StayClient, documentId: string) {
   const doc = await client.commercialDocument.findUnique({ where: { id: documentId } });
   if (!doc || doc.source !== "HOTEL_STAY" || !doc.sourceRefId) return;
   const sum = await client.folioPayment.aggregate({ where: { folioId: doc.sourceRefId }, _sum: { amount: true } });
@@ -260,6 +262,13 @@ async function refreshStayInvoicePaid(client: Tx, documentId: string) {
   const balance = Math.max(0, round2(Number(doc.total) - paidAmount));
   const status = nextStatus(doc.type, Number(doc.total), paidAmount, doc.dueAt, doc.status);
   await client.commercialDocument.update({ where: { id: doc.id }, data: { paidAmount, balance, status } });
+}
+
+/** Brings every active stay invoice of a folio up to date with its payments. Call inside
+ * the transaction that records a folio payment, so the invoice is right the moment it's read. */
+export async function refreshStayInvoicesForFolio(client: StayClient, folioId: string) {
+  const docs = await client.commercialDocument.findMany({ where: { source: "HOTEL_STAY", type: "INVOICE", sourceRefId: folioId }, select: { id: true } });
+  for (const d of docs) await refreshStayInvoicePaid(client, d.id);
 }
 
 async function refreshStayInvoices(tid: string, documentId?: string) {
