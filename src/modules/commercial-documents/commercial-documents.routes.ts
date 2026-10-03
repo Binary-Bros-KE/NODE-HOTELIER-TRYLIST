@@ -252,7 +252,7 @@ async function refreshDocumentTotals(tx: Tx, documentId: string) {
 /** A stay invoice takes its money from its folio: the folio's payments are
  * the invoice's payments, so paid, balance, status and the payments list
  * always agree with the stay, whichever side a payment was taken on. */
-type StayClient = Pick<typeof prisma, "commercialDocument" | "folioPayment">;
+type StayClient = Pick<typeof prisma, "commercialDocument" | "commercialDocumentLine" | "folio" | "folioPayment">;
 
 async function refreshStayInvoicePaid(client: StayClient, documentId: string) {
   const doc = await client.commercialDocument.findUnique({ where: { id: documentId } });
@@ -266,9 +266,27 @@ async function refreshStayInvoicePaid(client: StayClient, documentId: string) {
 
 /** Brings every active stay invoice of a folio up to date with its payments. Call inside
  * the transaction that records a folio payment, so the invoice is right the moment it's read. */
-export async function refreshStayInvoicesForFolio(client: StayClient, folioId: string) {
-  const docs = await client.commercialDocument.findMany({ where: { source: "HOTEL_STAY", type: "INVOICE", sourceRefId: folioId }, select: { id: true } });
-  for (const d of docs) await refreshStayInvoicePaid(client, d.id);
+export async function syncStayInvoicesForFolio(client: StayClient, folioId: string) {
+  const docs = await client.commercialDocument.findMany({ where: { source: "HOTEL_STAY", type: "INVOICE", sourceRefId: folioId, status: { notIn: ["CANCELLED", "VOID"] } }, select: { id: true } });
+  if (docs.length === 0) return;
+  const folio = await client.folio.findUnique({
+    where: { id: folioId },
+    include: { lineItems: { orderBy: { createdAt: "asc" } }, reservation: { include: { room: { include: { roomType: true } } } } },
+  });
+  if (!folio) return;
+  const fallback = await taxDefaults(folio.tenantId);
+  const computed = stayInvoiceLines(folio.reservation, folio, fallback);
+  for (const d of docs) {
+    await client.commercialDocumentLine.deleteMany({ where: { documentId: d.id } });
+    await client.commercialDocumentLine.createMany({
+      data: computed.lines.map((line) => ({ tenantId: folio.tenantId, documentId: d.id, source: line.source, sourceRefId: line.sourceRefId, description: line.description, details: line.details, quantity: line.quantity, unitLabel: line.unitLabel, unitPrice: line.unitPrice, discount: line.discount, taxRate: line.taxRate, taxMode: line.taxMode, taxTreatment: line.taxTreatment, lineSubtotal: line.lineSubtotal, netAmount: line.netAmount, taxAmount: line.taxAmount, lineTotal: line.lineTotal, sortOrder: line.sortOrder })),
+    });
+    await client.commercialDocument.update({
+      where: { id: d.id },
+      data: { subtotal: computed.totals.subtotal, discount: computed.totals.discount, net: computed.totals.net, taxAmount: computed.totals.taxAmount, total: computed.totals.total },
+    });
+    await refreshStayInvoicePaid(client, d.id);
+  }
 }
 
 async function refreshStayInvoices(tid: string, documentId?: string) {
@@ -322,6 +340,66 @@ async function presentStayDocuments<T extends { source: string; sourceRefId: str
       },
     };
   });
+}
+
+type StayLine = { id: string; source: string; label: string; amount: unknown; quantity: unknown; taxRate: unknown; taxMode: "INCLUSIVE" | "EXCLUSIVE" | null; taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT" | null };
+type StayReservation = { discountType: string | null; discountBasis: string; room: { number: string; roomType: { name: string } } };
+
+/** The invoice lines and totals for a stay, from its folio. Used both when an
+ * invoice is first made and whenever the folio changes, so they always match. */
+export function stayInvoiceLines(reservation: StayReservation, folio: { lineItems: StayLine[] }, fallback: Awaited<ReturnType<typeof taxDefaults>>) {
+  // A room discount is not a line of its own on the invoice: it comes off the
+  // room charge it belongs to, so the subtotal shows the full charge and the
+  // discount sits between subtotal and net, the way discounts always do.
+  const discountLines = folio.lineItems.filter((line) => line.source === "DISCOUNT");
+  const discountTotal = Math.abs(discountLines.reduce((sum, line) => sum + Number(line.amount) * Number(line.quantity), 0));
+  const roomLines = folio.lineItems.filter((line) => line.source === "ROOM");
+  const roomSubtotal = roomLines.reduce((sum, line) => sum + Number(line.amount) * Number(line.quantity), 0);
+  // Shares are worked out once, in order, so the last room line absorbs any
+  // rounding and the shares always add up to exactly the discount given.
+  const discountCap = Math.min(discountTotal, roomSubtotal);
+  const roomShares: number[] = [];
+  let allocated = 0;
+  roomLines.forEach((line, index) => {
+    const share = index === roomLines.length - 1
+      ? round2(discountCap - allocated)
+      : roomSubtotal > 0 ? round2(discountCap * (Number(line.amount) * Number(line.quantity)) / roomSubtotal) : 0;
+    allocated += share;
+    roomShares.push(share);
+  });
+  const discountReason = discountLines.map((line) => line.label.replace(/^Room discount — /, "")).join("; ");
+  // A per-unit discount is a lower unit price: the room line shows the
+  // discounted price and the list price it came from. Anything else is a
+  // whole-stay discount, shown under the subtotal.
+  const perUnitDiscount = reservation.discountType === "AMOUNT" && reservation.discountBasis === "PER_UNIT" && discountTotal > 0;
+  const lines = folio.lineItems.filter((line) => line.source !== "DISCOUNT").map((line) => {
+    const roomIndex = line.source === "ROOM" ? roomLines.indexOf(line) : -1;
+    const quantity = Number(line.quantity) || 1;
+    const listPrice = Number(line.amount) || 0;
+    const unitOff = perUnitDiscount && roomIndex >= 0 ? roomShares[roomIndex] / quantity : 0;
+    const unitPrice = perUnitDiscount && roomIndex >= 0 ? Math.max(0, round2(listPrice - unitOff)) : listPrice;
+    const discount = !perUnitDiscount && roomIndex >= 0 ? roomShares[roomIndex] : 0;
+    const roomDetail = `${reservation.room.number} - ${reservation.room.roomType.name}`;
+    const detail = line.source !== "ROOM"
+      ? null
+      : perUnitDiscount
+        ? `${roomDetail} · list price KSh ${listPrice.toLocaleString("en-KE")} per unit`
+        : `${roomDetail}${discount > 0 && discountReason ? ` · discount ${discountReason}` : ""}`;
+    return {
+      source: line.source === "ROOM" ? "ROOM_STAY" as const : line.source === "SERVICE" ? "SERVICE" as const : line.source === "POS_ORDER" ? "POS_ORDER" as const : "FOLIO" as const,
+      sourceRefId: line.id,
+      description: line.label,
+      details: detail,
+      quantity,
+      unitLabel: null,
+      unitPrice,
+      discount,
+      taxRate: Number(line.taxRate ?? fallback.taxRate),
+      taxMode: line.taxMode ?? fallback.taxMode,
+      taxTreatment: line.taxTreatment ?? fallback.taxTreatment,
+    };
+  });
+  return computeLines(lines, fallback);
 }
 
 commercialDocumentsRouter.get("/", async (req, res) => {
@@ -541,58 +619,7 @@ commercialDocumentsRouter.post("/from-folio", async (req, res) => {
   if (folio.lineItems.length === 0) { res.status(400).json({ error: "This stay has no charges to invoice" }); return; }
 
   const fallback = await taxDefaults(tid);
-  // A room discount is not a line of its own on the invoice: it comes off the
-  // room charge it belongs to, so the subtotal shows the full charge and the
-  // discount sits between subtotal and net, the way discounts always do.
-  const discountLines = folio.lineItems.filter((line) => line.source === "DISCOUNT");
-  const discountTotal = Math.abs(discountLines.reduce((sum, line) => sum + Number(line.amount) * Number(line.quantity), 0));
-  const roomLines = folio.lineItems.filter((line) => line.source === "ROOM");
-  const roomSubtotal = roomLines.reduce((sum, line) => sum + Number(line.amount) * Number(line.quantity), 0);
-  // Shares are worked out once, in order, so the last room line absorbs any
-  // rounding and the shares always add up to exactly the discount given.
-  const discountCap = Math.min(discountTotal, roomSubtotal);
-  const roomShares: number[] = [];
-  let allocated = 0;
-  roomLines.forEach((line, index) => {
-    const share = index === roomLines.length - 1
-      ? round2(discountCap - allocated)
-      : roomSubtotal > 0 ? round2(discountCap * (Number(line.amount) * Number(line.quantity)) / roomSubtotal) : 0;
-    allocated += share;
-    roomShares.push(share);
-  });
-  const discountReason = discountLines.map((line) => line.label.replace(/^Room discount — /, "")).join("; ");
-  // A per-unit discount is a lower unit price: the room line shows the
-  // discounted price and the list price it came from. Anything else is a
-  // whole-stay discount, shown under the subtotal.
-  const perUnitDiscount = reservation.discountType === "AMOUNT" && reservation.discountBasis === "PER_UNIT" && discountTotal > 0;
-  const lines = folio.lineItems.filter((line) => line.source !== "DISCOUNT").map((line) => {
-    const roomIndex = line.source === "ROOM" ? roomLines.indexOf(line) : -1;
-    const quantity = Number(line.quantity) || 1;
-    const listPrice = Number(line.amount) || 0;
-    const unitOff = perUnitDiscount && roomIndex >= 0 ? roomShares[roomIndex] / quantity : 0;
-    const unitPrice = perUnitDiscount && roomIndex >= 0 ? Math.max(0, round2(listPrice - unitOff)) : listPrice;
-    const discount = !perUnitDiscount && roomIndex >= 0 ? roomShares[roomIndex] : 0;
-    const roomDetail = `${reservation.room.number} - ${reservation.room.roomType.name}`;
-    const detail = line.source !== "ROOM"
-      ? null
-      : perUnitDiscount
-        ? `${roomDetail} · list price KSh ${listPrice.toLocaleString("en-KE")} per unit`
-        : `${roomDetail}${discount > 0 && discountReason ? ` · discount ${discountReason}` : ""}`;
-    return {
-      source: line.source === "ROOM" ? "ROOM_STAY" as const : line.source === "SERVICE" ? "SERVICE" as const : line.source === "POS_ORDER" ? "POS_ORDER" as const : "FOLIO" as const,
-      sourceRefId: line.id,
-      description: line.label,
-      details: detail,
-      quantity,
-      unitLabel: null,
-      unitPrice,
-      discount,
-      taxRate: Number(line.taxRate ?? fallback.taxRate),
-      taxMode: line.taxMode ?? fallback.taxMode,
-      taxTreatment: line.taxTreatment ?? fallback.taxTreatment,
-    };
-  });
-  const computed = computeLines(lines, fallback);
+  const computed = stayInvoiceLines(reservation, folio, fallback);
   const docNo = await nextInvoiceNo(tid);
   const paymentNos = await Promise.all(folio.payments.map(() => nextCommercialDocumentPaymentNo(tid)));
   const text = await headerFooter("INVOICE", reservation.locationId);
@@ -805,6 +832,7 @@ commercialDocumentsRouter.patch("/:id", async (req, res) => {
   const current = await prisma.commercialDocument.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { payments: true } });
   if (!current) { res.status(404).json({ error: "Document not found" }); return; }
   if (!["DRAFT", "SENT", "ISSUED"].includes(current.status)) { res.status(409).json({ error: "Only draft/open documents can be edited" }); return; }
+  if (current.source === "HOTEL_STAY") { res.status(409).json({ error: "This invoice follows its stay. Change the stay's charges, rooms, rates or guests and the invoice updates with it." }); return; }
   if (current.payments.length) { res.status(409).json({ error: "Documents with payments cannot be edited; void and reissue instead" }); return; }
   const parsed = documentSchema.partial({ type: true, lines: true }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid document", details: parsed.error.flatten() }); return; }

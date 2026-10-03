@@ -1,4 +1,4 @@
-import { refreshStayInvoicesForFolio } from "../commercial-documents/commercial-documents.routes.js";
+import { syncStayInvoicesForFolio } from "../commercial-documents/commercial-documents.routes.js";
 import { Router } from "express";
 import { z } from "zod";
 import type { Prisma, ReservationActivityAction } from "@prisma/client";
@@ -101,7 +101,7 @@ const reservationUpdateSchema = z.object({
 });
 
 const cancelSchema = z.object({ cancellationReason: z.enum(CANCELLATION_REASONS), cancellationNotes: optionalText(500) });
-const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional() }).default({});
+const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional(), adults: z.coerce.number().int().min(1).optional(), children: z.coerce.number().int().min(0).optional() }).default({});
 const extendSchema = z.object({ checkOut: z.coerce.date(), quantityOverride: z.coerce.number().positive().optional() });
 const roomChargeSchema = z.object({ roomId: z.string().cuid().optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional() }).default({});
 const roomChangeSchema = z.object({
@@ -211,6 +211,12 @@ const ROOM_ADJUSTMENT_REFS = ["ROOM_DISCOUNT", "ROOM_COMPLIMENTARY"];
  * replaces its own previous line, so it can run after check-in, an
  * extension, or an edit of the terms without stacking. */
 async function syncRoomAdjustment(tx: Prisma.TransactionClient, tid: string, reservationId: string, by: string | undefined) {
+  await applyRoomAdjustment(tx, tid, reservationId, by);
+  const reservation = await tx.reservation.findUnique({ where: { id: reservationId }, select: { folio: { select: { id: true } } } });
+  if (reservation?.folio) await syncStayInvoicesForFolio(tx, reservation.folio.id);
+}
+
+async function applyRoomAdjustment(tx: Prisma.TransactionClient, tid: string, reservationId: string, by: string | undefined) {
   const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId }, include: { room: true, folio: { include: { lineItems: true } } } });
   if (!reservation.folio) return;
   await tx.folioLineItem.deleteMany({ where: { folioId: reservation.folio.id, source: "DISCOUNT", sourceRefId: { in: ROOM_ADJUSTMENT_REFS } } });
@@ -512,6 +518,33 @@ receptionRouter.patch("/reservations/:id", async (req, res) => {
   res.json({ reservation });
 });
 
+receptionRouter.patch("/reservations/:id/guests-count", async (req, res) => {
+  const data = z.object({ adults: z.coerce.number().int().min(1), children: z.coerce.number().int().min(0).default(0) }).safeParse(req.body);
+  if (!data.success) { invalid(res, "guests", data.error.flatten()); return; }
+  const tid = tenantId(req);
+  const current = await prisma.reservation.findFirst({
+    where: { id: req.params.id, tenantId: tid },
+    include: { room: { include: { roomType: true } }, folio: { include: { lineItems: true } } },
+  });
+  if (!current) { res.status(404).json({ error: "Reservation not found" }); return; }
+  if (!["PENDING", "CONFIRMED", "CHECKED_IN"].includes(current.status)) { res.status(409).json({ error: "The guest count can only change before checkout" }); return; }
+  const roomLines = current.folio?.lineItems.filter((line) => line.source === "ROOM") ?? [];
+  if (roomLines.length > 1) { res.status(409).json({ error: "This stay has more than one room charge, so the guest count can't be changed in one step. Change the room on the stay first." }); return; }
+  const headcount = data.data.adults + data.data.children;
+  const charge = await resolveRoomCharge(prisma, current.room, { rateId: current.rateId, mealPlan: current.rateId ? undefined : current.mealPlan, headcount }, current.checkIn, current.checkOut, await taxDefaults(tid));
+  const actor = await resolveActor(tid, req);
+  const reservation = await prisma.$transaction(async (tx) => {
+    await tx.reservation.update({ where: { id: current.id }, data: { adults: data.data.adults, children: data.data.children, updatedBy: req.userId } });
+    if (roomLines.length === 1 && current.folio) {
+      await tx.folioLineItem.update({ where: { id: roomLines[0].id }, data: { quantity: charge.quantity } });
+      await syncRoomAdjustment(tx, tid, current.id, req.userId);
+    }
+    await logActivity(tx, tid, current.id, "UPDATED", `Guests changed to ${data.data.adults} adult(s), ${data.data.children} child(ren)`, actor);
+    return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
+  });
+  res.json({ reservation });
+});
+
 receptionRouter.patch("/reservations/:id/check-in", async (req, res) => {
   const data = checkInSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "check-in", data.error.flatten()); return; }
@@ -521,12 +554,14 @@ receptionRouter.patch("/reservations/:id/check-in", async (req, res) => {
   if (!["PENDING", "CONFIRMED"].includes(current.status)) { res.status(409).json({ error: "Only a pending or confirmed reservation can be checked in" }); return; }
   const mealPlan = data.data.mealPlan ?? current.mealPlan;
   const rateId = data.data.rateId ?? current.rateId;
-  const charge = await resolveRoomCharge(prisma, current.room, { rateId, mealPlan: rateId ? undefined : mealPlan, headcount: current.adults + current.children, quantityOverride: data.data.quantityOverride }, current.checkIn, current.checkOut, await taxDefaults(tid));
+  const adults = data.data.adults ?? current.adults;
+  const children = data.data.children ?? current.children;
+  const charge = await resolveRoomCharge(prisma, current.room, { rateId, mealPlan: rateId ? undefined : mealPlan, headcount: adults + children, quantityOverride: data.data.quantityOverride }, current.checkIn, current.checkOut, await taxDefaults(tid));
   const actor = await resolveActor(tid, req);
   const deskError = await deskSellsRoomsError(tid, actor.locationId);
   if (deskError) { res.status(409).json({ error: deskError }); return; }
   const reservation = await prisma.$transaction(async (tx) => {
-    await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_IN", mealPlan, rateId: charge.rateId, rateName: charge.rateName, updatedBy: req.userId } });
+    await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_IN", mealPlan, rateId: charge.rateId, rateName: charge.rateName, adults, children, updatedBy: req.userId } });
     await tx.room.update({ where: { id: current.roomId }, data: { status: "OCCUPIED" } });
     if (current.folio) {
       await tx.folioLineItem.create({
@@ -776,7 +811,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
     }
     if (data.data.amount > 0) {
       const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: current.folio!.id, kind: "SETTLEMENT", paymentMethodId: data.data.paymentMethodId!, amount: data.data.amount, reference: resolvedPayment?.reference, createdBy: req.userId } });
-      await refreshStayInvoicesForFolio(tx, created.folioId);
+      await syncStayInvoicesForFolio(tx, created.folioId);
       await tx.transaction.create({
         data: {
           tenantId: tid,
@@ -897,6 +932,7 @@ receptionRouter.post("/reservations/:id/folio/charges", async (req, res) => {
         createdBy: req.userId,
       },
     });
+    await syncStayInvoicesForFolio(tx, reservation.folio!.id);
     await logActivity(tx, tid, reservation.id, "CHARGE_ADDED", `Charge added — ${label}`, actor);
     return created;
   });
@@ -913,6 +949,7 @@ receptionRouter.delete("/reservations/:id/folio/charges/:lineItemId", async (req
   const actor = await resolveActor(tid, req);
   await prisma.$transaction(async (tx) => {
     await tx.folioLineItem.delete({ where: { id: lineItem.id } });
+    await syncStayInvoicesForFolio(tx, reservation.folio!.id);
     await logActivity(tx, tid, reservation.id, "CHARGE_REMOVED", `Charge removed — ${lineItem.label}`, actor);
   });
   res.status(204).send();
@@ -938,7 +975,7 @@ receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
       data: { tenantId: tid, folioId: reservation.folio!.id, kind: "DEPOSIT", ...data.data, reference: resolvedPayment.reference, createdBy: req.userId },
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
-    await refreshStayInvoicesForFolio(tx, created.folioId);
+    await syncStayInvoicesForFolio(tx, created.folioId);
     await tx.transaction.create({
       data: {
         tenantId: tid,
@@ -1013,7 +1050,7 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
       data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", ...data.data, reference: resolvedPayment.reference, createdBy: req.userId },
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
-    await refreshStayInvoicesForFolio(tx, created.folioId);
+    await syncStayInvoicesForFolio(tx, created.folioId);
     await tx.transaction.create({
       data: {
         tenantId: tid,
@@ -1401,7 +1438,7 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
       for (const [index, alloc] of allocations.entries()) {
         const reservation = byId.get(alloc.roomId)!;
         const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", paymentMethodId: alloc.paymentMethodId, amount: alloc.amount, reference: alloc.reference, createdBy: req.userId } });
-        await refreshStayInvoicesForFolio(tx, created.folioId);
+        await syncStayInvoicesForFolio(tx, created.folioId);
         await tx.transaction.create({
           data: {
             tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount,
@@ -1464,7 +1501,7 @@ receptionRouter.post("/groups/:id/credit-payments", async (req, res, next) => {
       for (const [index, alloc] of allocations.entries()) {
         const reservation = byId.get(alloc.roomId)!;
         const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", paymentMethodId: alloc.paymentMethodId, amount: alloc.amount, reference: alloc.reference, createdBy: req.userId } });
-        await refreshStayInvoicesForFolio(tx, created.folioId);
+        await syncStayInvoicesForFolio(tx, created.folioId);
         await tx.transaction.create({
           data: {
             tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount,
