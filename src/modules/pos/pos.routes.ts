@@ -1845,19 +1845,62 @@ posRouter.post("/orders/:id/share", async (req, res) => {
   res.status(200).json({ token, url: `${base}/r/${token}` });
 });
 
-/** Queues a print request for this order at its own location — for a device
- * with no printer of its own (most waiters' phones). Any other device at
- * that location already configured with a working thermal-printer
- * connection polls GET /pos/print-jobs/pending in the background and prints
- * it over its own Bluetooth/USB/bridge connection. See PrintJob's own
- * schema comment for the full design. */
-posRouter.post("/orders/:id/print-jobs", async (req, res) => {
+const printerFields = { id: true, name: true, isActive: true, isDefault: true, locationId: true, location: { select: { id: true, name: true } } } as const;
+
+posRouter.get("/printers", async (req, res) => {
+  const printers = await prisma.printer.findMany({ where: { tenantId: tenantIdFor(req) }, select: printerFields, orderBy: [{ location: { name: "asc" } }, { name: "asc" }] });
+  res.json({ printers });
+});
+
+posRouter.post("/printers", async (req, res) => {
+  const parsed = z.object({ name: z.string().trim().min(2).max(60), locationId: z.string().cuid() }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Enter a printer name and its location" }); return; }
   const tid = tenantIdFor(req);
-  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, locationId: true } });
+  const location = await prisma.location.findFirst({ where: { id: parsed.data.locationId, tenantId: tid }, select: { id: true } });
+  if (!location) { res.status(400).json({ error: "Choose a valid location" }); return; }
+  try {
+    const printer = await prisma.printer.create({ data: { tenantId: tid, ...parsed.data }, select: printerFields });
+    res.status(201).json({ printer });
+  } catch (error) {
+    if ((error as { code?: string }).code === "P2002") { res.status(409).json({ error: "A printer with this name already exists" }); return; }
+    throw error;
+  }
+});
+
+posRouter.patch("/printers/:id", async (req, res) => {
+  const parsed = z.object({ name: z.string().trim().min(2).max(60).optional(), isActive: z.boolean().optional(), isDefault: z.boolean().optional() }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid printer" }); return; }
+  const tid = tenantIdFor(req);
+  try {
+    const printer = await prisma.printer.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, locationId: true } });
+    if (!printer) { res.status(404).json({ error: "Printer not found" }); return; }
+    await prisma.$transaction(async (tx) => {
+      if (parsed.data.isDefault) {
+        await tx.printer.updateMany({ where: { tenantId: tid, locationId: printer.locationId, isDefault: true }, data: { isDefault: false } });
+      }
+      await tx.printer.update({ where: { id: printer.id }, data: parsed.data });
+    });
+    res.json({ printer: await prisma.printer.findUniqueOrThrow({ where: { id: req.params.id }, select: printerFields }) });
+  } catch (error) {
+    if ((error as { code?: string }).code === "P2002") { res.status(409).json({ error: "A printer with this name already exists" }); return; }
+    throw error;
+  }
+});
+
+/** Queues a receipt for one specific printer. Only the computer hosting that
+ * printer prints it (see GET /pos/print-jobs/pending). The printer decides the
+ * location, so a bar receipt can never land on an accounts printer. */
+posRouter.post("/orders/:id/print-jobs", async (req, res) => {
+  const parsed = z.object({ printerId: z.string().cuid() }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Choose which printer this receipt goes to" }); return; }
+  const tid = tenantIdFor(req);
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
-  if (!order.locationId) { res.status(400).json({ error: "This order has no location on it, so there's no printer to route it to" }); return; }
+  const printer = await prisma.printer.findFirst({ where: { id: parsed.data.printerId, tenantId: tid }, select: { id: true, locationId: true, isActive: true, name: true } });
+  if (!printer) { res.status(400).json({ error: "That printer doesn't exist" }); return; }
+  if (!printer.isActive) { res.status(400).json({ error: printer.name + " is switched off" }); return; }
   const job = await prisma.printJob.create({
-    data: { tenantId: tid, locationId: order.locationId, orderId: order.id, requestedBy: req.userId ?? null },
+    data: { tenantId: tid, locationId: printer.locationId, printerId: printer.id, orderId: order.id, requestedBy: req.userId ?? null },
     select: { id: true, status: true, createdAt: true },
   });
   res.status(201).json({ job });
@@ -2506,10 +2549,10 @@ posRouter.post("/orders/:id/complete-service", async (req, res) => {
 
 posRouter.get("/print-jobs/pending", async (req, res) => {
   const tid = tenantIdFor(req);
-  const query = z.object({ locationId: z.string().cuid() }).safeParse(req.query);
-  if (!query.success) { res.status(400).json({ error: "A locationId is required" }); return; }
+  const query = z.object({ printerId: z.string().cuid() }).safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "A printerId is required" }); return; }
   const jobs = await prisma.printJob.findMany({
-    where: { tenantId: tid, locationId: query.data.locationId, status: "PENDING" },
+    where: { tenantId: tid, printerId: query.data.printerId, status: "PENDING" },
     select: { id: true, orderId: true, kind: true, createdAt: true, nudgedAt: true },
     orderBy: { createdAt: "asc" },
     take: 20,

@@ -18,13 +18,19 @@ const stockLineInclude = {
   addons: { include: { addon: { include: addonStockInclude } } },
 } satisfies Prisma.PosOrderItemInclude;
 
-/** Queues the store's dispatch slip for whichever device at the store has a printer. */
+/** Queues the store's dispatch slip to the store's default printer. Returns null (nothing queued) when the store has no active printer set up. */
 export async function queueDispatchSlip(
   client: Prisma.TransactionClient | typeof prisma,
   args: { tenantId: string; requestId: string; orderId: string; storeLocationId: string; requestedBy: string | null | undefined },
 ) {
+  const printer = await client.printer.findFirst({
+    where: { tenantId: args.tenantId, locationId: args.storeLocationId, isActive: true },
+    orderBy: [{ isDefault: "desc" }, { name: "asc" }],
+    select: { id: true },
+  });
+  if (!printer) return null;
   return client.printJob.create({
-    data: { tenantId: args.tenantId, locationId: args.storeLocationId, orderId: args.orderId, kind: "DISPATCH", dispatchRequestId: args.requestId, requestedBy: args.requestedBy ?? null },
+    data: { tenantId: args.tenantId, locationId: args.storeLocationId, printerId: printer.id, orderId: args.orderId, kind: "DISPATCH", dispatchRequestId: args.requestId, requestedBy: args.requestedBy ?? null },
     select: { id: true },
   });
 }

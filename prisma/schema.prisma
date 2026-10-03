@@ -493,6 +493,7 @@ model Tenant {
   shiftSessions              ShiftSession[]
   employeeSalaries           EmployeeSalary[]
   printJobs                  PrintJob[]
+  printers                   Printer[]
   menuLedgerEntries          MenuLedgerEntry[]
   reservationGroups          ReservationGroup[]
   roomConsumableStandards    RoomConsumableStandard[]
@@ -2456,6 +2457,7 @@ model Location {
   dispatchRequestsFrom   StockDispatchRequest[] @relation("DispatchFrom")
   dispatchRequestsTo     StockDispatchRequest[] @relation("DispatchTo")
   printJobs              PrintJob[]
+  printers               Printer[]
   appointments           Appointment[]
   commercialDocuments    CommercialDocument[]
   roomConsumableUsages   RoomConsumableUsage[]
@@ -2927,12 +2929,34 @@ enum PrintJobStatus {
 // directly, it just hands the job to whoever's holding the wire.
 // PENDING -> CLAIMED (atomically, so two polling hosts can't both print it)
 // -> DONE or FAILED.
+// A physical printer at a location (e.g. "Main Bar thermal", "Accounts A4").
+// Receipts are queued to one of these, and only the computer hosting it prints them.
+model Printer {
+  id         String     @id @default(cuid())
+  tenantId   String
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  locationId String
+  location   Location   @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  name       String
+  isActive   Boolean    @default(true)
+  // The location's default printer - receives store dispatch slips.
+  isDefault  Boolean    @default(false)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  jobs       PrintJob[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, locationId])
+}
+
 model PrintJob {
   id                String         @id @default(cuid())
   tenantId          String
   tenant            Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   locationId        String
   location          Location       @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  printerId         String?
+  printer           Printer?       @relation(fields: [printerId], references: [id], onDelete: SetNull)
   orderId           String
   order             PosOrder       @relation(fields: [orderId], references: [id], onDelete: Cascade)
   status            PrintJobStatus @default(PENDING)
@@ -2952,6 +2976,7 @@ model PrintJob {
   createdAt         DateTime       @default(now())
 
   @@index([tenantId, locationId, status])
+  @@index([tenantId, printerId, status])
   @@index([orderId])
 }
 
