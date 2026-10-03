@@ -249,6 +249,72 @@ async function refreshDocumentTotals(tx: Tx, documentId: string) {
   });
 }
 
+/** A stay invoice takes its money from its folio: the folio's payments are
+ * the invoice's payments, so paid, balance, status and the payments list
+ * always agree with the stay, whichever side a payment was taken on. */
+async function refreshStayInvoicePaid(client: Tx, documentId: string) {
+  const doc = await client.commercialDocument.findUnique({ where: { id: documentId } });
+  if (!doc || doc.source !== "HOTEL_STAY" || !doc.sourceRefId) return;
+  const sum = await client.folioPayment.aggregate({ where: { folioId: doc.sourceRefId }, _sum: { amount: true } });
+  const paidAmount = round2(Number(sum._sum.amount ?? 0));
+  const balance = Math.max(0, round2(Number(doc.total) - paidAmount));
+  const status = nextStatus(doc.type, Number(doc.total), paidAmount, doc.dueAt, doc.status);
+  await client.commercialDocument.update({ where: { id: doc.id }, data: { paidAmount, balance, status } });
+}
+
+async function refreshStayInvoices(tid: string, documentId?: string) {
+  const stay = await prisma.commercialDocument.findMany({
+    where: { tenantId: tid, source: "HOTEL_STAY", type: "INVOICE", ...(documentId ? { id: documentId } : {}) },
+    select: { id: true },
+  });
+  for (const d of stay) await refreshStayInvoicePaid(prisma, d.id);
+}
+
+/** Shows a stay invoice's payments from its folio, and says which stay it's for. */
+async function presentStayDocuments<T extends { source: string; sourceRefId: string | null; payments: unknown[] }>(documents: T[]) {
+  const folioIds = documents.filter((d) => d.source === "HOTEL_STAY" && d.sourceRefId).map((d) => d.sourceRefId as string);
+  const folios = folioIds.length ? await prisma.folio.findMany({
+    where: { id: { in: folioIds } },
+    select: {
+      id: true,
+      folioNo: true,
+      reservation: { select: { id: true, reservationNo: true, checkIn: true, checkOut: true, room: { select: { number: true } }, customer: { select: { firstName: true, lastName: true } } } },
+      payments: { orderBy: { createdAt: "asc" }, include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } } },
+    },
+  }) : [];
+  const byId = new Map(folios.map((f) => [f.id, f]));
+  return documents.map((d) => {
+    const folio = d.source === "HOTEL_STAY" && d.sourceRefId ? byId.get(d.sourceRefId) : undefined;
+    if (!folio) return { ...d, linkedStay: null };
+    const r = folio.reservation;
+    return {
+      ...d,
+      payments: folio.payments.map((p) => ({
+        id: p.id,
+        paymentNo: folio.folioNo,
+        kind: p.kind === "DEPOSIT" ? "DEPOSIT" : "PAYMENT",
+        paymentMethodId: p.paymentMethodId,
+        amount: p.amount,
+        reference: p.reference,
+        note: null,
+        paidAt: p.createdAt,
+        createdBy: p.createdBy,
+        transactionId: null,
+        paymentMethod: p.paymentMethod,
+      })),
+      linkedStay: {
+        reservationId: r.id,
+        reservationNo: r.reservationNo,
+        roomNumber: r.room.number,
+        folioNo: folio.folioNo,
+        checkIn: r.checkIn,
+        checkOut: r.checkOut,
+        guestName: `${r.customer.firstName} ${r.customer.lastName ?? ""}`.trim(),
+      },
+    };
+  });
+}
+
 commercialDocumentsRouter.get("/", async (req, res) => {
   const tid = tenantId(req);
   const query = z.object({
@@ -275,7 +341,8 @@ commercialDocumentsRouter.get("/", async (req, res) => {
       ],
     } : {}),
   };
-  const documents = await prisma.commercialDocument.findMany({ where, include, orderBy: { createdAt: "desc" } });
+  await refreshStayInvoices(tid);
+  const documents = await presentStayDocuments(await prisma.commercialDocument.findMany({ where, include, orderBy: { createdAt: "desc" } }));
   const summary = {
     total: documents.length,
     value: round2(documents.reduce((sum, d) => sum + Number(d.total), 0)),
@@ -431,12 +498,14 @@ commercialDocumentsRouter.get("/source-options", async (req, res) => {
 commercialDocumentsRouter.get("/source-links", async (req, res) => {
   const parsed = sourceLinksQuery.safeParse(req.query);
   if (!parsed.success) { res.status(400).json({ error: "Invalid source query", details: parsed.error.flatten() }); return; }
-  await syncTemporalStatuses(tenantId(req));
-  const documents = await prisma.commercialDocument.findMany({
-    where: { tenantId: tenantId(req), source: parsed.data.source, sourceRefId: parsed.data.sourceRefId },
+  const tid = tenantId(req);
+  await syncTemporalStatuses(tid);
+  await refreshStayInvoices(tid);
+  const documents = await presentStayDocuments(await prisma.commercialDocument.findMany({
+    where: { tenantId: tid, source: parsed.data.source, sourceRefId: parsed.data.sourceRefId },
     include,
     orderBy: { createdAt: "desc" },
-  });
+  }));
   res.json({ documents });
 });
 
@@ -647,10 +716,12 @@ commercialDocumentsRouter.post("/from-order", async (req, res) => {
 });
 
 commercialDocumentsRouter.get("/:id", async (req, res) => {
-  await syncTemporalStatuses(tenantId(req));
-  const document = await prisma.commercialDocument.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include });
+  const tid = tenantId(req);
+  await syncTemporalStatuses(tid);
+  await refreshStayInvoices(tid, req.params.id);
+  const document = await prisma.commercialDocument.findFirst({ where: { id: req.params.id, tenantId: tid }, include });
   if (!document) { res.status(404).json({ error: "Document not found" }); return; }
-  res.json({ document });
+  res.json({ document: (await presentStayDocuments([document]))[0] });
 });
 
 commercialDocumentsRouter.post("/", async (req, res) => {
@@ -857,6 +928,38 @@ commercialDocumentsRouter.post("/:id/payments", async (req, res) => {
   const reference = await checkedPaymentReference(prisma, tid, method, parsed.data.reference);
   if (document.type === "INVOICE" && Number(document.balance) > 0 && parsed.data.amount > Number(document.balance) + 0.01) {
     res.status(400).json({ error: "Payment cannot exceed the invoice balance" }); return;
+  }
+  if (document.source === "HOTEL_STAY" && document.sourceRefId) {
+    await refreshStayInvoicePaid(prisma, document.id);
+    const fresh = await prisma.commercialDocument.findUniqueOrThrow({ where: { id: document.id } });
+    if (parsed.data.amount > Number(fresh.balance) + 0.01) { res.status(400).json({ error: "Payment cannot exceed the invoice balance" }); return; }
+    const isDeposit = parsed.data.kind === "DEPOSIT";
+    const stayTransactionNo = await nextTransactionNo(tid);
+    await prisma.$transaction(async (tx) => {
+      const created = await tx.folioPayment.create({
+        data: { tenantId: tid, folioId: document.sourceRefId!, kind: isDeposit ? "DEPOSIT" : "SETTLEMENT", paymentMethodId: method.id, amount: parsed.data.amount, reference: reference ?? null, createdBy: req.userId },
+      });
+      await tx.transaction.create({
+        data: {
+          tenantId: tid,
+          transactionNo: stayTransactionNo,
+          direction: "IN",
+          source: isDeposit ? "FOLIO_DEPOSIT" : "FOLIO_SETTLEMENT",
+          amount: parsed.data.amount,
+          paymentMethodId: method.id,
+          reference: reference ?? null,
+          customerId: document.customerId,
+          locationId: document.locationId,
+          employeeId: req.userId,
+          description: `${document.documentNo} ${isDeposit ? "deposit" : "payment"} (stay)`,
+          sourceRefId: created.id,
+        },
+      });
+      await refreshStayInvoicePaid(tx as Tx, document.id);
+    });
+    const stayDocument = await prisma.commercialDocument.findUniqueOrThrow({ where: { id: document.id }, include });
+    res.status(201).json({ document: (await presentStayDocuments([stayDocument]))[0] });
+    return;
   }
   const paymentNo = await nextCommercialDocumentPaymentNo(tid);
   const transactionNo = await nextTransactionNo(tid);
