@@ -419,6 +419,16 @@ receptionRouter.get("/reservations/:id", async (req, res) => {
   res.json({ reservation: withCredit, totals: folioTotals(reservation.folio, await taxDefaults(tenantId(req))) });
 });
 
+// A desk whose location is switched off for room sales (Can Sell Rooms) can't
+// take a room booking, even when the signed-in employee is also assigned to
+// a location that can. Returns the message to show, or null when fine.
+async function deskSellsRoomsError(tid: string, locationId: string | null): Promise<string | null> {
+  if (!locationId) return null;
+  const location = await prisma.location.findFirst({ where: { id: locationId, tenantId: tid }, select: { name: true, canSellRooms: true } });
+  if (!location || location.canSellRooms) return null;
+  return `${location.name} isn't set up to sell rooms. Switch to a desk that does (such as Reception) before booking a guest.`;
+}
+
 receptionRouter.post("/reservations", async (req, res) => {
   const data = reservationSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "reservation", data.error.flatten()); return; }
@@ -433,6 +443,8 @@ receptionRouter.post("/reservations", async (req, res) => {
   ]);
   if (!customer || !room) { res.status(400).json({ error: "Choose a clean, vacant room and a customer from this property" }); return; }
   if (!available) { res.status(409).json({ error: "This room is already booked for those dates" }); return; }
+  const deskError = await deskSellsRoomsError(tid, actor.locationId);
+  if (deskError) { res.status(409).json({ error: deskError }); return; }
 
   const charge = await resolveRoomCharge(prisma, room, { rateId: fields.rateId, headcount: fields.adults + fields.children, quantityOverride }, fields.checkIn, fields.checkOut, await taxDefaults(tid));
   const reservation = await prisma.$transaction(async (tx) => {
@@ -503,6 +515,8 @@ receptionRouter.patch("/reservations/:id/check-in", async (req, res) => {
   const rateId = data.data.rateId ?? current.rateId;
   const charge = await resolveRoomCharge(prisma, current.room, { rateId, mealPlan: rateId ? undefined : mealPlan, headcount: current.adults + current.children, quantityOverride: data.data.quantityOverride }, current.checkIn, current.checkOut, await taxDefaults(tid));
   const actor = await resolveActor(tid, req);
+  const deskError = await deskSellsRoomsError(tid, actor.locationId);
+  if (deskError) { res.status(409).json({ error: deskError }); return; }
   const reservation = await prisma.$transaction(async (tx) => {
     await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_IN", mealPlan, rateId: charge.rateId, rateName: charge.rateName, updatedBy: req.userId } });
     await tx.room.update({ where: { id: current.roomId }, data: { status: "OCCUPIED" } });
@@ -1190,6 +1204,8 @@ receptionRouter.post("/groups", async (req, res, next) => {
     if (!billing) { res.status(400).json({ error: "Choose the billing customer from this property" }); return; }
     const prepared = await prepareGroupRooms(tid, data.data, data.data.rooms, billing.id);
     const actor = await resolveActor(tid, req);
+    const deskError = await deskSellsRoomsError(tid, actor.locationId);
+    if (deskError) throw Object.assign(new Error(deskError), { status: 409 });
     const groupNo = await nextGroupNo(tid);
     const numbers: { reservationNo: string; folioNo: string }[] = [];
     for (let i = 0; i < prepared.length; i++) numbers.push({ reservationNo: await nextReservationNo(tid), folioNo: await nextFolioNo(tid) });
@@ -1252,6 +1268,8 @@ receptionRouter.post("/groups/:id/rooms", async (req, res, next) => {
     if (!group) { res.status(404).json({ error: "Group not found" }); return; }
     const prepared = await prepareGroupRooms(tid, data.data, data.data.rooms, group.customerId);
     const actor = await resolveActor(tid, req);
+    const deskError = await deskSellsRoomsError(tid, actor.locationId);
+    if (deskError) throw Object.assign(new Error(deskError), { status: 409 });
     const numbers: { reservationNo: string; folioNo: string }[] = [];
     for (let i = 0; i < prepared.length; i++) numbers.push({ reservationNo: await nextReservationNo(tid), folioNo: await nextFolioNo(tid) });
     await prisma.$transaction((tx) => bookGroupRooms(tx, tid, actor, req.userId, group, prepared, { status: data.data.status, source: data.data.source, defaultTerms: data.data.terms, numbers }), GROUP_TX);
