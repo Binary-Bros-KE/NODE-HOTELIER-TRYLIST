@@ -104,7 +104,17 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
         createdAt: true,
         updatedAt: true,
         payments: { include: { paymentMethod: { select: { name: true } } } },
-        items: { select: { quantity: true, unitPrice: true, taxRate: true, taxMode: true, taxTreatment: true, addons: { select: { quantity: true, unitPrice: true } } } },
+        items: {
+          select: {
+            quantity: true, unitPrice: true, taxRate: true, taxMode: true, taxTreatment: true,
+            product: { select: { id: true, name: true } },
+            service: { select: { id: true, name: true } },
+            menuItem: { select: { id: true, name: true } },
+            variant: { select: { name: true } },
+            serviceVariant: { select: { name: true } },
+            addons: { select: { quantity: true, unitPrice: true } },
+          },
+        },
       },
       orderBy: { createdAt: "asc" },
     }),
@@ -297,6 +307,36 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       owing: meta.complimentary ? 0 : round2(Math.max(0, stayCharges - paid)),
     };
   }).sort((a, b) => a.checkIn.getTime() - b.checkIn.getTime());
+  // What exactly was sold, item by item, for the sections that show it -
+  // so a shift lists the actual products, services and food, not just the
+  // order they were rung up on. Priced at what was charged per line (before
+  // the order-level tax/discount split), which is what a person checking
+  // their shift would recognise.
+  type ItemRow = { name: string; quantity: number; total: number };
+  const itemMap = { food: new Map<string, ItemRow>(), products: new Map<string, ItemRow>(), services: new Map<string, ItemRow>() };
+  const addItem = (bucket: Map<string, ItemRow>, key: string, name: string, quantity: number, total: number) => {
+    const row = bucket.get(key) ?? { name, quantity: 0, total: 0 };
+    row.quantity += quantity; row.total += total;
+    bucket.set(key, row);
+  };
+  for (const o of orders) {
+    const bucket = o.channel === 'FOOD' ? itemMap.food : o.channel === 'PRODUCTS' ? itemMap.products : itemMap.services;
+    for (const item of o.items) {
+      const base = item.product?.name ?? item.service?.name ?? item.menuItem?.name ?? 'Item';
+      const variant = item.variant?.name ?? item.serviceVariant?.name ?? null;
+      const name = variant ? `${base} (${variant})` : base;
+      const key = `${item.product?.id ?? item.service?.id ?? item.menuItem?.id ?? name}|${variant ?? ""}`;
+      const addonsTotal = item.addons.reduce((s, a) => s + a.quantity * Number(a.unitPrice), 0);
+      addItem(bucket, key, name, item.quantity, round2(item.quantity * Number(item.unitPrice) + addonsTotal));
+    }
+  }
+  for (const line of folioLineSales) {
+    if (line.source !== 'SERVICE') continue;
+    addItem(itemMap.services, `folio|${line.label}`, line.label, Number(folioLines.find((f) => f.id === line.id)?.quantity ?? 1), line.total);
+  }
+  const itemsOf = (bucket: Map<string, ItemRow>) => [...bucket.values()].map((r) => ({ name: r.name, quantity: round2(r.quantity), total: round2(r.total) })).sort((a, b) => b.total - a.total);
+  const categorizedItems = { food: itemsOf(itemMap.food), products: itemsOf(itemMap.products), services: itemsOf(itemMap.services) };
+
   const categorized = { rooms: roomStays, food: [] as CategoryRow[], products: [] as CategoryRow[], services: [] as CategoryRow[], memberships: [] as CategoryRow[] };
   for (const o of sales) {
     const bucket = o.channel === "FOOD" ? categorized.food : o.channel === "PRODUCTS" ? categorized.products : categorized.services;
@@ -338,6 +378,7 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
     byPaymentMethod: byPaymentMethodRows,
     byCategory,
     categorizedSales: categorized,
+    categorizedItems,
     transactions: transactions.map((t) => ({
       id: t.id,
       transactionNo: t.transactionNo,
