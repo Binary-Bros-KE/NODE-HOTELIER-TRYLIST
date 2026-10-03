@@ -122,10 +122,14 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
         createdAt: true,
         folio: {
           select: {
+            id: true,
             folioNo: true,
             reservation: {
               select: {
                 reservationNo: true,
+                checkIn: true,
+                checkOut: true,
+                roomSaleType: true,
                 customer: { select: { firstName: true, lastName: true } },
                 room: { select: { number: true } },
               },
@@ -200,7 +204,11 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       source: line.source,
       reservationNo: line.folio.reservation.reservationNo,
       folioNo: line.folio.folioNo,
+      folioId: line.folio.id,
       roomNumber: line.folio.reservation.room.number,
+      checkIn: line.folio.reservation.checkIn,
+      checkOut: line.folio.reservation.checkOut,
+      complimentary: line.folio.reservation.roomSaleType === "COMPLIMENTARY",
       guestName: `${customer.firstName} ${customer.lastName ?? ""}`.trim(),
       createdAt: line.createdAt,
       total: gross,
@@ -244,7 +252,52 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
   // discount into one row) so a room charge and an in-folio service on the
   // same visit are never counted as the same thing. ----
   type CategoryRow = { id: string; label: string; detail: string | null; createdAt: Date; total: number };
-  const categorized = { rooms: [] as CategoryRow[], food: [] as CategoryRow[], products: [] as CategoryRow[], services: [] as CategoryRow[], memberships: [] as CategoryRow[] };
+  // One row per stay (folio), not per folio line: a guest's room charge, its
+  // discount and any ad-hoc line collapse into the stay they belong to, and
+  // the stay totals (charges, paid, owing) cover the whole stay, not just
+  // what this employee rang up in this shift.
+  type RoomStayRow = { id: string; reservationNo: string; guestName: string; roomNumber: string; checkIn: Date; checkOut: Date; nights: number; complimentary: boolean; soldThisShift: number; stayCharges: number; paid: number; owing: number };
+  const roomLines = folioLineSales.filter((l) => l.source !== "SERVICE");
+  const soldByFolio = new Map<string, number>();
+  const stayMeta = new Map<string, (typeof roomLines)[number]>();
+  for (const l of roomLines) {
+    soldByFolio.set(l.folioId, (soldByFolio.get(l.folioId) ?? 0) + l.total);
+    if (!stayMeta.has(l.folioId)) stayMeta.set(l.folioId, l);
+  }
+  const stayFolioIds = [...soldByFolio.keys()];
+  const stayFolios = stayFolioIds.length ? await prisma.folio.findMany({
+    where: { tenantId: tid, id: { in: stayFolioIds } },
+    select: {
+      id: true,
+      lineItems: { where: { source: { in: ["ROOM", "DISCOUNT", "AD_HOC"] } }, select: { amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true } },
+      payments: { select: { amount: true } },
+    },
+  }) : [];
+  const stayByFolio = new Map(stayFolios.map((f) => [f.id, f]));
+  const roomStays: RoomStayRow[] = stayFolioIds.map((folioId) => {
+    const meta = stayMeta.get(folioId)!;
+    const folio = stayByFolio.get(folioId);
+    const stayCharges = round2(computeOrderFinancials({
+      discount: 0,
+      items: (folio?.lineItems ?? []).map((l) => ({ quantity: Number(l.quantity), unitPrice: l.amount, addons: [], taxRate: l.taxRate, taxMode: l.taxMode, taxTreatment: l.taxTreatment })),
+    }, taxSettings).total);
+    const paid = round2((folio?.payments ?? []).reduce((s, p) => s + Number(p.amount), 0));
+    return {
+      id: folioId,
+      reservationNo: meta.reservationNo,
+      guestName: meta.guestName,
+      roomNumber: meta.roomNumber,
+      checkIn: meta.checkIn,
+      checkOut: meta.checkOut,
+      nights: Math.max(0, Math.round((meta.checkOut.getTime() - meta.checkIn.getTime()) / 864e5)),
+      complimentary: meta.complimentary,
+      soldThisShift: round2(soldByFolio.get(folioId) ?? 0),
+      stayCharges,
+      paid,
+      owing: meta.complimentary ? 0 : round2(Math.max(0, stayCharges - paid)),
+    };
+  }).sort((a, b) => a.checkIn.getTime() - b.checkIn.getTime());
+  const categorized = { rooms: roomStays, food: [] as CategoryRow[], products: [] as CategoryRow[], services: [] as CategoryRow[], memberships: [] as CategoryRow[] };
   for (const o of sales) {
     const bucket = o.channel === "FOOD" ? categorized.food : o.channel === "PRODUCTS" ? categorized.products : categorized.services;
     bucket.push({
@@ -256,8 +309,8 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
     });
   }
   for (const line of folioLineSales) {
-    const row: CategoryRow = { id: line.id, label: line.source === "SERVICE" ? line.label : `Room ${line.roomNumber}`, detail: `${line.guestName} (${line.reservationNo})`, createdAt: line.createdAt, total: line.total };
-    (line.source === "SERVICE" ? categorized.services : categorized.rooms).push(row);
+    if (line.source !== "SERVICE") continue;
+    categorized.services.push({ id: line.id, label: line.label, detail: `${line.guestName} (${line.reservationNo})`, createdAt: line.createdAt, total: line.total });
   }
   for (const t of incomingTransactions) {
     if (t.source !== "MEMBERSHIP_PAYMENT") continue;
@@ -265,7 +318,7 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
   }
   const sum = (rows: CategoryRow[]) => round2(rows.reduce((s, r) => s + r.total, 0));
   const byCategory = {
-    rooms: { total: sum(categorized.rooms), count: categorized.rooms.length },
+    rooms: { total: round2(roomStays.reduce((s, r) => s + r.soldThisShift, 0)), count: roomStays.length },
     food: { total: sum(categorized.food), count: categorized.food.length },
     products: { total: sum(categorized.products), count: categorized.products.length },
     services: { total: sum(categorized.services), count: categorized.services.length },
