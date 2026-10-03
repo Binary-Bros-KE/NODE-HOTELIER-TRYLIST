@@ -216,6 +216,12 @@ async function validateDocument(tid: string, userId: string | undefined, data: z
     const customer = await prisma.customer.findFirst({ where: { id: customerId, tenantId: tid, status: { not: "BLOCKED" } }, select: { id: true } });
     if (!customer) return { error: "Choose a valid customer" } as const;
   }
+  if (data.type === "QUOTATION") {
+    if (!data.locationId) return { location: null } as const;
+    const location = await prisma.location.findFirst({ where: { id: data.locationId, tenantId: tid } });
+    if (!location) return { error: "Choose a valid location" } as const;
+    return { location } as const;
+  }
   const resolved = await resolveEffectiveLocation(tid, userId, data.locationId ?? null);
   if ("error" in resolved) return resolved;
   return { location: resolved.location } as const;
