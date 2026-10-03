@@ -1206,6 +1206,7 @@ model Reservation {
   complimentaryReason String?
   discountType        RoomDiscountType?
   discountValue       Decimal               @default(0) @db.Decimal(12, 2)
+  discountBasis       RoomDiscountBasis     @default(TOTAL)
   discountReason      String?
 
   @@unique([tenantId, reservationNo])
@@ -1331,6 +1332,13 @@ enum RoomSaleType {
 enum RoomDiscountType {
   PERCENT
   AMOUNT
+}
+
+// Only meaningful for AMOUNT: TOTAL takes the amount off the whole stay,
+// PER_UNIT takes it off once for every unit (a person, a night).
+enum RoomDiscountBasis {
+  TOTAL
+  PER_UNIT
 }
 
 enum FolioLineSource {

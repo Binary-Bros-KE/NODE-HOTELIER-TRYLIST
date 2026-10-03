@@ -53,6 +53,9 @@ const roomTermsFields = {
   complimentaryReason: optionalText(255),
   discountType: z.preprocess(blankToUndefined, z.enum(["PERCENT", "AMOUNT"]).optional()),
   discountValue: z.preprocess(blankToUndefined, z.coerce.number().min(0).default(0)),
+  // Whether a fixed-amount discount comes off the whole stay or once per
+  // unit (per person, per night) - only meaningful for AMOUNT.
+  discountBasis: z.preprocess(blankToUndefined, z.enum(["TOTAL", "PER_UNIT"]).default("TOTAL")),
   discountReason: optionalText(255),
 };
 const roomTermsSchema = z.object(roomTermsFields).refine((v) => v.discountType !== "PERCENT" || v.discountValue <= 100, { message: "A percentage discount can't exceed 100%", path: ["discountValue"] });
@@ -184,9 +187,9 @@ function sameNairobiDay(a: Date, b: Date) {
 
 /** Terms as stored: complimentary ignores any discount, a paid room ignores
  * the complimentary reason, and a zero discount is no discount. */
-function normalizeTerms(t: { roomSaleType: "PAID" | "COMPLIMENTARY"; complimentaryReason?: string; discountType?: "PERCENT" | "AMOUNT"; discountValue: number; discountReason?: string }) {
+function normalizeTerms(t: { roomSaleType: "PAID" | "COMPLIMENTARY"; complimentaryReason?: string; discountType?: "PERCENT" | "AMOUNT"; discountValue: number; discountBasis?: "TOTAL" | "PER_UNIT"; discountReason?: string }) {
   if (t.roomSaleType === "COMPLIMENTARY") {
-    return { roomSaleType: "COMPLIMENTARY" as const, complimentaryReason: t.complimentaryReason ?? null, discountType: null, discountValue: 0, discountReason: null };
+    return { roomSaleType: "COMPLIMENTARY" as const, complimentaryReason: t.complimentaryReason ?? null, discountType: null, discountValue: 0, discountBasis: "TOTAL" as const, discountReason: null };
   }
   const discounted = Boolean(t.discountType) && t.discountValue > 0;
   return {
@@ -194,6 +197,7 @@ function normalizeTerms(t: { roomSaleType: "PAID" | "COMPLIMENTARY"; complimenta
     complimentaryReason: null,
     discountType: discounted ? t.discountType! : null,
     discountValue: discounted ? t.discountValue : 0,
+    discountBasis: discounted ? (t.discountBasis ?? "TOTAL") : "TOTAL" as const,
     discountReason: discounted ? t.discountReason ?? null : null,
   };
 }
@@ -212,6 +216,7 @@ async function syncRoomAdjustment(tx: Prisma.TransactionClient, tid: string, res
   const roomLines = reservation.folio.lineItems.filter((l) => l.source === "ROOM");
   const roomTotal = round2(roomLines.reduce((sum, l) => sum + Number(l.amount) * Number(l.quantity), 0));
   if (roomTotal <= 0) return;
+  const units = roomLines.reduce((sum, l) => sum + Number(l.quantity), 0);
   // The write-off is netted at the same tax settings as the room charges it
   // offsets (they're all the same room/type in the near-universal case), so
   // folioTotals' per-line tax math cancels the discounted share correctly
@@ -226,8 +231,10 @@ async function syncRoomAdjustment(tx: Prisma.TransactionClient, tid: string, res
     label = `Complimentary room ${reservation.room.number}${reservation.complimentaryReason ? ` — ${reservation.complimentaryReason}` : ""}`;
   } else if (reservation.discountType && Number(reservation.discountValue) > 0) {
     const value = Number(reservation.discountValue);
-    off = reservation.discountType === "PERCENT" ? round2(roomTotal * Math.min(value, 100) / 100) : Math.min(round2(value), roomTotal);
-    label = `Room discount — ${reservation.discountType === "PERCENT" ? `${value}%` : `KSh ${value.toLocaleString("en-KE")}`}${reservation.discountReason ? ` (${reservation.discountReason})` : ""}`;
+    const perUnit = reservation.discountType === "AMOUNT" && reservation.discountBasis === "PER_UNIT";
+    off = reservation.discountType === "PERCENT" ? round2(roomTotal * Math.min(value, 100) / 100) : Math.min(round2(perUnit ? value * units : value), roomTotal);
+    const amountText = `KSh ${value.toLocaleString("en-KE")}${perUnit ? " per unit" : ""}`;
+    label = `Room discount — ${reservation.discountType === "PERCENT" ? `${value}%` : amountText}${reservation.discountReason ? ` (${reservation.discountReason})` : ""}`;
   }
   if (off <= 0) return;
   await tx.folioLineItem.create({
@@ -433,8 +440,8 @@ receptionRouter.post("/reservations", async (req, res) => {
   const data = reservationSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "reservation", data.error.flatten()); return; }
   const tid = tenantId(req);
-  const { status, roomSaleType, complimentaryReason, discountType, discountValue, discountReason, quantityOverride, ...fields } = data.data;
-  const terms = normalizeTerms({ roomSaleType, complimentaryReason, discountType, discountValue, discountReason });
+  const { status, roomSaleType, complimentaryReason, discountType, discountValue, discountBasis, discountReason, quantityOverride, ...fields } = data.data;
+  const terms = normalizeTerms({ roomSaleType, complimentaryReason, discountType, discountValue, discountBasis, discountReason });
   const [customer, room, available, actor] = await Promise.all([
     prisma.customer.findFirst({ where: { id: fields.customerId, tenantId: tid } }),
     prisma.room.findFirst({ where: { id: fields.roomId, tenantId: tid, status: "VACANT", cleanliness: "CLEAN" }, include: { roomType: true } }),
