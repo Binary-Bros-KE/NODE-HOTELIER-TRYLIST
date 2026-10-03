@@ -123,7 +123,7 @@ function computeLines(lines: z.infer<typeof lineSchema>[], fallback: Awaited<Ret
     })),
   };
   const financials = computeOrderFinancials(order, fallback);
-  const computed = lines.map((line, index) => {
+  const computedLines = lines.map((line, index) => {
     const subtotal = round2(line.quantity * line.unitPrice);
     const effective = Math.max(0, subtotal - line.discount);
     const taxLine = financials.taxLineItems[index];
@@ -136,7 +136,17 @@ function computeLines(lines: z.infer<typeof lineSchema>[], fallback: Awaited<Ret
       sortOrder: index,
     };
   });
-  return { lines: computed, totals: financials };
+  // The subtotal is the full charge, and the discount sits below it, the way
+  // an invoice shows it: subtotal, less discount, net, tax, total. The
+  // financials already give the right total and tax after line discounts.
+  const computed = computedLines;
+  const totals = {
+    ...financials,
+    subtotal: round2(computed.reduce((sum, line) => sum + line.lineSubtotal, 0)),
+    discount: round2(computed.reduce((sum, line) => sum + line.discount, 0)),
+    net: round2(financials.total - financials.taxAmount),
+  };
+  return { lines: computed, totals };
 }
 
 function customerLabel(customer: { firstName: string; lastName: string | null; businessName?: string | null }) {
@@ -453,19 +463,44 @@ commercialDocumentsRouter.post("/from-folio", async (req, res) => {
   if (folio.lineItems.length === 0) { res.status(400).json({ error: "This stay has no charges to invoice" }); return; }
 
   const fallback = await taxDefaults(tid);
-  const lines = folio.lineItems.map((line) => ({
-    source: line.source === "ROOM" ? "ROOM_STAY" as const : line.source === "SERVICE" ? "SERVICE" as const : line.source === "POS_ORDER" ? "POS_ORDER" as const : "FOLIO" as const,
-    sourceRefId: line.id,
-    description: line.label,
-    details: line.source === "ROOM" ? `${reservation.room.number} - ${reservation.room.roomType.name}` : null,
-    quantity: Number(line.quantity) || 1,
-    unitLabel: null,
-    unitPrice: Number(line.amount) || 0,
-    discount: 0,
-    taxRate: Number(line.taxRate ?? fallback.taxRate),
-    taxMode: line.taxMode ?? fallback.taxMode,
-    taxTreatment: line.taxTreatment ?? fallback.taxTreatment,
-  }));
+  // A room discount is not a line of its own on the invoice: it comes off the
+  // room charge it belongs to, so the subtotal shows the full charge and the
+  // discount sits between subtotal and net, the way discounts always do.
+  const discountLines = folio.lineItems.filter((line) => line.source === "DISCOUNT");
+  const discountTotal = Math.abs(discountLines.reduce((sum, line) => sum + Number(line.amount) * Number(line.quantity), 0));
+  const roomLines = folio.lineItems.filter((line) => line.source === "ROOM");
+  const roomSubtotal = roomLines.reduce((sum, line) => sum + Number(line.amount) * Number(line.quantity), 0);
+  // Shares are worked out once, in order, so the last room line absorbs any
+  // rounding and the shares always add up to exactly the discount given.
+  const discountCap = Math.min(discountTotal, roomSubtotal);
+  const roomShares: number[] = [];
+  let allocated = 0;
+  roomLines.forEach((line, index) => {
+    const share = index === roomLines.length - 1
+      ? round2(discountCap - allocated)
+      : roomSubtotal > 0 ? round2(discountCap * (Number(line.amount) * Number(line.quantity)) / roomSubtotal) : 0;
+    allocated += share;
+    roomShares.push(share);
+  });
+  const discountReason = discountLines.map((line) => line.label.replace(/^Room discount — /, "")).join("; ");
+  const lines = folio.lineItems.filter((line) => line.source !== "DISCOUNT").map((line) => {
+    const roomIndex = line.source === "ROOM" ? roomLines.indexOf(line) : -1;
+    const discount = roomIndex >= 0 ? roomShares[roomIndex] : 0;
+    const detail = line.source === "ROOM" ? `${reservation.room.number} - ${reservation.room.roomType.name}${discount > 0 && discountReason ? ` · discount ${discountReason}` : ""}` : null;
+    return {
+      source: line.source === "ROOM" ? "ROOM_STAY" as const : line.source === "SERVICE" ? "SERVICE" as const : line.source === "POS_ORDER" ? "POS_ORDER" as const : "FOLIO" as const,
+      sourceRefId: line.id,
+      description: line.label,
+      details: detail,
+      quantity: Number(line.quantity) || 1,
+      unitLabel: null,
+      unitPrice: Number(line.amount) || 0,
+      discount,
+      taxRate: Number(line.taxRate ?? fallback.taxRate),
+      taxMode: line.taxMode ?? fallback.taxMode,
+      taxTreatment: line.taxTreatment ?? fallback.taxTreatment,
+    };
+  });
   const computed = computeLines(lines, fallback);
   const docNo = await nextInvoiceNo(tid);
   const paymentNos = await Promise.all(folio.payments.map(() => nextCommercialDocumentPaymentNo(tid)));
