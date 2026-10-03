@@ -483,18 +483,31 @@ commercialDocumentsRouter.post("/from-folio", async (req, res) => {
     roomShares.push(share);
   });
   const discountReason = discountLines.map((line) => line.label.replace(/^Room discount — /, "")).join("; ");
+  // A per-unit discount is a lower unit price: the room line shows the
+  // discounted price and the list price it came from. Anything else is a
+  // whole-stay discount, shown under the subtotal.
+  const perUnitDiscount = reservation.discountType === "AMOUNT" && reservation.discountBasis === "PER_UNIT" && discountTotal > 0;
   const lines = folio.lineItems.filter((line) => line.source !== "DISCOUNT").map((line) => {
     const roomIndex = line.source === "ROOM" ? roomLines.indexOf(line) : -1;
-    const discount = roomIndex >= 0 ? roomShares[roomIndex] : 0;
-    const detail = line.source === "ROOM" ? `${reservation.room.number} - ${reservation.room.roomType.name}${discount > 0 && discountReason ? ` · discount ${discountReason}` : ""}` : null;
+    const quantity = Number(line.quantity) || 1;
+    const listPrice = Number(line.amount) || 0;
+    const unitOff = perUnitDiscount && roomIndex >= 0 ? roomShares[roomIndex] / quantity : 0;
+    const unitPrice = perUnitDiscount && roomIndex >= 0 ? Math.max(0, round2(listPrice - unitOff)) : listPrice;
+    const discount = !perUnitDiscount && roomIndex >= 0 ? roomShares[roomIndex] : 0;
+    const roomDetail = `${reservation.room.number} - ${reservation.room.roomType.name}`;
+    const detail = line.source !== "ROOM"
+      ? null
+      : perUnitDiscount
+        ? `${roomDetail} · list price KSh ${listPrice.toLocaleString("en-KE")} per unit`
+        : `${roomDetail}${discount > 0 && discountReason ? ` · discount ${discountReason}` : ""}`;
     return {
       source: line.source === "ROOM" ? "ROOM_STAY" as const : line.source === "SERVICE" ? "SERVICE" as const : line.source === "POS_ORDER" ? "POS_ORDER" as const : "FOLIO" as const,
       sourceRefId: line.id,
       description: line.label,
       details: detail,
-      quantity: Number(line.quantity) || 1,
+      quantity,
       unitLabel: null,
-      unitPrice: Number(line.amount) || 0,
+      unitPrice,
       discount,
       taxRate: Number(line.taxRate ?? fallback.taxRate),
       taxMode: line.taxMode ?? fallback.taxMode,
