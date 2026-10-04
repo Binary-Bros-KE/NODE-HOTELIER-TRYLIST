@@ -227,10 +227,8 @@ async function syncRoomAdjustment(tx: Prisma.TransactionClient, tid: string, res
 async function applyRoomAdjustment(tx: Prisma.TransactionClient, tid: string, reservationId: string, by: string | undefined) {
   const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId }, include: { room: true, folio: { include: { lineItems: true } } } });
   if (!reservation.folio) return;
-  await tx.folioLineItem.deleteMany({ where: { folioId: reservation.folio.id, source: "DISCOUNT", sourceRefId: { in: ROOM_ADJUSTMENT_REFS } } });
   const roomLines = reservation.folio.lineItems.filter((l) => l.source === "ROOM");
   const roomTotal = round2(roomLines.reduce((sum, l) => sum + Number(l.amount) * Number(l.quantity), 0));
-  if (roomTotal <= 0) return;
   const units = roomLines.reduce((sum, l) => sum + Number(l.quantity), 0);
   // The write-off is netted at the same tax settings as the room charges it
   // offsets (they're all the same room/type in the near-universal case), so
@@ -240,21 +238,29 @@ async function applyRoomAdjustment(tx: Prisma.TransactionClient, tid: string, re
   let off = 0;
   let label = "";
   let ref = "ROOM_DISCOUNT";
-  if (reservation.roomSaleType === "COMPLIMENTARY") {
-    off = roomTotal;
-    ref = "ROOM_COMPLIMENTARY";
-    label = `Complimentary room ${reservation.room.number}${reservation.complimentaryReason ? ` — ${reservation.complimentaryReason}` : ""}`;
-  } else if (reservation.discountType && Number(reservation.discountValue) > 0) {
-    const value = Number(reservation.discountValue);
-    const perUnit = reservation.discountType === "AMOUNT" && reservation.discountBasis === "PER_UNIT";
-    off = reservation.discountType === "PERCENT" ? round2(roomTotal * Math.min(value, 100) / 100) : Math.min(round2(perUnit ? value * units : value), roomTotal);
-    const amountText = `KSh ${value.toLocaleString("en-KE")}${perUnit ? " per unit" : ""}`;
-    label = `Room discount — ${reservation.discountType === "PERCENT" ? `${value}%` : amountText}${reservation.discountReason ? ` (${reservation.discountReason})` : ""}`;
+  if (roomTotal > 0) {
+    if (reservation.roomSaleType === "COMPLIMENTARY") {
+      off = roomTotal;
+      ref = "ROOM_COMPLIMENTARY";
+      label = `Complimentary room ${reservation.room.number}${reservation.complimentaryReason ? ` — ${reservation.complimentaryReason}` : ""}`;
+    } else if (reservation.discountType && Number(reservation.discountValue) > 0) {
+      const value = Number(reservation.discountValue);
+      const perUnit = reservation.discountType === "AMOUNT" && reservation.discountBasis === "PER_UNIT";
+      off = reservation.discountType === "PERCENT" ? round2(roomTotal * Math.min(value, 100) / 100) : Math.min(round2(perUnit ? value * units : value), roomTotal);
+      const amountText = `KSh ${value.toLocaleString("en-KE")}${perUnit ? " per unit" : ""}`;
+      label = `Room discount — ${reservation.discountType === "PERCENT" ? `${value}%` : amountText}${reservation.discountReason ? ` (${reservation.discountReason})` : ""}`;
+    }
   }
-  if (off <= 0) return;
+  // Posted as the change from what the folio already carries, on the day the
+  // change happens. Rewriting the whole discount would date the entire stay's
+  // write-off to today and make a complimentary extension look like a negative sale.
+  const existing = await tx.folioLineItem.findMany({ where: { folioId: reservation.folio.id, source: "DISCOUNT", sourceRefId: { in: ROOM_ADJUSTMENT_REFS } }, select: { amount: true, quantity: true } });
+  const currentOff = round2(-existing.reduce((sum, l) => sum + Number(l.amount) * Number(l.quantity), 0));
+  const delta = round2(off - currentOff);
+  if (Math.abs(delta) < 0.01 || !roomTax) return;
   await tx.folioLineItem.create({
     data: {
-      tenantId: tid, folioId: reservation.folio.id, source: "DISCOUNT", label, amount: -off, quantity: 1, sourceRefId: ref, createdBy: by,
+      tenantId: tid, folioId: reservation.folio.id, source: "DISCOUNT", label: off > 0 ? label : "Room discount adjusted", amount: -delta, quantity: 1, sourceRefId: ref, createdBy: by,
       taxRate: roomTax.taxRate, taxMode: roomTax.taxMode, taxTreatment: roomTax.taxTreatment,
     },
   });
