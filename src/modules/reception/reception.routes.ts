@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Prisma, ReservationActivityAction } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
+import { syncRoomBilledOrderPayments } from "../../lib/roomBilledOrders.js";
 import { requireModule, hasPermission } from "../../middleware/tenantContext.js";
 import { nextCustomerNo, nextReservationNo, nextFolioNo, nextTransactionNo, nextGroupNo } from "../../lib/sequence.js";
 import { resolveActorLocationWithHint } from "../../lib/location.js";
@@ -818,6 +819,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
     if (data.data.amount > 0) {
       const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: current.folio!.id, kind: "SETTLEMENT", paymentMethodId: data.data.paymentMethodId!, amount: data.data.amount, reference: resolvedPayment?.reference, createdBy: req.userId } });
       await syncStayInvoicesForFolio(tx, created.folioId);
+      await syncRoomBilledOrderPayments(tx, created.folioId);
       await tx.transaction.create({
         data: {
           tenantId: tid,
@@ -940,6 +942,7 @@ receptionRouter.post("/reservations/:id/folio/charges", async (req, res) => {
       },
     });
     await syncStayInvoicesForFolio(tx, reservation.folio!.id);
+    await syncRoomBilledOrderPayments(tx, reservation.folio!.id);
     await logActivity(tx, tid, reservation.id, "CHARGE_ADDED", `Charge added — ${label}`, actor);
     return created;
   });
@@ -957,6 +960,7 @@ receptionRouter.delete("/reservations/:id/folio/charges/:lineItemId", async (req
   await prisma.$transaction(async (tx) => {
     await tx.folioLineItem.delete({ where: { id: lineItem.id } });
     await syncStayInvoicesForFolio(tx, reservation.folio!.id);
+    await syncRoomBilledOrderPayments(tx, reservation.folio!.id);
     await logActivity(tx, tid, reservation.id, "CHARGE_REMOVED", `Charge removed — ${lineItem.label}`, actor);
   });
   res.status(204).send();
@@ -983,6 +987,7 @@ receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
     await syncStayInvoicesForFolio(tx, created.folioId);
+    await syncRoomBilledOrderPayments(tx, created.folioId);
     await tx.transaction.create({
       data: {
         tenantId: tid,
@@ -1059,6 +1064,7 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
     await syncStayInvoicesForFolio(tx, created.folioId);
+    await syncRoomBilledOrderPayments(tx, created.folioId);
     await tx.transaction.create({
       data: {
         tenantId: tid,
@@ -1448,6 +1454,7 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
         const reservation = byId.get(alloc.roomId)!;
         const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", paymentMethodId: alloc.paymentMethodId, amount: alloc.amount, reference: alloc.reference, createdBy: req.userId } });
         await syncStayInvoicesForFolio(tx, created.folioId);
+        await syncRoomBilledOrderPayments(tx, created.folioId);
         await tx.transaction.create({
           data: {
             tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount, locationId: await folioLocationId(tx, created.folioId),
@@ -1511,6 +1518,7 @@ receptionRouter.post("/groups/:id/credit-payments", async (req, res, next) => {
         const reservation = byId.get(alloc.roomId)!;
         const created = await tx.folioPayment.create({ data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", paymentMethodId: alloc.paymentMethodId, amount: alloc.amount, reference: alloc.reference, createdBy: req.userId } });
         await syncStayInvoicesForFolio(tx, created.folioId);
+        await syncRoomBilledOrderPayments(tx, created.folioId);
         await tx.transaction.create({
           data: {
             tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount, locationId: await folioLocationId(tx, created.folioId),

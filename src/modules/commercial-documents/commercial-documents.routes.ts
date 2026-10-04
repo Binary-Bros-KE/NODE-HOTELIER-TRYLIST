@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { syncRoomBilledOrderPayments } from "../../lib/roomBilledOrders.js";
 import { z } from "zod";
 
 import { prisma } from "../../lib/prisma.js";
@@ -976,6 +977,7 @@ commercialDocumentsRouter.post("/:id/payments", async (req, res) => {
       const created = await tx.folioPayment.create({
         data: { tenantId: tid, folioId: document.sourceRefId!, kind: isDeposit ? "DEPOSIT" : "SETTLEMENT", paymentMethodId: method.id, amount: parsed.data.amount, reference: reference ?? null, createdBy: req.userId },
       });
+      await syncRoomBilledOrderPayments(tx, document.sourceRefId!);
       await tx.transaction.create({
         data: {
           tenantId: tid,
