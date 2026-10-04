@@ -350,6 +350,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
           folio: { select: { reservation: { select: {
             locationId: true, location: { select: { name: true } },
             customerId: true, customer: { select: { firstName: true, lastName: true } },
+            roomSaleType: true,
           } } } },
         },
       }),
@@ -362,6 +363,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       locationName: f.folio.reservation.location?.name ?? null,
       customerId: f.folio.reservation.customerId,
       customerName: fullName(f.folio.reservation.customer),
+      roomSaleType: f.folio.reservation.roomSaleType,
     }]));
     const roomRevenueLines = roomRevenueFolioIds.length ? await prisma.folioLineItem.findMany({
       where: { tenantId: tid, folioId: { in: roomRevenueFolioIds }, source: { in: ["ROOM", "DISCOUNT"] } },
@@ -485,6 +487,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const creditCount = new Set(creditEntries.map((e) => e.orderId ?? e.folioId)).size;
     const roomSalesValue = round2([...linesByFolio(roomRevenueLines).values()].reduce((sum, lines) => sum + folioLinesFinancials(lines, tax).total, 0));
     const roomSalesCount = new Set(roomRevenueLines.filter((l) => l.source === "ROOM").map((l) => l.folioId)).size;
+    const roomGrossLines = roomRevenueLines.filter((l) => l.source === "ROOM" && roomFolioAttribution.get(l.folioId)?.roomSaleType !== "COMPLIMENTARY");
+    const roomGross = round2([...linesByFolio(roomGrossLines).values()].reduce((sum, lines) => sum + folioLinesFinancials(lines, tax).total, 0));
     const roomDiscountsGiven = round2(Math.abs(roomRevenueLines.filter((l) => l.source === "DISCOUNT").reduce((s, l) => s + Number(l.amount) * Number(l.quantity), 0)));
     for (const lines of linesByFolio(roomRevenueLines).values()) {
       const fin = folioLinesFinancials(lines, tax);
@@ -554,9 +558,13 @@ reportsRouter.get("/sales", async (req, res, next) => {
 
     // ---- Net Revenue / Net Profit: everything sold this period across POS, Rooms and Service
     // Center membership payments, less the cost of goods sold (rooms and memberships carry none). ----
-    const totalSoldValue = round2(completedSalesValue + roomSalesValue + serviceCenterCash);
-    const netRevenue = round2(totalSoldValue - cogsTotal);
-    const netProfit = round2(netRevenue - totalExpenses);
+    // Total Revenue is everything sold across POS, rooms and memberships, gross
+    // (before discounts), complimentary excluded, paid or not. Net Revenue is
+    // what's left after the cost of goods sold and every expense.
+    const grossPosSales = round2(completedSalesValue + discountsGiven);
+    const totalSoldValue = round2(grossPosSales + roomGross + serviceCenterCash);
+    const netRevenue = round2(totalSoldValue - cogsTotal - totalExpenses);
+    const netProfit = netRevenue;
 
     // ---- Cards ----
     const transactionsCount = completedOrders.length;
@@ -699,18 +707,20 @@ reportsRouter.get("/sales", async (req, res, next) => {
       top: creditorSuppliers.slice(0, 15).map((s) => ({ id: s.id, name: s.name, balance: round2(Number(s.balance)) })),
     };
 
-    const expectedProfit = round2(netProfit + debtors.total - creditors.total);
+    // Sales are already counted when sold, so amounts still owed are in the profit
+    // above and aren't added again. Unpaid supplier bills aren't expenses until stock is sold.
+    const expectedProfit = netProfit;
 
     res.json({
       range: { period, start: start.toISOString(), end: end.toISOString() },
-      cards: { totalRevenue, netRevenue, totalExpenses, netProfit, capitalInvested, transactions: transactionsCount, averageSale, itemsSold, menuOrdersCompleted },
+      cards: { totalRevenue: totalSoldValue, netRevenue, totalExpenses, netProfit, capitalInvested, transactions: transactionsCount, averageSale, itemsSold, menuOrdersCompleted },
       revenueBreakdown: {
         posSalesCash, folioDepositsCash, folioSettlementsCash, serviceCenterCash, totalRevenue,
         taxCollected, discountsGiven,
         complimentaryValue, complimentaryCogs,
         creditGiven, creditCount, creditRepaymentsCash,
         roomSalesValue, roomSalesCount, roomDiscountsGiven,
-        completedSalesValue, totalSoldValue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
+        completedSalesValue, totalSoldValue, grossPosSales, roomGross, cashCollected: totalRevenue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
         serviceCenterExcludedByLocationFilter: !!locationId,
         expensesOnly, salariesPaid,
       },
