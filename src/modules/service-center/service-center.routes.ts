@@ -481,13 +481,19 @@ serviceCenterRouter.post("/membership-payments", async (req, res) => {
   }
   const reference = await resolveMembershipPaymentReference(tid, resolved.paymentMethod, parsed.data.reference);
   const paidAt = parsed.data.paidAt ?? new Date();
+  // Location: an employee pinned to one location is always recorded there; one
+  // pinned to several must pick one of theirs; one with none can pick any.
+  const recorder = await prisma.employee.findFirst({ where: { id: req.userId, tenantId: tid }, select: { defaultLocationId: true, locations: { select: { id: true } } } });
+  const assigned = (recorder?.locations ?? []).map((l) => l.id);
   let locationId: string | null = null;
-  if (parsed.data.locationId) {
+  if (assigned.length === 1) {
+    locationId = assigned[0];
+  } else if (parsed.data.locationId) {
+    if (assigned.length && !assigned.includes(parsed.data.locationId)) { res.status(403).json({ error: "You can only record payments at your own locations" }); return; }
     const location = await prisma.location.findFirst({ where: { id: parsed.data.locationId, tenantId: tid }, select: { id: true } });
     if (!location) { res.status(400).json({ error: "Location not found" }); return; }
     locationId = location.id;
   } else {
-    const recorder = await prisma.employee.findFirst({ where: { id: req.userId, tenantId: tid }, select: { defaultLocationId: true } });
     locationId = recorder?.defaultLocationId ?? null;
   }
   if (parsed.data.termEndsAt && parsed.data.termEndsAt <= paidAt) {

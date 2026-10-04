@@ -612,7 +612,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
       const bucket = byMethodMap.get(key) ?? { name: t.paymentMethod?.name ?? "Unknown", count: 0, total: 0 };
       bucket.count += 1; bucket.total += Number(t.amount);
       byMethodMap.set(key, bucket);
-      if (t.location?.name) methodLocations.set(key, new Set([...(methodLocations.get(key) ?? []), t.location.name]));
+      // A transaction with no location (e.g. a room deposit) is labelled, not hidden.
+      methodLocations.set(key, new Set([...(methodLocations.get(key) ?? []), t.location?.name ?? "No location"]));
     }
     // Credit and complimentary sales never produce a Transaction row (nothing
     // was collected), so without adding them explicitly here they'd be
