@@ -16,6 +16,12 @@ import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 import { nairobiParts } from "../../lib/shifts.js";
 
 export const receptionRouter = Router();
+
+/** The location a folio's stay belongs to, so its money rows report under that location. */
+async function folioLocationId(client: Pick<typeof prisma, "folio">, folioId: string): Promise<string | null> {
+  const folio = await client.folio.findUnique({ where: { id: folioId }, select: { reservation: { select: { locationId: true } } } });
+  return folio?.reservation.locationId ?? null;
+}
 receptionRouter.use(requireModule("RESERVATIONS"));
 
 const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
@@ -818,6 +824,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
           transactionNo: transactionNo!,
           direction: "IN",
           source: "FOLIO_SETTLEMENT",
+          locationId: await folioLocationId(tx, current.folio!.id),
           amount: data.data.amount,
           paymentMethodId: data.data.paymentMethodId!,
           reference: resolvedPayment?.reference,
@@ -982,6 +989,7 @@ receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
         transactionNo,
         direction: "IN",
         source: "FOLIO_DEPOSIT",
+        locationId: await folioLocationId(tx, created.folioId),
         amount: data.data.amount,
         paymentMethodId: data.data.paymentMethodId,
         reference: resolvedPayment.reference,
@@ -1057,6 +1065,7 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
         transactionNo,
         direction: "IN",
         source: "FOLIO_SETTLEMENT",
+        locationId: await folioLocationId(tx, created.folioId),
         amount: data.data.amount,
         paymentMethodId: data.data.paymentMethodId,
         reference: resolvedPayment.reference,
@@ -1441,7 +1450,7 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
         await syncStayInvoicesForFolio(tx, created.folioId);
         await tx.transaction.create({
           data: {
-            tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount,
+            tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount, locationId: await folioLocationId(tx, created.folioId),
             paymentMethodId: alloc.paymentMethodId, reference: alloc.reference, customerId: group.customerId, employeeId: req.userId,
             description: `Group checkout ${group.groupNo} — ${reservation.reservationNo}`, sourceRefId: created.id,
           },
@@ -1504,7 +1513,7 @@ receptionRouter.post("/groups/:id/credit-payments", async (req, res, next) => {
         await syncStayInvoicesForFolio(tx, created.folioId);
         await tx.transaction.create({
           data: {
-            tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount,
+            tenantId: tid, transactionNo: transactionNos[index], direction: "IN", source: "FOLIO_SETTLEMENT", amount: alloc.amount, locationId: await folioLocationId(tx, created.folioId),
             paymentMethodId: alloc.paymentMethodId, reference: alloc.reference, customerId: group.customerId, employeeId: req.userId,
             description: `Group credit payment ${group.groupNo} — ${reservation.reservationNo}`, sourceRefId: created.id,
           },
