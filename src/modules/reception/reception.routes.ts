@@ -110,6 +110,7 @@ const reservationUpdateSchema = z.object({
 const cancelSchema = z.object({ cancellationReason: z.enum(CANCELLATION_REASONS), cancellationNotes: optionalText(500) });
 const checkInSchema = z.object({ mealPlan: z.enum(MEAL_PLANS).optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional(), adults: z.coerce.number().int().min(1).optional(), children: z.coerce.number().int().min(0).optional() }).default({});
 const extendSchema = z.object({ checkOut: z.coerce.date(), quantityOverride: z.coerce.number().positive().optional() });
+const shortenSchema = z.object({ checkOut: z.coerce.date() });
 const roomChargeSchema = z.object({ roomId: z.string().cuid().optional(), rateId: z.string().trim().min(1).optional(), quantityOverride: z.coerce.number().positive().optional() }).default({});
 const roomChangeSchema = z.object({
   roomId: z.string().cuid(),
@@ -640,6 +641,68 @@ receptionRouter.patch("/reservations/:id/no-show", async (req, res) => {
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation });
+});
+
+/** Admin or supervisor only: pulls a checked-in stay's check-out date back, for a
+ * stay booked too long by mistake. The room charges are trimmed from the last night
+ * backwards, the room discount is re-applied to the shorter stay, and the folio
+ * balance must still be covered by what's been paid. */
+receptionRouter.patch("/reservations/:id/shorten", async (req, res) => {
+  const data = shortenSchema.safeParse(req.body);
+  if (!data.success) { invalid(res, "check-out date", data.error.flatten()); return; }
+  const tid = tenantId(req);
+  const requester = await prisma.employee.findFirst({ where: { id: req.userId, tenantId: tid }, select: { isSupervisor: true, role: { select: { name: true } } } });
+  if (!(requester?.role?.name === "Super Admin" || requester?.isSupervisor)) { res.status(403).json({ error: "Only an admin or supervisor can shorten a stay" }); return; }
+  const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { folio: true } });
+  if (!current) { res.status(404).json({ error: "Reservation not found" }); return; }
+  if (current.status !== "CHECKED_IN") { res.status(409).json({ error: "Only a checked-in stay can be shortened" }); return; }
+  if (!current.folio) { res.status(409).json({ error: "This stay has no folio to adjust" }); return; }
+  const newCheckOut = data.data.checkOut;
+  if (newCheckOut <= current.checkIn) { res.status(400).json({ error: "Check-out must be after check-in" }); return; }
+  if (newCheckOut >= current.checkOut) { res.status(400).json({ error: "New check-out must be earlier than the current one" }); return; }
+  const removeNights = Math.round((current.checkOut.getTime() - newCheckOut.getTime()) / 86_400_000);
+  if (removeNights < 1) { res.status(400).json({ error: "Choose a check-out at least one night earlier" }); return; }
+
+  const roomLines = await prisma.folioLineItem.findMany({ where: { folioId: current.folio.id, source: "ROOM" }, orderBy: { createdAt: "desc" }, select: { id: true, quantity: true } });
+  const nightsOnFolio = roomLines.reduce((sum, line) => sum + Number(line.quantity), 0);
+  if (removeNights >= nightsOnFolio) { res.status(409).json({ error: "The folio has no nights left after this change" }); return; }
+
+  // Trim from the most recent charge backwards: whole lines go, the last one is cut down.
+  const toDelete: string[] = [];
+  const toTrim: { id: string; quantity: number }[] = [];
+  let nightsLeft = removeNights;
+  for (const line of roomLines) {
+    if (nightsLeft <= 0) break;
+    const quantity = Number(line.quantity);
+    if (quantity <= nightsLeft) { toDelete.push(line.id); nightsLeft -= quantity; }
+    else { toTrim.push({ id: line.id, quantity: quantity - nightsLeft }); nightsLeft = 0; }
+  }
+
+  const actor = await resolveActor(tid, req);
+  try {
+    const reservation = await prisma.$transaction(async (tx) => {
+      if (toDelete.length) await tx.folioLineItem.deleteMany({ where: { id: { in: toDelete } } });
+      for (const line of toTrim) await tx.folioLineItem.update({ where: { id: line.id }, data: { quantity: line.quantity } });
+      await tx.reservation.update({ where: { id: current.id }, data: { checkOut: newCheckOut, updatedBy: req.userId } });
+      await syncRoomAdjustment(tx, tid, current.id, req.userId);
+
+      const [lines, paid] = await Promise.all([
+        tx.folioLineItem.findMany({ where: { folioId: current.folio!.id }, select: { amount: true, quantity: true } }),
+        tx.folioPayment.aggregate({ where: { folioId: current.folio!.id }, _sum: { amount: true } }),
+      ]);
+      const charged = lines.reduce((sum, line) => sum + Number(line.amount) * Number(line.quantity), 0);
+      const paidTotal = Number(paid._sum.amount ?? 0);
+      if (paidTotal - charged > 0.01) {
+        throw Object.assign(new Error(`The guest has paid ${paidTotal.toFixed(2)} but the shorter stay only comes to ${charged.toFixed(2)}. Refund the difference before shortening.`), { status: 409 });
+      }
+      await logActivity(tx, tid, current.id, "UPDATED", `Check-out moved from ${current.checkOut.toLocaleDateString("en-KE")} to ${newCheckOut.toLocaleDateString("en-KE")} (${removeNights} night${removeNights === 1 ? "" : "s"} removed)`, actor);
+      return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
+    });
+    res.json({ reservation });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    throw error;
+  }
 });
 
 receptionRouter.patch("/reservations/:id/extend", async (req, res) => {
