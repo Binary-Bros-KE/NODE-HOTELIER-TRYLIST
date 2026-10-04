@@ -1856,6 +1856,112 @@ reportsRouter.get("/purchases", async (req, res, next) => {
 });
 
 // ============================================================================
+// Stock Movement Summary - per product and location, for the period: opening
+// stock, what came in, what went out, adjustments, net change and closing.
+// Read straight from the stock ledger: each movement records the balance
+// before and after it, so opening and closing are exact, and the summary
+// checks itself (opening + net change must equal closing).
+// ============================================================================
+const STOCK_IN_TYPES = ["OPENING_STOCK", "PURCHASE", "TRANSFER_IN", "RETURN", "BORROWED_IN", "RETURNED_BORROWED_STOCK", "LOAN_RETURNED"];
+const STOCK_OUT_TYPES = ["SALE", "TRANSFER_OUT", "ROOM_CONSUMPTION", "DAMAGE_LOSS", "LENT_OUT"];
+const STOCK_ADJUST_TYPES = ["ADJUSTMENT"];
+
+reportsRouter.get("/stock-movements", async (req, res, next) => {
+  try {
+    const query = salesQuerySchema.safeParse(req.query);
+    if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
+    const { period, date, from, to, locationId } = query.data;
+    const tid = tenantId(req);
+    const startHour = await businessDayStartHourFor(tid);
+    const { start, end } = resolveSalesRange(period, date, from, to, startHour);
+    const scope = locationId ? { locationId } : {};
+
+    const [inPeriod, beforePeriod] = await Promise.all([
+      prisma.inventoryMovement.findMany({
+        where: { tenantId: tid, occurredAt: { gte: start, lte: end }, ...scope },
+        include: {
+          product: { select: { id: true, name: true, sku: true, unit: true, packSize: true, packLabel: true } },
+          location: { select: { id: true, name: true } },
+          employee: { select: { firstName: true, lastName: true } },
+        },
+        orderBy: [{ occurredAt: "asc" }, { createdAt: "asc" }],
+      }),
+      // The last balance of each product at each location before the period, for
+      // the opening figure of anything that didn't move inside it.
+      prisma.inventoryMovement.findMany({
+        where: { tenantId: tid, occurredAt: { lt: start }, ...scope },
+        select: { productId: true, locationId: true, balanceAfter: true },
+        orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
+        distinct: ["productId", "locationId"],
+      }),
+    ]);
+
+    const lastBefore = new Map(beforePeriod.map((m) => [`${m.productId}|${m.locationId}`, Number(m.balanceAfter ?? 0)]));
+    type Row = {
+      productId: string; name: string; sku: string | null; unit: string; packSize: number | null; packLabel: string | null;
+      locationId: string; locationName: string; opening: number; received: number; issued: number; adjustments: number;
+      net: number; closing: number; reconciles: boolean; movements: number;
+    };
+    const rows = new Map<string, { row: Row; firstBefore: number | null; lastAfter: number | null }>();
+    for (const m of inPeriod) {
+      const key = `${m.productId}|${m.locationId}`;
+      const quantity = Number(m.quantity);
+      const entry = rows.get(key) ?? {
+        row: {
+          productId: m.product.id, name: m.product.name, sku: m.product.sku, unit: m.product.unit,
+          packSize: m.product.packSize == null ? null : Number(m.product.packSize), packLabel: m.product.packLabel,
+          locationId: m.location.id, locationName: m.location.name,
+          opening: 0, received: 0, issued: 0, adjustments: 0, net: 0, closing: 0, reconciles: true, movements: 0,
+        },
+        firstBefore: null,
+        lastAfter: null,
+      };
+      if (entry.firstBefore == null && entry.row.movements === 0) {
+        entry.firstBefore = m.balanceBefore != null ? Number(m.balanceBefore) : (lastBefore.get(key) ?? 0);
+      }
+      if (STOCK_IN_TYPES.includes(m.type)) entry.row.received += quantity;
+      else if (STOCK_OUT_TYPES.includes(m.type)) entry.row.issued += quantity;
+      else if (STOCK_ADJUST_TYPES.includes(m.type)) entry.row.adjustments += quantity;
+      entry.row.net += quantity;
+      entry.row.movements += 1;
+      entry.lastAfter = m.balanceAfter != null ? Number(m.balanceAfter) : null;
+      rows.set(key, entry);
+    }
+    const summary = [...rows.values()].map(({ row, firstBefore, lastAfter }) => {
+      const opening = firstBefore ?? 0;
+      const closing = lastAfter ?? round3(opening + row.net);
+      return {
+        ...row,
+        opening: round3(opening), received: round3(row.received), issued: round3(row.issued), adjustments: round3(row.adjustments),
+        net: round3(row.net), closing: round3(closing),
+        reconciles: Math.abs(opening + row.net - closing) < 0.001,
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name) || a.locationName.localeCompare(b.locationName));
+
+    res.json({
+      range: { period, start: start.toISOString(), end: end.toISOString() },
+      cards: {
+        products: new Set(summary.map((r) => r.productId)).size,
+        locations: new Set(summary.map((r) => r.locationId)).size,
+        movements: inPeriod.length,
+        unreconciled: summary.filter((r) => !r.reconciles).length,
+      },
+      rows: summary,
+      movements: inPeriod.map((m) => ({
+        id: m.id, occurredAt: m.occurredAt.toISOString(), productName: m.product.name, sku: m.product.sku, unit: m.product.unit,
+        packSize: m.product.packSize == null ? null : Number(m.product.packSize), packLabel: m.product.packLabel,
+        locationName: m.location.name, type: m.type, quantity: Number(m.quantity),
+        balanceAfter: m.balanceAfter == null ? null : Number(m.balanceAfter), note: m.note, by: m.employee ? fullName(m.employee) : null,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const round3 = (n: number) => Math.round((n + Number.EPSILON) * 1000) / 1000;
+
+// ============================================================================
 // Assets Report - what the property owns and what it is worth (a snapshot of
 // the register), plus what changed in the period: additions, purchases (capital
 // invested, not expense), write-offs, count corrections, and data gaps.
