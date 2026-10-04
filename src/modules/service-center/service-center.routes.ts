@@ -72,6 +72,9 @@ const membershipPaymentSchema = z.object({
   status: paymentStatus.default("PAID"),
   reference: z.string().trim().max(120).nullable().optional(),
   paidAt: z.coerce.date().nullable().optional(),
+  // The location that took the payment. Defaults to the recording employee's
+  // default location, so a gym sale is reported under the Gym.
+  locationId: z.string().trim().min(1).nullable().optional(),
   // Overrides the auto-computed renewal end date (see nextTermEndsAt) - lets
   // staff correct the term when recording a late payment well after the
   // fact, instead of being stuck with whatever "now" happens to be at that
@@ -447,7 +450,7 @@ async function resolveMembershipPaymentReference(tid: string, method: { name: st
 async function syncPaymentLedger(
   tx: Prisma.TransactionClient,
   tid: string,
-  payment: { id: string; status: string; amount: unknown; paymentMethodId: string; reference: string | null; membershipId: string },
+  payment: { id: string; status: string; amount: unknown; paymentMethodId: string; reference: string | null; membershipId: string; locationId?: string | null },
   customerId: string,
   transactionNo: string | null,
   userId: string | undefined,
@@ -457,7 +460,7 @@ async function syncPaymentLedger(
     if (existing) await tx.transaction.update({ where: { id: existing.id }, data: { status: "VOIDED" } });
     return;
   }
-  const fields = { amount: Number(payment.amount), paymentMethodId: payment.paymentMethodId, reference: payment.reference, customerId, status: "COMPLETE" as const };
+  const fields = { amount: Number(payment.amount), paymentMethodId: payment.paymentMethodId, reference: payment.reference, customerId, locationId: payment.locationId ?? null, status: "COMPLETE" as const };
   if (existing) { await tx.transaction.update({ where: { id: existing.id }, data: fields }); return; }
   await tx.transaction.create({
     data: { tenantId: tid, transactionNo: transactionNo!, direction: "IN", source: "MEMBERSHIP_PAYMENT", employeeId: userId, description: "Membership payment", sourceRefId: payment.id, ...fields },
@@ -478,13 +481,22 @@ serviceCenterRouter.post("/membership-payments", async (req, res) => {
   }
   const reference = await resolveMembershipPaymentReference(tid, resolved.paymentMethod, parsed.data.reference);
   const paidAt = parsed.data.paidAt ?? new Date();
+  let locationId: string | null = null;
+  if (parsed.data.locationId) {
+    const location = await prisma.location.findFirst({ where: { id: parsed.data.locationId, tenantId: tid }, select: { id: true } });
+    if (!location) { res.status(400).json({ error: "Location not found" }); return; }
+    locationId = location.id;
+  } else {
+    const recorder = await prisma.employee.findFirst({ where: { id: req.userId, tenantId: tid }, select: { defaultLocationId: true } });
+    locationId = recorder?.defaultLocationId ?? null;
+  }
   if (parsed.data.termEndsAt && parsed.data.termEndsAt <= paidAt) {
     res.status(400).json({ error: "The term's end date must be after the payment date" });
     return;
   }
   const transactionNo = await nextTransactionNo(tid);
   const membershipPayment = await prisma.$transaction(async (tx) => {
-    const created = await tx.membershipPayment.create({ data: { tenantId: tid, membershipId: parsed.data.membershipId, paymentMethodId: parsed.data.paymentMethodId, amount, status: "PAID", reference, paidAt }, include: membershipPaymentInclude });
+    const created = await tx.membershipPayment.create({ data: { tenantId: tid, membershipId: parsed.data.membershipId, paymentMethodId: parsed.data.paymentMethodId, amount, status: "PAID", reference, paidAt, locationId }, include: membershipPaymentInclude });
     await syncPaymentLedger(tx, tid, created, resolved.membership.customerId, transactionNo, req.userId);
     // The membership's first payment settles the term it was created with —
     // that term is already on the row, so it isn't extended again here.

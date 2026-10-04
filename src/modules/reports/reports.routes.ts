@@ -305,13 +305,13 @@ reportsRouter.get("/sales", async (req, res, next) => {
       }),
       prisma.transaction.findMany({
         where: { tenantId: tid, direction: "IN", status: "COMPLETE", createdAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
-        include: { paymentMethod: { select: { id: true, name: true } } },
+        include: { paymentMethod: { select: { id: true, name: true } }, location: { select: { name: true } } },
       }),
       prisma.transaction.findMany({
         where: { tenantId: tid, direction: "IN", status: "COMPLETE", createdAt: { gte: trendStart, lte: trendEnd }, ...(locationId ? { locationId } : {}) },
         select: { id: true, source: true, sourceRefId: true, amount: true, createdAt: true },
       }),
-      locationId ? Promise.resolve([]) : prisma.membershipPayment.findMany({ where: { tenantId: tid, status: "PAID", createdAt: { gte: start, lte: end } }, select: { amount: true } }),
+      prisma.membershipPayment.findMany({ where: { tenantId: tid, status: "PAID", createdAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) }, select: { amount: true, locationId: true, location: { select: { name: true } } } }),
       prisma.expense.findMany({ where: { tenantId: tid, status: "ACTIVE", expenseDate: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) }, include: { category: { select: { name: true } } } }),
       prisma.goodsReceiptItem.findMany({
         where: { goodsReceipt: { tenantId: tid, receivedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) } },
@@ -365,10 +365,14 @@ reportsRouter.get("/sales", async (req, res, next) => {
       customerName: fullName(f.folio.reservation.customer),
       roomSaleType: f.folio.reservation.roomSaleType,
     }]));
+    // Only charges posted in the period count, so a multi-night stay isn't
+    // booked in full on a day that merely touched it.
     const roomRevenueLines = roomRevenueFolioIds.length ? await prisma.folioLineItem.findMany({
-      where: { tenantId: tid, folioId: { in: roomRevenueFolioIds }, source: { in: ["ROOM", "DISCOUNT"] } },
-      select: { folioId: true, source: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true },
+      where: { tenantId: tid, folioId: { in: roomRevenueFolioIds }, source: { in: ["ROOM", "DISCOUNT"] }, createdAt: { gte: start, lte: end } },
+      select: { folioId: true, source: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true, createdBy: true },
     }) : [];
+    // Complimentary rooms are not sales: no revenue, no tax, no discount figures.
+    const roomSoldLines = roomRevenueLines.filter((l) => roomFolioAttribution.get(l.folioId)?.roomSaleType !== "COMPLIMENTARY");
 
     // ---- Total Revenue: cash actually received (Transaction ledger is the
     // single source of truth here — it already avoids double-counting a
@@ -485,12 +489,12 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // Credit given in the period (see creditEntries above).
     const creditGiven = creditSalesRevenue;
     const creditCount = new Set(creditEntries.map((e) => e.orderId ?? e.folioId)).size;
-    const roomSalesValue = round2([...linesByFolio(roomRevenueLines).values()].reduce((sum, lines) => sum + folioLinesFinancials(lines, tax).total, 0));
-    const roomSalesCount = new Set(roomRevenueLines.filter((l) => l.source === "ROOM").map((l) => l.folioId)).size;
-    const roomGrossLines = roomRevenueLines.filter((l) => l.source === "ROOM" && roomFolioAttribution.get(l.folioId)?.roomSaleType !== "COMPLIMENTARY");
+    const roomSalesValue = round2([...linesByFolio(roomSoldLines).values()].reduce((sum, lines) => sum + folioLinesFinancials(lines, tax).total, 0));
+    const roomSalesCount = new Set(roomSoldLines.filter((l) => l.source === "ROOM").map((l) => l.folioId)).size;
+    const roomGrossLines = roomSoldLines.filter((l) => l.source === "ROOM");
     const roomGross = round2([...linesByFolio(roomGrossLines).values()].reduce((sum, lines) => sum + folioLinesFinancials(lines, tax).total, 0));
-    const roomDiscountsGiven = round2(Math.abs(roomRevenueLines.filter((l) => l.source === "DISCOUNT").reduce((s, l) => s + Number(l.amount) * Number(l.quantity), 0)));
-    for (const lines of linesByFolio(roomRevenueLines).values()) {
+    const roomDiscountsGiven = round2(Math.abs(roomSoldLines.filter((l) => l.source === "DISCOUNT").reduce((s, l) => s + Number(l.amount) * Number(l.quantity), 0)));
+    for (const lines of linesByFolio(roomSoldLines).values()) {
       const fin = folioLinesFinancials(lines, tax);
       taxCollected += fin.taxAmount;
       for (const line of fin.taxLines) {
@@ -501,7 +505,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     }
     taxCollected = round2(taxCollected);
 
-    for (const [folioId, lines] of linesByFolio(roomRevenueLines)) {
+    for (const [folioId, lines] of linesByFolio(roomSoldLines)) {
       const fin = folioLinesFinancials(lines, tax);
       const attribution = roomFolioAttribution.get(folioId);
       const locKey = attribution?.locationId ?? "unassigned";
@@ -515,6 +519,14 @@ reportsRouter.get("/sales", async (req, res, next) => {
       custBucket.count += 1;
       custBucket.revenue += fin.total;
       byCustomerMap.set(custKey, custBucket);
+    }
+
+    for (const m of membershipPayments) {
+      const locKey = m.locationId ?? "unassigned";
+      const locBucket = byLocationMap.get(locKey) ?? { name: m.location?.name ?? "Unassigned", count: 0, revenue: 0, cogs: 0 };
+      locBucket.count += 1;
+      locBucket.revenue += Number(m.amount);
+      byLocationMap.set(locKey, locBucket);
     }
 
     const soldItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).map((i) => ({ ...i, revenue: round2(i.revenue) }));
@@ -556,15 +568,15 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const cancelledPurchasesSummary = { count: cancelledPurchases.length, value: round2(cancelledPurchases.reduce((s, p) => s + Number(p.total), 0)) };
     const capitalInvested = round2(supplierPayments.reduce((s, p) => s + Number(p.amount), 0));
 
-    // ---- Net Revenue / Net Profit: everything sold this period across POS, Rooms and Service
-    // Center membership payments, less the cost of goods sold (rooms and memberships carry none). ----
-    // Total Revenue is everything sold across POS, rooms and memberships, gross
-    // (before discounts), complimentary excluded, paid or not. Net Revenue is
-    // what's left after the cost of goods sold and every expense.
+    // ---- Total Revenue: everything sold this period across POS, rooms and
+    // memberships, gross (before discounts), complimentary excluded, paid or not.
+    // Net Profit: what was actually sold after discounts, less the cost of goods
+    // sold and every expense. ----
     const grossPosSales = round2(completedSalesValue + discountsGiven);
     const totalSoldValue = round2(grossPosSales + roomGross + serviceCenterCash);
-    const netRevenue = round2(totalSoldValue - cogsTotal - totalExpenses);
-    const netProfit = netRevenue;
+    const discountsAll = round2(discountsGiven + roomDiscountsGiven);
+    const soldNetValue = round2(totalSoldValue - discountsAll);
+    const netProfit = round2(soldNetValue - cogsTotal - totalExpenses);
 
     // ---- Cards ----
     const transactionsCount = completedOrders.length;
@@ -594,11 +606,13 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const newSaleTransactions = transactionsIn.filter((t) => !repaymentTxnIds.has(t.id));
     const transactionsInTotal = round2(newSaleTransactions.reduce((s, t) => s + Number(t.amount), 0));
     const byMethodMap = new Map<string, { name: string; count: number; total: number }>();
+    const methodLocations = new Map<string, Set<string>>();
     for (const t of newSaleTransactions) {
       const key = t.paymentMethodId ?? "unknown";
       const bucket = byMethodMap.get(key) ?? { name: t.paymentMethod?.name ?? "Unknown", count: 0, total: 0 };
       bucket.count += 1; bucket.total += Number(t.amount);
       byMethodMap.set(key, bucket);
+      if (t.location?.name) methodLocations.set(key, new Set([...(methodLocations.get(key) ?? []), t.location.name]));
     }
     // Credit and complimentary sales never produce a Transaction row (nothing
     // was collected), so without adding them explicitly here they'd be
@@ -607,9 +621,16 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // as their own rows (only when non-zero, same as any other unused
     // method) and every row's percentOfTotal is against the combined
     // cash + credit + complimentary total, not just cash-in.
-    const soldBasisTotal = round2(transactionsInTotal + creditGiven + complimentaryValue);
-    const rawMethodRows: { name: string; count: number; total: number }[] = [...byMethodMap.values()];
-    if (creditGiven > 0.01) rawMethodRows.push({ name: "Credit", count: creditCount, total: creditGiven });
+    // Unpaid = sold (net of discounts) but not collected this period: credit
+    // sales, open folio balances and unpaid orders. Shown as its own row so the
+    // breakdown adds up to what was sold.
+    const unpaidValue = round2(Math.max(0, soldNetValue - transactionsInTotal));
+    const soldBasisTotal = round2(transactionsInTotal + unpaidValue + complimentaryValue);
+    const rawMethodRows: { name: string; count: number; total: number; locationName?: string | null }[] = [...byMethodMap.entries()].map(([key, b]) => ({
+      ...b,
+      locationName: [...(methodLocations.get(key) ?? [])].join(", ") || null,
+    }));
+    if (unpaidValue > 0.01) rawMethodRows.push({ name: "Unpaid (credit & folio balances)", count: 0, total: unpaidValue, locationName: null });
     if (complimentaryValue > 0.01) rawMethodRows.push({ name: "Complimentary", count: complimentaryCount, total: complimentaryValue });
     const byPaymentMethod = rawMethodRows
       .map((b) => ({ ...b, total: round2(b.total), percentOfTotal: soldBasisTotal ? round2((b.total / soldBasisTotal) * 100) : 0 }))
@@ -618,31 +639,32 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const employeeName = new Map(employeesForBranch.map((e) => [e.id, `${e.firstName} ${e.lastName}`.trim()]));
     const employeeBranch = new Map(employeesForBranch.map((e) => [e.id, e.defaultLocation?.name ?? "—"]));
     const byEmployeeMap = new Map<string, { employeeId: string | null; name: string; branch: string; count: number; total: number }>();
-    for (const t of newSaleTransactions) {
-      const key = t.employeeId ?? "unattributed";
-      const bucket = byEmployeeMap.get(key) ?? {
-        employeeId: t.employeeId ?? null,
-        name: t.employeeId ? employeeName.get(t.employeeId) ?? "Unknown" : "Unattributed",
-        branch: t.employeeId ? employeeBranch.get(t.employeeId) ?? "—" : "—",
-        count: 0, total: 0,
-      };
-      bucket.count += 1; bucket.total += Number(t.amount);
-      byEmployeeMap.set(key, bucket);
-    }
-    for (const credit of creditEntries) {
-      const employeeId = credit.createdBy ?? credit.order?.createdBy ?? null;
+    const addToEmployee = (employeeId: string | null | undefined, amount: number, count: number) => {
       const key = employeeId ?? "unattributed";
       const bucket = byEmployeeMap.get(key) ?? {
-        employeeId,
+        employeeId: employeeId ?? null,
         name: employeeId ? employeeName.get(employeeId) ?? "Unknown" : "Unattributed",
         branch: employeeId ? employeeBranch.get(employeeId) ?? "—" : "—",
         count: 0, total: 0,
       };
-      bucket.count += 1; bucket.total += Number(credit.amount);
+      bucket.count += count; bucket.total += amount;
       byEmployeeMap.set(key, bucket);
+    };
+    // Sold basis, same as Sales by Location: each completed order and each room
+    // charge goes to the employee who created it; memberships go to whoever
+    // recorded the payment. Collecting an old room bill doesn't count as a sale.
+    for (const order of completedOrders) addToEmployee(order.createdBy, computeOrderFinancials(order, tax).total, 1);
+    const roomLinesByEmployee = new Map<string, typeof roomSoldLines>();
+    for (const l of roomSoldLines) {
+      const key = l.createdBy ?? "unattributed";
+      roomLinesByEmployee.set(key, [...(roomLinesByEmployee.get(key) ?? []), l]);
     }
+    for (const [key, lines] of roomLinesByEmployee) {
+      addToEmployee(key === "unattributed" ? null : key, folioLinesFinancials(lines, tax).total, new Set(lines.map((l) => l.folioId)).size);
+    }
+    for (const t of transactionsIn) if (t.source === "MEMBERSHIP_PAYMENT") addToEmployee(t.employeeId, Number(t.amount), 1);
     const byEmployee = [...byEmployeeMap.values()]
-      .map((b) => ({ ...b, total: round2(b.total), percentOfTotal: soldBasisTotal ? round2((b.total / soldBasisTotal) * 100) : 0 }))
+      .map((b) => ({ ...b, total: round2(b.total), percentOfTotal: soldNetValue ? round2((b.total / soldNetValue) * 100) : 0 }))
       .sort((a, b) => b.total - a.total);
 
     // ---- Sales by customer — sold-basis like Sales by Location (a credit
@@ -713,15 +735,14 @@ reportsRouter.get("/sales", async (req, res, next) => {
 
     res.json({
       range: { period, start: start.toISOString(), end: end.toISOString() },
-      cards: { totalRevenue: totalSoldValue, netRevenue, totalExpenses, netProfit, capitalInvested, transactions: transactionsCount, averageSale, itemsSold, menuOrdersCompleted },
+      cards: { totalRevenue: totalSoldValue, totalExpenses, netProfit, capitalInvested, transactions: transactionsCount, averageSale, itemsSold, menuOrdersCompleted },
       revenueBreakdown: {
         posSalesCash, folioDepositsCash, folioSettlementsCash, serviceCenterCash, totalRevenue,
         taxCollected, discountsGiven,
         complimentaryValue, complimentaryCogs,
         creditGiven, creditCount, creditRepaymentsCash,
         roomSalesValue, roomSalesCount, roomDiscountsGiven,
-        completedSalesValue, totalSoldValue, grossPosSales, roomGross, cashCollected: totalRevenue, cogs: cogsTotal, unresolvedCostLines, netRevenue,
-        serviceCenterExcludedByLocationFilter: !!locationId,
+        completedSalesValue, totalSoldValue, grossPosSales, roomGross, discountsAll, soldNetValue, unpaidValue, cashCollected: totalRevenue, cogs: cogsTotal, unresolvedCostLines,
         expensesOnly, salariesPaid,
       },
       complimentarySessions: [...compSessions.values()].map((s) => ({
