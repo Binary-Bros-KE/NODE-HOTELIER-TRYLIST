@@ -62,16 +62,16 @@ authRouter.post("/login", async (req, res, next) => {
     let employee: LoginEmployee | null = null;
     if (employeeCode) {
       employee = await prisma.employee.findFirst({
-        where: { tenantId: tid, employeeCode: { equals: employeeCode, mode: "insensitive" } },
+        where: { tenantId: tid, hasSystemAccess: true, employeeCode: { equals: employeeCode, mode: "insensitive" } },
         include: employeeInclude,
       });
     } else {
-      const activeEmployees = await prisma.employee.findMany({ where: { tenantId: tid, status: "ACTIVE" }, include: employeeInclude });
-      const matches = activeEmployees.filter((candidate) => verifySecret(data.data.pin, candidate.pin));
+      const activeEmployees = await prisma.employee.findMany({ where: { tenantId: tid, status: "ACTIVE", hasSystemAccess: true }, include: employeeInclude });
+      const matches = activeEmployees.filter((candidate) => candidate.pin != null && verifySecret(data.data.pin, candidate.pin));
       if (matches.length > 1) { res.status(409).json({ error: "This PIN is shared. Use employee code login." }); return; }
       employee = matches[0] ?? null;
     }
-    if (!employee || employee.status !== "ACTIVE" || !verifySecret(data.data.pin, employee.pin)) {
+    if (!employee || employee.status !== "ACTIVE" || !employee.hasSystemAccess || employee.pin == null || !verifySecret(data.data.pin, employee.pin)) {
       res.status(401).json({ error: employeeCode ? "Incorrect employee code or PIN" : "Incorrect PIN" });
       return;
     }

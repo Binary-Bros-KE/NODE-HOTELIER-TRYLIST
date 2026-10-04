@@ -41,7 +41,7 @@ const createSchema = z.object({
   dateHired: z.coerce.date(),
   supervisorId: optionalId,
   isSupervisor: z.boolean().default(false),
-  roleId: z.string().trim().min(1, "Choose a role"),
+  roleId: z.string().trim().min(1).nullable().optional(),
   // Locations this employee is pinned to. Empty = works anywhere.
   locationIds: z.array(z.string().trim().min(1)).default([]),
   // The POS's pre-selected location for this employee — must be one of
@@ -57,11 +57,13 @@ const createSchema = z.object({
   nssfNumber: optionalText(20),
   shaNumber: optionalText(20),
   employeeCode: z.string().trim().min(1).max(30),
-  pin: z.string().trim().min(4).max(8),
+  // Required when the employee has system access; ignored (and cleared) when not.
+  hasSystemAccess: z.boolean().default(true),
+  pin: z.string().trim().min(4).max(8).nullable().optional(),
   emergencyContactName: optionalText(80),
   emergencyContactPhone: optionalText(30),
 });
-const updateSchema = partialNoDefaults(createSchema).omit({ pin: true }).extend({ pin: z.string().trim().min(4).max(8).optional() });
+const updateSchema = partialNoDefaults(createSchema).omit({ pin: true }).extend({ pin: z.string().trim().min(4).max(8).nullable().optional() });
 const listSchema = z.object({
   search: z.string().trim().max(100).optional(),
   departmentId: optionalId,
@@ -90,6 +92,7 @@ const publicFields = {
   jobTitle: true,
   employmentType: true,
   status: true,
+  hasSystemAccess: true,
   dateHired: true,
   supervisorId: true,
   supervisor: { select: { id: true, firstName: true, lastName: true } },
@@ -122,7 +125,7 @@ async function assertSupervisorInTenant(supervisorId: string | undefined, tenant
   if (!supervisor) throw Object.assign(new Error("Selected supervisor was not found"), { status: 400 });
 }
 
-async function assertRoleInTenant(roleId: string | undefined, tenant: string) {
+async function assertRoleInTenant(roleId: string | null | undefined, tenant: string) {
   if (!roleId) return;
   const role = await prisma.role.findFirst({ where: { id: roleId, tenantId: tenant }, select: { id: true } });
   if (!role) throw Object.assign(new Error("Selected role was not found"), { status: 400 });
@@ -155,10 +158,10 @@ async function assertDepartmentInTenant(departmentId: string | undefined, tenant
 
 async function assertPinUnique(pin: string, tenant: string, excludeEmployeeId?: string) {
   const employees = await prisma.employee.findMany({
-    where: { tenantId: tenant, ...(excludeEmployeeId ? { id: { not: excludeEmployeeId } } : {}) },
+    where: { tenantId: tenant, pin: { not: null }, ...(excludeEmployeeId ? { id: { not: excludeEmployeeId } } : {}) },
     select: { pin: true },
   });
-  if (employees.some((employee) => verifySecret(pin, employee.pin))) {
+  if (employees.some((employee) => employee.pin != null && verifySecret(pin, employee.pin))) {
     throw Object.assign(new Error("This PIN is already used by another employee"), { status: 409 });
   }
 }
@@ -199,20 +202,23 @@ employeesRouter.get("/:id", async (req, res) => {
 employeesRouter.post("/", async (req, res, next) => {
   const data = createSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid employee", details: data.error.flatten() }); return; }
-  const { pin, supervisorId, roleId, locationIds, defaultLocationId, ...employeeData } = data.data;
+  const { pin, hasSystemAccess, supervisorId, roleId, locationIds, defaultLocationId, ...employeeData } = data.data;
   try {
+    if (hasSystemAccess && !pin) throw Object.assign(new Error("Set a PIN for someone who signs in, or turn off system access"), { status: 400 });
+    if (hasSystemAccess && !roleId) throw Object.assign(new Error("Choose a role for someone who signs in"), { status: 400 });
     await assertSupervisorInTenant(supervisorId, tenantId(req));
     await assertRoleInTenant(roleId, tenantId(req));
     await assertLocationsInTenant(locationIds, tenantId(req));
     await assertDepartmentInTenant(employeeData.departmentId, tenantId(req));
-    await assertPinUnique(pin, tenantId(req));
+    if (hasSystemAccess && pin) await assertPinUnique(pin, tenantId(req));
     const employee = await prisma.employee.create({
       data: {
         tenantId: tenantId(req), ...employeeData,
         supervisorId: supervisorId ?? null, roleId: roleId ?? null,
         locations: { connect: (locationIds ?? []).map((id) => ({ id })) },
         defaultLocationId: resolveDefaultLocation(defaultLocationId, locationIds ?? [], null),
-        pin: hashSecret(pin),
+        hasSystemAccess,
+        pin: hasSystemAccess && pin ? hashSecret(pin) : null,
       },
       select: publicFields,
     });
@@ -227,7 +233,7 @@ employeesRouter.post("/", async (req, res, next) => {
 employeesRouter.patch("/:id", async (req, res, next) => {
   const data = updateSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid employee", details: data.error.flatten() }); return; }
-  const { pin, supervisorId, roleId, locationIds, defaultLocationId, ...employeeData } = data.data;
+  const { pin, hasSystemAccess, supervisorId, roleId, locationIds, defaultLocationId, ...employeeData } = data.data;
   try {
     if (supervisorId !== undefined) await assertSupervisorInTenant(supervisorId, tenantId(req), req.params.id);
     if (roleId !== undefined) await assertRoleInTenant(roleId, tenantId(req));
@@ -236,9 +242,12 @@ employeesRouter.patch("/:id", async (req, res, next) => {
     if (pin) await assertPinUnique(pin, tenantId(req), req.params.id);
     const existing = await prisma.employee.findFirst({
       where: { id: req.params.id, tenantId: tenantId(req) },
-      select: { id: true, defaultLocationId: true, locations: { select: { id: true } } },
+      select: { id: true, defaultLocationId: true, hasSystemAccess: true, pin: true, locations: { select: { id: true } } },
     });
     if (!existing) { res.status(404).json({ error: "Employee not found" }); return; }
+    const nextAccess = hasSystemAccess ?? existing.hasSystemAccess;
+    if (nextAccess && !pin && existing.pin == null) throw Object.assign(new Error("Set a PIN for someone who signs in, or turn off system access"), { status: 400 });
+    const pinChange = !nextAccess ? { pin: null } : pin ? { pin: hashSecret(pin) } : {};
     // Keep the default location coherent with the assigned set whenever
     // either one is touched.
     const assignedIds = locationIds ?? existing.locations.map((l) => l.id);
@@ -253,9 +262,11 @@ employeesRouter.patch("/:id", async (req, res, next) => {
         ...(roleId !== undefined ? { roleId: roleId ?? null } : {}),
         ...(locationIds !== undefined ? { locations: { set: locationIds.map((id) => ({ id })) } } : {}),
         ...(nextDefault !== undefined ? { defaultLocationId: nextDefault } : {}),
-        ...(pin ? { pin: hashSecret(pin) } : {}),
+        ...(hasSystemAccess !== undefined ? { hasSystemAccess } : {}),
+        ...pinChange,
       },
     });
+    if (!nextAccess) await prisma.session.deleteMany({ where: { employeeId: existing.id } });
     res.json({ employee: await prisma.employee.findUniqueOrThrow({ where: { id: req.params.id }, select: publicFields }) });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "An employee with this code already exists" }); return; }

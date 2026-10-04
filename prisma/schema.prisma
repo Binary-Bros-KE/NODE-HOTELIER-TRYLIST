@@ -3310,9 +3310,11 @@ model Employee {
   nssfNumber String?
   shaNumber  String?
 
-  // System / till login
-  employeeCode String
-  pin          String
+  // System / till login. Staff with no system access (gatemen, cleaners) have
+  // no PIN and can't sign in, but are still recorded for attendance and payroll.
+  employeeCode     String
+  hasSystemAccess  Boolean @default(true)
+  pin              String?
 
   // Emergency contact
   emergencyContactName  String?
