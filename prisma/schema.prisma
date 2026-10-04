@@ -793,6 +793,7 @@ model UnitOfMeasure {
   updatedAt       DateTime             @updatedAt
   services        Service[]
   packProducts    Product[]            @relation("ProductPackUnit")
+  productUnits    Product[]            @relation("ProductUnit")
   roomRates       RoomRate[]           @relation("RoomRateUnit")
   roomTypes       RoomType[]           @relation("RoomTypePriceUnit")
   assets          Asset[]              @relation("AssetUnit")
@@ -2189,6 +2190,10 @@ model Product {
 
   // Classification
   unit          String  @default("each")
+  // The counting unit, as a real Units of Measure row (kg, Piece, PKT...).
+  // unit above is the legacy text and is kept in step until every product is linked.
+  unitId        String?
+  unitRef       UnitOfMeasure? @relation("ProductUnit", fields: [unitId], references: [id], onDelete: Restrict)
   isPerishable  Boolean @default(false)
   shelfLifeDays Int?
 
