@@ -740,6 +740,23 @@ receptionRouter.patch("/reservations/:id/extend", async (req, res) => {
   res.json({ reservation });
 });
 
+const NIGHT_MS = 86_400_000;
+
+/** The date a night of a stay was first charged. The stay's room lines are walked
+ * oldest first, and the line covering that night's position gives its date. A
+ * room move or re-price rewrites the lines, but each night keeps the sale date it
+ * was booked on. */
+function chargeDateForNight(lines: { createdAt: Date; quantity: unknown }[], checkIn: Date, night: Date): Date {
+  const index = Math.max(0, Math.round((night.getTime() - checkIn.getTime()) / NIGHT_MS));
+  const ordered = [...lines].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  let covered = 0;
+  for (const line of ordered) {
+    covered += Number(line.quantity);
+    if (index < covered) return line.createdAt;
+  }
+  return ordered[ordered.length - 1]?.createdAt ?? new Date();
+}
+
 receptionRouter.patch("/reservations/:id/room-charge", async (req, res) => {
   const data = roomChargeSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "room charge", data.error.flatten()); return; }
@@ -762,10 +779,12 @@ receptionRouter.patch("/reservations/:id/room-charge", async (req, res) => {
   const actor = await resolveActor(tid, req);
   const oldRoomNumber = current.room.number;
   const reservation = await prisma.$transaction(async (tx) => {
+    const firstRoomLine = await tx.folioLineItem.findFirst({ where: { folioId: current.folio!.id, source: "ROOM" }, orderBy: { createdAt: "asc" }, select: { createdAt: true } });
     await tx.folioLineItem.deleteMany({ where: { folioId: current.folio!.id, source: "ROOM" } });
     await tx.folioLineItem.create({
       data: {
         tenantId: tid,
+        createdAt: firstRoomLine?.createdAt,
         folioId: current.folio!.id,
         source: "ROOM",
         label: charge.label,
@@ -821,6 +840,13 @@ receptionRouter.patch("/reservations/:id/change-room", async (req, res) => {
   const actor = await resolveActor(tid, req);
   const oldRoomNumber = current.room.number;
   const newRoomNumber = newRoom.number;
+  // The moved nights keep the date they were first charged on. Only a difference
+  // in price for them posts today, as an adjustment.
+  const replacedLines = openSegment ? [openSegment] : roomLines;
+  const oldSegmentDate = chargeDateForNight(roomLines, current.checkIn, segmentStart);
+  const newSegmentDate = chargeDateForNight(roomLines, current.checkIn, data.data.effectiveAt);
+  const replacedTotal = round2(replacedLines.reduce((sum, line) => sum + Number(line.amount) * Number(line.quantity), 0));
+  const priceDifference = round2(oldCharge.amount * oldCharge.quantity + newCharge.amount * newCharge.quantity - replacedTotal);
   const reservation = await prisma.$transaction(async (tx) => {
     if (openSegment) await tx.folioLineItem.delete({ where: { id: openSegment.id } });
     else await tx.folioLineItem.deleteMany({ where: { folioId: current.folio!.id, source: "ROOM" } });
@@ -837,6 +863,7 @@ receptionRouter.patch("/reservations/:id/change-room", async (req, res) => {
           taxMode: oldCharge.taxMode,
           taxTreatment: oldCharge.taxTreatment,
           sourceRefId: `ROOM_SEGMENT:${current.roomId}:${segmentStart.toISOString()}:${data.data.effectiveAt.toISOString()}`,
+          createdAt: oldSegmentDate,
           createdBy: req.userId,
         },
         {
@@ -850,10 +877,16 @@ receptionRouter.patch("/reservations/:id/change-room", async (req, res) => {
           taxMode: newCharge.taxMode,
           taxTreatment: newCharge.taxTreatment,
           sourceRefId: `ROOM_SEGMENT:${newRoom.id}:${data.data.effectiveAt.toISOString()}:${current.checkOut.toISOString()}`,
+          createdAt: newSegmentDate,
           createdBy: req.userId,
         },
       ],
     });
+    if (Math.abs(priceDifference) > 0.01) {
+      await tx.folioLineItem.create({
+        data: { tenantId: tid, folioId: current.folio!.id, source: "ROOM", label: `Room change adjustment (${oldRoomNumber} to ${newRoomNumber})`, amount: priceDifference, quantity: 1, taxRate: newCharge.taxRate, taxMode: newCharge.taxMode, taxTreatment: newCharge.taxTreatment, createdBy: req.userId },
+      });
+    }
     await tx.reservation.update({ where: { id: current.id }, data: { roomId: newRoom.id, rateId: newCharge.rateId, rateName: newCharge.rateName, updatedBy: req.userId } });
     await freeRoom(tx, tid, current.roomId, `${current.customer.firstName} ${current.customer.lastName}`, `moved to room ${newRoomNumber}`, current.id, { id: actor.performedBy ?? "", name: actor.name });
     await tx.room.update({ where: { id: newRoom.id }, data: { status: "OCCUPIED" } });
