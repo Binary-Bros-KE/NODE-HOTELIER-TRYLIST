@@ -1,5 +1,5 @@
 import { syncStayInvoicesForFolio } from "../commercial-documents/commercial-documents.routes.js";
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { Prisma, ReservationActivityAction } from "@prisma/client";
 
@@ -643,11 +643,11 @@ receptionRouter.patch("/reservations/:id/no-show", async (req, res) => {
   res.json({ reservation });
 });
 
-/** Admin or supervisor only: pulls a checked-in stay's check-out date back, for a
- * stay booked too long by mistake. The room charges are trimmed from the last night
+/** Admin or supervisor only: a check-out date earlier than the current one (set from the
+ * Extend date control) pulls the stay back, for a stay booked too long by mistake. The room charges are trimmed from the last night
  * backwards, the room discount is re-applied to the shorter stay, and the folio
  * balance must still be covered by what's been paid. */
-receptionRouter.patch("/reservations/:id/shorten", async (req, res) => {
+const shortenStay = async (req: Request<{ id: string }>, res: Response) => {
   const data = shortenSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "check-out date", data.error.flatten()); return; }
   const tid = tenantId(req);
@@ -703,7 +703,7 @@ receptionRouter.patch("/reservations/:id/shorten", async (req, res) => {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     throw error;
   }
-});
+};
 
 receptionRouter.patch("/reservations/:id/extend", async (req, res) => {
   const data = extendSchema.safeParse(req.body);
@@ -711,6 +711,7 @@ receptionRouter.patch("/reservations/:id/extend", async (req, res) => {
   const tid = tenantId(req);
   const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { room: { include: { roomType: true } }, folio: true } });
   if (!current) { res.status(404).json({ error: "Reservation not found" }); return; }
+  if (data.data.checkOut < current.checkOut) { await shortenStay(req, res); return; }
   if (current.status !== "CHECKED_IN") { res.status(409).json({ error: "Only a checked-in stay can be extended" }); return; }
   if (data.data.checkOut <= current.checkOut) { res.status(400).json({ error: "New check-out must be later than the current one" }); return; }
   if (!(await roomIsAvailable({ tenantId: tid, roomId: current.roomId, checkIn: current.checkOut, checkOut: data.data.checkOut, excludeId: current.id }))) {
