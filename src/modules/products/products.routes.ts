@@ -26,8 +26,13 @@ const nullableText = (max: number) => z.preprocess(blankToNull, z.string().trim(
 const nullableId = z.preprocess(blankToNull, z.string().trim().nullable());
 const nullableNumber = (min = 0) => z.preprocess(blankToNull, z.coerce.number().min(min).nullable());
 
+// Operations a product belongs to: the LocationType values (Bar, Store, Restaurant...).
+export const PRODUCT_TAGS = ["RECEPTION", "RESTAURANT", "CAFE", "BAKERY", "BAR", "GYM", "SPA", "STORE", "SHOP", "HOUSEKEEPING"] as const;
+const productTagsSchema = z.array(z.enum(PRODUCT_TAGS)).max(10).optional();
+
 const productObjectSchema = z.object({
   categoryId: optionalId,
+  tags: productTagsSchema,
   name: z.string().trim().min(1).max(150),
   sku: optionalText(60),
   barcode: optionalText(60),
@@ -139,6 +144,7 @@ const productFields = {
   photoUrl: true,
   unit: true,
   unitRef: { select: { id: true, name: true } },
+  tags: true,
   isPerishable: true,
   shelfLifeDays: true,
   packSize: true,
@@ -211,16 +217,18 @@ productsRouter.get("/", async (req, res) => {
     search: z.string().trim().max(100).optional(),
     categoryId: z.string().trim().optional(),
     unitId: z.string().trim().optional(),
+    tag: z.enum(PRODUCT_TAGS).optional(),
     lowStock: z.enum(["true", "false"]).optional(),
     active: z.enum(["true", "false"]).optional(),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid product filters", details: query.error.flatten() }); return; }
-  const { search, categoryId, unitId, lowStock, active } = query.data;
+  const { search, categoryId, unitId, tag, lowStock, active } = query.data;
   const tid = tenantId(req);
   const where: Prisma.ProductWhereInput = {
     tenantId: tid,
     ...(categoryId ? { categoryId } : {}),
     ...(unitId ? { unitId } : {}),
+    ...(tag ? { tags: { has: tag } } : {}),
     ...(active ? { isActive: active === "true" } : {}),
     ...(search ? { OR: [
       { name: { contains: search, mode: "insensitive" } },

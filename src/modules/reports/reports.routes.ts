@@ -1387,10 +1387,12 @@ function summarizeStock(rows: StockRow[]) {
 
 reportsRouter.get("/inventory-overview", async (req, res, next) => {
   try {
-    const query = z.object({ asOfDate: isoDate.optional(), locationId: z.string().trim().optional() }).safeParse(req.query);
+    const query = z.object({ asOfDate: isoDate.optional(), locationId: z.string().trim().optional(), tag: z.string().trim().optional() }).safeParse(req.query);
     if (!query.success) { res.status(400).json({ error: "Invalid filters", details: query.error.flatten() }); return; }
     const tid = tenantId(req);
-    const { asOfDate, locationId } = query.data;
+    const { asOfDate, locationId, tag } = query.data;
+    // A section (Bar, Store, Housekeeping...) shows only the products tagged for it.
+    const tagged = tag ? { tags: { has: tag as never } } : {};
     const mode: "live" | "asOf" = asOfDate && asOfDate !== localIsoToday() ? "asOf" : "live";
 
     const locations = await prisma.location.findMany({
@@ -1427,7 +1429,7 @@ reportsRouter.get("/inventory-overview", async (req, res, next) => {
     // balance with no matching product.
     const trackedProductIds = new Set([...balances.keys()].map((k) => k.split("::")[0]));
     const allProducts = await prisma.product.findMany({
-      where: { tenantId: tid, OR: [{ isActive: true }, { id: { in: [...trackedProductIds] } }] },
+      where: { tenantId: tid, ...tagged, OR: [{ isActive: true }, { id: { in: [...trackedProductIds] } }] },
       select: { id: true, name: true, sku: true, unit: true, unitCost: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } }, reorderLevel: true, isActive: true, category: { select: { name: true } } },
     });
     const productById = new Map(allProducts.map((p) => [p.id, p]));

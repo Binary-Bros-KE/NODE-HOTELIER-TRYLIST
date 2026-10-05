@@ -2194,6 +2194,10 @@ model Product {
   // unit above is the legacy text and is kept in step until every product is linked.
   unitId        String?
   unitRef       UnitOfMeasure? @relation("ProductUnit", fields: [unitId], references: [id], onDelete: Restrict)
+  // Which operations this product belongs to (Bar, Store, Restaurant...). A
+  // product can carry several, e.g. a soda is both BAR and RESTAURANT. Stock
+  // never decides this, so a zero-stock product is still in its section.
+  tags          LocationType[] @default([])
   isPerishable  Boolean @default(false)
   shelfLifeDays Int?
 
