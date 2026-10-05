@@ -7,7 +7,7 @@ import { prisma } from "../../lib/prisma.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
 import { DispatchError, employeeName } from "../../lib/dispatch.js";
 import { InsufficientStockError, recordStockMovement } from "../../lib/stockLedger.js";
-import { refreshOpenRequest } from "../../lib/dispatchAuto.js";
+import { refreshOpenRequest, requestDishes, rungUpByName } from "../../lib/dispatchAuto.js";
 
 // The store's side of a kitchen's ingredient request: see what the chef asked
 // for, dispatch it (a real store -> kitchen stock transfer) or reject it with a
@@ -51,8 +51,13 @@ dispatchRouter.get("/", handle(async (req, res) => {
     orderBy: history ? { respondedAt: "desc" } : { requestedAt: "asc" },
     take: history ? 100 : 200,
   });
-  res.json({ requests: await withStoreStock(tid, requests) });
+  res.json({ requests: await withDishes(tid, await withStoreStock(tid, requests)) });
 }));
+
+/** Adds each request's dishes (with their ingredients) and who rang the order up. */
+async function withDishes<T extends { id: string; orderId: string }>(tid: string, requests: T[]) {
+  return Promise.all(requests.map(async (r) => ({ ...r, dishes: await requestDishes(tid, r.id), rungUpBy: await rungUpByName(tid, r.orderId) })));
+}
 
 /** Cheap poll target for a sidebar badge / tab count. */
 dispatchRouter.get("/count", handle(async (req, res) => {
@@ -94,7 +99,7 @@ dispatchRouter.post("/:id/refresh", handle(async (req, res) => {
   if (request.status !== "REQUESTED") throw new DispatchError("Only a waiting request can be refreshed", 409);
   await prisma.$transaction((tx) => refreshOpenRequest(tx, tid, request.id));
   const fresh = await prisma.stockDispatchRequest.findUniqueOrThrow({ where: { id: request.id }, include: requestInclude });
-  res.json({ request: (await withStoreStock(tid, [fresh]))[0] });
+  res.json({ request: (await withDishes(tid, await withStoreStock(tid, [fresh])))[0] });
 }));
 
 dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {

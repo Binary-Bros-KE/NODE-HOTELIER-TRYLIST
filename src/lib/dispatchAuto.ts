@@ -82,6 +82,34 @@ export async function refreshOpenRequest(tx: Prisma.TransactionClient, tenantId:
   await tx.stockDispatchItem.createMany({ data: [...requirements].map(([productId, r]) => ({ requestId, productId, productName: r.name, requestedQty: r.quantity })) });
 }
 
+/** The employee who rang the order up, by name. */
+export async function rungUpByName(tenantId: string, orderId: string) {
+  const order = await prisma.posOrder.findFirst({ where: { id: orderId, tenantId }, select: { createdBy: true } });
+  if (!order?.createdBy) return null;
+  const e = await prisma.employee.findFirst({ where: { id: order.createdBy, tenantId }, select: { firstName: true, lastName: true } });
+  return e ? `${e.firstName} ${e.lastName}`.trim() : null;
+}
+
+/**
+ * The dishes behind one request, in the order they were rung up: each dish with
+ * the ingredients it needs from the store for that line. What the storekeeper
+ * reads on screen and on the printed slip.
+ */
+export async function requestDishes(tenantId: string, requestId: string) {
+  const items = await prisma.posOrderItem.findMany({ where: { dispatchRequestId: requestId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
+  const perItem = await Promise.all(items.map(async (item) => ({ item, requirements: await perSaleRequirements(prisma, tenantId, computeStockRequirements([item])) })));
+  const productIds = [...new Set(perItem.flatMap(({ requirements }) => [...requirements.keys()]))];
+  const products = await prisma.product.findMany({ where: { tenantId, id: { in: productIds } }, select: { id: true, unit: true } });
+  const unitById = new Map(products.map((p) => [p.id, p.unit]));
+  return perItem.map(({ item, requirements }) => ({
+    name: `${item.menuItem?.name ?? "Item"}${item.variant ? ` (${item.variant.name})` : ""}`,
+    quantity: item.quantity,
+    ingredients: [...requirements]
+      .map(([productId, r]) => ({ name: r.name, quantity: r.quantity, unit: unitById.get(productId) ?? "" }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  }));
+}
+
 /** Everything a printer needs to draw the slip, so the printing device needs no permissions of its own. */
 export async function dispatchSlipFor(tenantId: string, requestId: string) {
   const request = await prisma.stockDispatchRequest.findFirst({
@@ -101,8 +129,10 @@ export async function dispatchSlipFor(tenantId: string, requestId: string) {
     from: request.fromLocation.name,
     to: request.toLocation.name,
     requestedByName: request.requestedByName,
+    rungUpBy: await rungUpByName(tenantId, request.orderId),
     requestedAt: request.requestedAt,
     note: request.note,
+    dishes: await requestDishes(tenantId, requestId),
     items: request.items.map((i) => ({ name: i.productName, quantity: Number(i.requestedQty), unit: i.product.unit })),
   };
 }
