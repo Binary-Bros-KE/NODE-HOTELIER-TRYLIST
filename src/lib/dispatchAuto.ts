@@ -92,20 +92,36 @@ export async function rungUpByName(tenantId: string, orderId: string) {
 
 /**
  * The dishes behind one request, in the order they were rung up: each dish with
- * the ingredients it needs from the store for that line. What the storekeeper
+ * the stock ingredients it takes for that line, what the store holds of each, and
+ * the recipe behind it (so the storekeeper can correct it). What the storekeeper
  * reads on screen and on the printed slip.
  */
 export async function requestDishes(tenantId: string, requestId: string) {
+  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId }, select: { fromLocationId: true } });
   const items = await prisma.posOrderItem.findMany({ where: { dispatchRequestId: requestId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
-  const perItem = await Promise.all(items.map(async (item) => ({ item, requirements: await perSaleRequirements(prisma, tenantId, computeStockRequirements([item])) })));
+  const variantRecipes = await Promise.all(items.map((item) => (item.variant ? prisma.menuItemVariant.findUnique({ where: { id: item.variant.id }, select: { recipeId: true } }) : null)));
+  const perItem = await Promise.all(
+    items.map(async (item, i) => ({
+      item,
+      recipeId: variantRecipes[i]?.recipeId ?? item.menuItem?.recipeId ?? null,
+      requirements: await perSaleRequirements(prisma, tenantId, computeStockRequirements([item])),
+    })),
+  );
   const productIds = [...new Set(perItem.flatMap(({ requirements }) => [...requirements.keys()]))];
-  const products = await prisma.product.findMany({ where: { tenantId, id: { in: productIds } }, select: { id: true, unit: true } });
+  const [products, stocks] = await Promise.all([
+    prisma.product.findMany({ where: { tenantId, id: { in: productIds } }, select: { id: true, unit: true } }),
+    request
+      ? prisma.productStock.findMany({ where: { tenantId, locationId: request.fromLocationId, productId: { in: productIds } }, select: { productId: true, quantity: true } })
+      : Promise.resolve([] as { productId: string; quantity: unknown }[]),
+  ]);
   const unitById = new Map(products.map((p) => [p.id, p.unit]));
-  return perItem.map(({ item, requirements }) => ({
+  const storeById = new Map(stocks.map((st) => [st.productId, Number(st.quantity)]));
+  return perItem.map(({ item, recipeId, requirements }) => ({
     name: `${item.menuItem?.name ?? "Item"}${item.variant ? ` (${item.variant.name})` : ""}`,
     quantity: item.quantity,
+    recipeId,
     ingredients: [...requirements]
-      .map(([productId, r]) => ({ name: r.name, quantity: r.quantity, unit: unitById.get(productId) ?? "" }))
+      .map(([productId, r]) => ({ productId, name: r.name, quantity: r.quantity, unit: unitById.get(productId) ?? "", storeQty: storeById.get(productId) ?? 0 }))
       .sort((a, b) => a.name.localeCompare(b.name)),
   }));
 }
