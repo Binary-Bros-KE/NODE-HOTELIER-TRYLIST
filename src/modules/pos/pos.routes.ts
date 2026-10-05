@@ -12,7 +12,7 @@ import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedg
 import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger.js";
 import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
 import { computeStockRequirements, addonStockInclude, addonStockSelect, serviceStockSelect, serviceVariantStockSelect, variantStockInclude, variantStockSelect, type OrderItemForStock } from "../../lib/stockRequirements.js";
-import { DispatchError, dispatchRequired, orderDispatchInfo, supplyingStoreId } from "../../lib/dispatch.js";
+import { DispatchError, dispatchRequired, netOfOmitted, orderDispatchInfo, supplyingStoreId } from "../../lib/dispatch.js";
 import { currentMemberDiscount } from "../../lib/membership.js";
 import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js";
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
@@ -1131,7 +1131,7 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
   if (!stockLocationId) { res.status(400).json({ error: "No location is configured to hold stock for this order" }); return; }
 
   const tax = await taxSettingsFor(tid);
-  const requirements = computeStockRequirements(activeOrder.items);
+  const requirements = await netOfOmitted(tid, activeOrder.id, computeStockRequirements(activeOrder.items));
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -1236,7 +1236,7 @@ async function voidCompletedOrder(
   if (order.servedAt) {
     const stockLocationId = await resolveStockLocationId(args.tenantId, order.locationId);
     if (stockLocationId) {
-      const consumed = computeStockRequirements(order.items.filter((item) => !isUndeductedAddition(order, item)));
+      const consumed = await netOfOmitted(args.tenantId, order.id, computeStockRequirements(order.items.filter((item) => !isUndeductedAddition(order, item))));
       await applyStockDelta(tx, args.tenantId, stockLocationId, consumed, new Map(), order.orderNumber, { userId: args.userId });
     }
     await recordMenuLedger(tx, { tenantId: args.tenantId, type: "RETURN", order, lines: menuLedgerLinesFromItems(order.items), note: `Sale voided: ${args.reason}`, by: args.userId });
@@ -1370,7 +1370,7 @@ posRouter.post("/orders/:id/cancel/approve", requirePermission("POS_APPROVE_CANC
       if (order.servedAt) {
         const stockLocationId = await resolveStockLocationId(tid, order.locationId);
         if (stockLocationId) {
-          const req0 = computeStockRequirements(order.items.filter((item) => !isUndeductedAddition(order, item)));
+          const req0 = await netOfOmitted(tid, order.id, computeStockRequirements(order.items.filter((item) => !isUndeductedAddition(order, item))));
           await applyStockDelta(tx, tid, stockLocationId, req0, new Map(), order.orderNumber, req);
         }
         await recordMenuLedger(tx, { tenantId: tid, type: "RETURN", order, lines: menuLedgerLinesFromItems(order.items), note: order.cancelReason ? `Order cancelled: ${order.cancelReason}` : "Order cancelled", by: req.userId });
@@ -2535,7 +2535,7 @@ posRouter.post("/orders/:id/complete-service", async (req, res) => {
       // Claim first, conditionally: a double tap can't complete (and consume stock) twice.
       const claimed = await tx.posOrder.updateMany({ where: { id: order.id, status: "OPEN" }, data: { status: "SERVED", servedAt: new Date() } });
       if (claimed.count === 0) throw Object.assign(new Error("This service was already completed"), { status: 409 });
-      const requirements = computeStockRequirements(order.items);
+      const requirements = await netOfOmitted(tid, order.id, computeStockRequirements(order.items));
       if (requirements.size > 0) {
         const stockLocationId = await resolveStockLocationId(tid, order.locationId);
         if (!stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this service"), { status: 400 });

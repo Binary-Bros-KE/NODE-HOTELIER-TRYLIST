@@ -20,6 +20,32 @@ export class DispatchError extends Error {
   }
 }
 
+/**
+ * What the store didn't send for an order's lines (requested minus dispatched on
+ * each dispatched request) is never taken off the kitchen shelf. So a dispatch
+ * that omits an ingredient lets the dish still sell, without deducting it.
+ * Used by the sale deduction and by every reversal, so they always match.
+ */
+export async function netOfOmitted(tenantId: string, orderId: string, requirements: Map<string, { quantity: number; name: string }>) {
+  if (requirements.size === 0) return requirements;
+  const items = await prisma.stockDispatchItem.findMany({
+    where: { request: { orderId, tenantId }, dispatchedQty: { not: null } },
+    select: { productId: true, requestedQty: true, dispatchedQty: true },
+  });
+  const omitted = new Map<string, number>();
+  for (const item of items) {
+    const gap = Number(item.requestedQty) - Number(item.dispatchedQty);
+    if (gap > 0) omitted.set(item.productId, (omitted.get(item.productId) ?? 0) + gap);
+  }
+  if (omitted.size === 0) return requirements;
+  const net = new Map<string, { quantity: number; name: string }>();
+  for (const [productId, r] of requirements) {
+    const quantity = r.quantity - (omitted.get(productId) ?? 0);
+    if (quantity > 0) net.set(productId, { ...r, quantity });
+  }
+  return net;
+}
+
 export const dispatchRequired = (location: { serveMode: string; requireStoreDispatch: boolean } | null | undefined) =>
   Boolean(location && location.serveMode === "KITCHEN" && location.requireStoreDispatch);
 
