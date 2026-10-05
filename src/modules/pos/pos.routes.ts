@@ -2128,8 +2128,6 @@ posRouter.get("/product-stock", async (req, res) => {
     categoryId: z.string().cuid().optional(),
     stock: z.enum(["ALL", "LOW", "OUT"]).default("ALL"),
     inStockOnly: z.coerce.boolean().default(false),
-    // Operation tag (RECEPTION, HOUSEKEEPING, ...) — keeps the tab to that operation's products.
-    tag: z.string().trim().max(20).optional(),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
   const scope = await scopedLocationIds(tid, req.userId, query.data.locationId);
@@ -2140,7 +2138,6 @@ posRouter.get("/product-stock", async (req, res) => {
   const where: Prisma.ProductWhereInput = {
     tenantId: tid,
     isActive: true,
-    ...(query.data.tag ? { tags: { has: query.data.tag as never } } : {}),
     ...(query.data.categoryId ? { categoryId: query.data.categoryId } : {}),
     ...(query.data.search ? { OR: [
       { name: { contains: query.data.search, mode: "insensitive" } },
