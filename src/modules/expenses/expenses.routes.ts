@@ -142,7 +142,7 @@ expensesRouter.patch("/:id", async (req, res) => {
   const existingTransaction = data.data.paymentMethodId || data.data.reference !== undefined
     ? await prisma.transaction.findFirst({ where: { tenantId: tid, source: "EXPENSE", sourceRefId: existing.id }, select: { id: true } })
     : null;
-  const resolvedPayment = data.data.paymentMethodId || data.data.reference !== undefined ? await resolvePaymentMethod(tid, nextPaymentMethodId, nextReference, { excludeTransactionId: existingTransaction?.id }) : null;
+  const resolvedPayment = nextPaymentMethodId && (data.data.paymentMethodId || data.data.reference !== undefined) ? await resolvePaymentMethod(tid, nextPaymentMethodId, nextReference, { excludeTransactionId: existingTransaction?.id }) : null;
   const updateData = resolvedPayment ? { ...data.data, reference: resolvedPayment.reference } : data.data;
   const expense = await prisma.$transaction(async (tx) => {
     const updated = await tx.expense.update({ where: { id: existing.id }, data: updateData, include: expenseInclude });

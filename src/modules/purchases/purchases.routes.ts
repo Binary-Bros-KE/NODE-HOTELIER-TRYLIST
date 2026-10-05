@@ -2,7 +2,7 @@ import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
-import { nextPurchaseNo, nextGoodsReceiptNo, nextSupplierPaymentNo, nextTransactionNo } from "../../lib/sequence.js";
+import { nextPurchaseNo, nextGoodsReceiptNo, nextSupplierPaymentNo, nextTransactionNo, nextExpenseNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
 import { stockQuantityToCostUnits } from "../../lib/stockValuation.js";
@@ -572,6 +572,12 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
         include: { items: { include: { product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } } } } },
       });
 
+      // Expense items are never stocked: each received line is recorded as an expense.
+      const expenseProducts = new Map((await tx.product.findMany({
+        where: { tenantId: tid, id: { in: created.items.map((i) => i.productId) }, isExpenseItem: true },
+        select: { id: true, name: true, expenseCategoryId: true },
+      })).map((p) => [p.id, p]));
+      const expensesToRecord: { categoryId: string; name: string; quantity: number; amount: number }[] = [];
       let owed = 0;
       const receivedPurchaseItems = new Map<string, { item: typeof purchase.items[number]; unitCost: number }>();
       for (const receiptItem of created.items) {
@@ -579,6 +585,13 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
         const qty = Number(receiptItem.quantity);
         const cost = Number(receiptItem.unitCost);
         owed += receiptLineTotal(item, qty, cost);
+        const expenseProduct = expenseProducts.get(item.productId);
+        if (expenseProduct) {
+          if (!expenseProduct.expenseCategoryId) throw new HttpError(400, `${expenseProduct.name} has no expense category`);
+          expensesToRecord.push({ categoryId: expenseProduct.expenseCategoryId, name: expenseProduct.name, quantity: qty, amount: receiptLineTotal(item, qty, cost) });
+          await tx.purchaseItem.update({ where: { id: item.id }, data: { receivedQuantity: { increment: qty } } });
+          continue;
+        }
         receivedPurchaseItems.set(item.id, { item, unitCost: cost });
         try {
           await recordStockMovement(tx, {
@@ -592,6 +605,23 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
           throw error;
         }
         await tx.purchaseItem.update({ where: { id: item.id }, data: { receivedQuantity: { increment: qty } } });
+      }
+
+      for (const expense of expensesToRecord) {
+        await tx.expense.create({
+          data: {
+            tenantId: tid,
+            expenseNo: await nextExpenseNo(tid),
+            categoryId: expense.categoryId,
+            expenseDate: data.data.receivedAt ?? new Date(),
+            amount: round2(expense.amount),
+            reference: purchase.purchaseNo,
+            description: `${expense.name} × ${expense.quantity} · goods receipt ${receiptNo}`,
+            locationId: location.id,
+            status: "ACTIVE",
+            createdBy: req.userId ?? null,
+          },
+        });
       }
 
       await updateProductPricing(tx, tid, [...receivedPurchaseItems.values()].map(({ item, unitCost }) => ({

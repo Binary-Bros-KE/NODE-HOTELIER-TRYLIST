@@ -33,6 +33,9 @@ const productTagsSchema = z.array(z.enum(PRODUCT_TAGS)).max(10).optional();
 const productObjectSchema = z.object({
   categoryId: optionalId,
   tags: productTagsSchema,
+  // Bought and recorded as an expense on receipt, never stocked.
+  isExpenseItem: z.boolean().optional(),
+  expenseCategoryId: optionalId,
   trackingMode: z.enum(["PER_SALE", "ISSUE_ONLY", "PERIODIC_COUNT"]).optional(),
   name: z.string().trim().min(1).max(150),
   sku: optionalText(60),
@@ -271,6 +274,12 @@ productsRouter.post("/", async (req, res, next) => {
     }
     if (receivingLocationId) await assertLocationInTenant(receivingLocationId, tid);
     await assertPackUnit(rest.packUnitId, tid);
+    if (rest.isExpenseItem) {
+      if (!rest.expenseCategoryId) { res.status(400).json({ error: "Choose the expense category this item is recorded under" }); return; }
+      const expenseCategory = await prisma.expenseCategory.findFirst({ where: { id: rest.expenseCategoryId, tenantId: tid } });
+      if (!expenseCategory) { res.status(400).json({ error: "Expense category not found" }); return; }
+      if (openingStock > 0) { res.status(400).json({ error: "Expense items are not stocked, so they have no opening stock" }); return; }
+    }
     if (categoryId) {
       const category = await prisma.category.findFirst({ where: { id: categoryId, tenantId: tid, scope: "STORE" } });
       if (!category) { res.status(400).json({ error: "Selected category was not found" }); return; }

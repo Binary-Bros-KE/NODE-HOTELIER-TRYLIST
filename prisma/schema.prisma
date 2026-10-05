@@ -1619,6 +1619,7 @@ model ExpenseCategory {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   expenses    Expense[]
+  products    Product[]
 
   @@unique([tenantId, name])
 }
@@ -1642,8 +1643,9 @@ model Expense {
   category          ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   expenseDate       DateTime        @default(now())
   amount            Decimal         @db.Decimal(12, 2)
-  paymentMethodId   String
-  paymentMethod     PaymentMethod   @relation(fields: [paymentMethodId], references: [id], onDelete: Restrict)
+  // Empty for expenses accrued on goods receipt: nothing has been paid yet, the supplier owes it.
+  paymentMethodId   String?
+  paymentMethod     PaymentMethod?  @relation(fields: [paymentMethodId], references: [id], onDelete: Restrict)
   reference         String?
   description       String?
   locationId        String?
@@ -2214,6 +2216,11 @@ model Product {
   tags          LocationType[] @default([])
   isPerishable  Boolean @default(false)
   trackingMode  StockTrackingMode @default(PER_SALE)
+  // Bought and recorded as an expense when goods are received (cooking gas, wipes):
+  // never stocked, no stock movements, costed to an expense category instead.
+  isExpenseItem       Boolean  @default(false)
+  expenseCategoryId   String?
+  expenseCategory     ExpenseCategory? @relation(fields: [expenseCategoryId], references: [id], onDelete: SetNull)
   shelfLifeDays Int?
 
   // Pack / container tracking (bar bottles, kegs, cases). When packSize +

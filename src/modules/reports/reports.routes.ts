@@ -41,6 +41,8 @@ function dayBounds(from?: string, to?: string) {
 // ============================================================================
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+// Expenses accrued on goods receipt have no payment method until the supplier is paid.
+const ACCRUED_LABEL = "Accrued (not yet paid)";
 
 /** Cash that was really a customer settling CREDIT given earlier, not a new
  * sale: a POS payment recorded after the order had already been completed on
@@ -1672,7 +1674,7 @@ reportsRouter.get("/expenses", async (req, res, next) => {
       b.count += 1; b.total += amount;
       methodMap.set(name, b);
     };
-    for (const e of expenses) addMethod(e.paymentMethod.name, Number(e.amount));
+    for (const e of expenses) addMethod(e.paymentMethod?.name ?? ACCRUED_LABEL, Number(e.amount));
     for (const s of salaries) addMethod(s.paymentMethod ? salaryMethodLabel[s.paymentMethod] ?? s.paymentMethod : "Not set", Number(s.netPay));
     for (const p of supplierPayments) addMethod(p.paymentMethod?.name ?? "Unknown", Number(p.amount));
     for (const m of assetMovements) addMethod(m.paymentMethod?.name ?? "Unknown", assetMovementValue(m));
@@ -1706,7 +1708,7 @@ reportsRouter.get("/expenses", async (req, res, next) => {
       byPaymentMethod,
       expensesList: expenses.map((e) => ({
         id: e.id, expenseNo: e.expenseNo, date: e.expenseDate.toISOString(), category: e.category.name,
-        amount: round2(Number(e.amount)), paymentMethod: e.paymentMethod.name, reference: e.reference, description: e.description,
+        amount: round2(Number(e.amount)), paymentMethod: e.paymentMethod?.name ?? ACCRUED_LABEL, reference: e.reference, description: e.description,
         location: e.location?.name ?? null, recordedBy: e.createdByEmployee ? fullName(e.createdByEmployee) : null,
       })),
       salariesList: salaries.map((s) => ({
