@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
+import { stampDayWithNowTime } from "../../lib/businessDay.js";
 import { prisma } from "../../lib/prisma.js";
 import { nextPurchaseNo, nextGoodsReceiptNo, nextSupplierPaymentNo, nextTransactionNo, nextExpenseNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
@@ -470,7 +471,7 @@ const receiptLineSchema = z.object({
 
 const receiptSchema = z.object({
   locationId: z.string().trim().min(1),
-  receivedAt: optionalDate,
+  receivedAt: z.preprocess(blankToUndefined, z.coerce.date().optional()).transform((d) => (d ? stampDayWithNowTime(d) : undefined)),
   note: optionalText(500),
   items: z.array(receiptLineSchema).min(1, "Add at least one item"),
 });

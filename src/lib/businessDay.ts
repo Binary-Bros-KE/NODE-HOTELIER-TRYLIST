@@ -18,6 +18,16 @@ export function businessDayStart(startHour: number, at: Date = new Date()): Date
   return nairobiWallClockToUtc(y.year, y.month, y.day, startHour, 0);
 }
 
+/** A day picked without a time (the form sends "2026-10-05", which parses to
+ * midnight UTC - 03:00 in Nairobi) is stamped with the current Nairobi time of
+ * day, so it reads as when it was recorded and falls inside its own business
+ * day. Values with a real time of day pass through unchanged. */
+export function stampDayWithNowTime(value: Date, now: Date = new Date()): Date {
+  if (value.getTime() % DAY_MS !== 0) return value;
+  const clock = nairobiParts(now);
+  return nairobiWallClockToUtc(value.getUTCFullYear(), value.getUTCMonth() + 1, value.getUTCDate(), clock.hour, clock.minute);
+}
+
 /** Y-M-D (as a UTC-midnight marker, same convention as nairobiDateOnly) that
  * names the business day containing `at` — the calendar date it started on. */
 export function businessDateOnly(startHour: number, at: Date): Date {
