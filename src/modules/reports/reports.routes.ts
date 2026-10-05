@@ -1907,7 +1907,7 @@ reportsRouter.get("/purchases", async (req, res, next) => {
 // checks itself (opening + net change must equal closing).
 // ============================================================================
 const STOCK_IN_TYPES = ["OPENING_STOCK", "PURCHASE", "TRANSFER_IN", "RETURN", "BORROWED_IN", "RETURNED_BORROWED_STOCK", "LOAN_RETURNED"];
-const STOCK_OUT_TYPES = ["SALE", "TRANSFER_OUT", "ROOM_CONSUMPTION", "DAMAGE_LOSS", "LENT_OUT"];
+const STOCK_OUT_TYPES = ["SALE", "TRANSFER_OUT", "ROOM_CONSUMPTION", "DAMAGE_LOSS", "LENT_OUT", "ISSUE", "USAGE"];
 const STOCK_ADJUST_TYPES = ["ADJUSTMENT"];
 
 reportsRouter.get("/stock-movements", async (req, res, next) => {

@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "./prisma.js";
 import { createDispatchRequest, dispatchRequired, lineNeedsDispatch } from "./dispatch.js";
 import { addonStockInclude, computeStockRequirements, variantStockSelect } from "./stockRequirements.js";
+import { perSaleRequirements } from "./trackingMode.js";
 
 /**
  * The store step runs itself: the moment an order (or a round added to one) is
@@ -71,7 +72,7 @@ export async function refreshOpenRequest(tx: Prisma.TransactionClient, tenantId:
   const request = await tx.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId, status: "REQUESTED" }, select: { id: true } });
   if (!request) return;
   const lines = await tx.posOrderItem.findMany({ where: { dispatchRequestId: requestId }, include: stockLineInclude });
-  const requirements = computeStockRequirements(lines);
+  const requirements = await perSaleRequirements(tx, tenantId, computeStockRequirements(lines));
   if (requirements.size === 0) {
     await tx.stockDispatchRequest.update({ where: { id: requestId }, data: { status: "CANCELLED", respondedAt: new Date() } });
     await tx.posOrderItem.updateMany({ where: { dispatchRequestId: requestId }, data: { dispatchRequestId: null } });

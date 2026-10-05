@@ -126,6 +126,19 @@ enum StockMovementType {
   RETURNED_BORROWED_STOCK
   LENT_OUT
   LOAN_RETURNED
+  ISSUE
+  USAGE
+}
+
+// How a product's stock leaves a location. PER_SALE is the default: the recipe
+// takes it off on every sale. ISSUE_ONLY is handed out and treated as used the
+// moment it's issued (sugar bowls, salt). PERIODIC_COUNT is kept on the shelf
+// and used until finished; the closing count posts what was used (frying oil).
+// Recipe lines never deduct a product that isn't PER_SALE.
+enum StockTrackingMode {
+  PER_SALE
+  ISSUE_ONLY
+  PERIODIC_COUNT
 }
 
 // Which part of the property a category organizes. One shared hierarchy —
@@ -2200,6 +2213,7 @@ model Product {
   // never decides this, so a zero-stock product is still in its section.
   tags          LocationType[] @default([])
   isPerishable  Boolean @default(false)
+  trackingMode  StockTrackingMode @default(PER_SALE)
   shelfLifeDays Int?
 
   // Pack / container tracking (bar bottles, kegs, cases). When packSize +

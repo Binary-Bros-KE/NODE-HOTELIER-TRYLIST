@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "./prisma.js";
 import { nextSequenceNo } from "./sequence.js";
 import { computeStockRequirements, type OrderItemForStock } from "./stockRequirements.js";
+import { perSaleRequirements } from "./trackingMode.js";
 
 /**
  * Store dispatch: at a KITCHEN-mode location with `requireStoreDispatch`, the
@@ -86,7 +87,8 @@ export async function createDispatchRequest(order: RequestableOrder, actorId: st
   if (!fromLocationId) throw new DispatchError("No store is set up to supply this kitchen. Choose one in Locations.", 409);
   if (fromLocationId === location.id) throw new DispatchError("The supplying store can't be the kitchen itself", 409);
 
-  const requirements = computeStockRequirements(lines);
+  const requirements = await perSaleRequirements(prisma, order.tenantId, computeStockRequirements(lines));
+  if (requirements.size === 0) throw new DispatchError("These lines are issued or counted at the kitchen, not requested from the store", 409);
   const requestNo = await nextSequenceNo(order.tenantId, "dispatch", "DSP", 6);
   const requesterName = await employeeName(prisma, order.tenantId, actorId);
 

@@ -33,6 +33,7 @@ const productTagsSchema = z.array(z.enum(PRODUCT_TAGS)).max(10).optional();
 const productObjectSchema = z.object({
   categoryId: optionalId,
   tags: productTagsSchema,
+  trackingMode: z.enum(["PER_SALE", "ISSUE_ONLY", "PERIODIC_COUNT"]).optional(),
   name: z.string().trim().min(1).max(150),
   sku: optionalText(60),
   barcode: optionalText(60),
@@ -145,6 +146,7 @@ const productFields = {
   unit: true,
   unitRef: { select: { id: true, name: true } },
   tags: true,
+  trackingMode: true,
   isPerishable: true,
   shelfLifeDays: true,
   packSize: true,

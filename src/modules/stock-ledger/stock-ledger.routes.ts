@@ -11,7 +11,7 @@ import { blankToUndefined, dateOnlyStamp, localStamp, parseLocalStamp } from "..
 export const stockLedgerRouter = Router();
 
 const STOCK_MOVEMENT_TYPES = [
-  "OPENING_STOCK", "PURCHASE", "SALE", "TRANSFER_IN", "TRANSFER_OUT", "RETURN",
+  "OPENING_STOCK", "PURCHASE", "SALE", "TRANSFER_IN", "TRANSFER_OUT", "RETURN", "ISSUE", "USAGE",
   "DAMAGE_LOSS", "ADJUSTMENT", "BORROWED_IN", "RETURNED_BORROWED_STOCK", "LENT_OUT", "LOAN_RETURNED", "ROOM_CONSUMPTION",
 ] as const;
 

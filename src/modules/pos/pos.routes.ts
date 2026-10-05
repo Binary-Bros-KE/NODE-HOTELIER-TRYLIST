@@ -17,6 +17,7 @@ import { currentMemberDiscount } from "../../lib/membership.js";
 import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js";
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
 import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, resolveStockLocationId, settleServedAdditions } from "../../lib/orderStock.js";
+import { perSaleRequirements } from "../../lib/trackingMode.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 import { businessDayStart, businessDayWindowForDateOnly } from "../../lib/businessDay.js";
 import { dateOnlyStamp, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
@@ -900,6 +901,8 @@ async function applyStockDelta(
   orderNumber: number,
   req: { userId?: string },
 ) {
+  before = await perSaleRequirements(tx, tid, before);
+  after = await perSaleRequirements(tx, tid, after);
   const productIds = new Set([...before.keys(), ...after.keys()]);
   for (const productId of productIds) {
     const b = before.get(productId);
@@ -1093,7 +1096,7 @@ async function assertStockAvailable(
   requirements: Map<string, { quantity: number; name: string }>,
   locationId: string,
 ) {
-  for (const [productId, requirement] of requirements) {
+  for (const [productId, requirement] of await perSaleRequirements(tx, tid, requirements)) {
     const row = await tx.productStock.findUnique({
       where: { tenantId_productId_locationId: { tenantId: tid, productId, locationId } },
       select: { quantity: true },

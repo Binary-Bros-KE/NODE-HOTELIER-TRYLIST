@@ -4,6 +4,7 @@ import { prisma } from "./prisma.js";
 import { DispatchError, dispatchRequired, orderDispatchInfo } from "./dispatch.js";
 import { recordStockMovement, InsufficientStockError } from "./stockLedger.js";
 import { computeStockRequirements, type OrderItemForStock } from "./stockRequirements.js";
+import { perSaleRequirements } from "./trackingMode.js";
 
 /** Falls back to the tenant's warehouse (type STORE) when a sale has no
  * location of its own — e.g. a property that isn't using locations at all. */
@@ -24,7 +25,7 @@ export async function deductStockForOrder(
   orderNumber: number,
   req: { userId?: string },
 ) {
-  for (const [productId, requirement] of requirements) {
+  for (const [productId, requirement] of await perSaleRequirements(tx, tid, requirements)) {
     try {
       await recordStockMovement(tx, {
         tenantId: tid, productId, locationId, type: "SALE", quantity: -requirement.quantity,
