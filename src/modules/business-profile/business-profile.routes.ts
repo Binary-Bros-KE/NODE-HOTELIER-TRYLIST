@@ -17,10 +17,13 @@ const currencies = ["KES", "UGX", "TZS", "USD"] as const;
 const taxModes = ["INCLUSIVE", "EXCLUSIVE"] as const;
 const taxTreatments = ["STANDARD", "ZERO_RATED", "EXEMPT"] as const;
 
+// A cleared field must be saved as null: an undefined value is skipped by the
+// update, so the old value would silently stay in the database.
+const blankToNull = (v: unknown) => (typeof v === "string" && v.trim() === "" ? null : v);
+const optionalText = (max: number) => z.preprocess(blankToNull, z.string().trim().max(max).nullable().optional());
+const optionalEmail = z.preprocess(blankToNull, z.email().nullable().optional());
 const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
-const optionalText = (max: number) => z.preprocess(blankToUndefined, z.string().trim().max(max).optional());
-const optionalEmail = z.preprocess(blankToUndefined, z.email().optional());
-const optionalRate = z.preprocess(blankToUndefined, z.coerce.number().min(0).max(100).optional());
+const optionalRate = z.preprocess(blankToUndefined,z.coerce.number().min(0).max(100).optional());
 
 const profileSchema = z.object({
   logoUrl: optionalText(2000),
