@@ -110,6 +110,8 @@ const salaryInclude = {
       firstName: true,
       lastName: true,
       employeeCode: true,
+      jobTitle: true,
+      phone: true,
       salaryAmount: true,
       salaryType: true,
       paymentMethod: true,
