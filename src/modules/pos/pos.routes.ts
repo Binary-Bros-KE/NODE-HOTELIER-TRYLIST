@@ -12,7 +12,7 @@ import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedg
 import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger.js";
 import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
 import { computeStockRequirements, addonStockInclude, addonStockSelect, serviceStockSelect, serviceVariantStockSelect, variantStockInclude, variantStockSelect, type OrderItemForStock } from "../../lib/stockRequirements.js";
-import { DispatchError, dispatchRequired, orderDispatchInfo, supplyingStoreId } from "../../lib/dispatch.js";
+import { DispatchError, dispatchRequired, employeeName, orderDispatchInfo, supplyingStoreId } from "../../lib/dispatch.js";
 import { currentMemberDiscount } from "../../lib/membership.js";
 import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js";
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
@@ -1226,8 +1226,9 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
   // A service sale is created already SERVED and paid in a second step; if that step fails the
   // till withdraws it (no payment yet) and puts back whatever stock it consumed.
   const unpaidServiceSale = order.channel === "SERVICES" && order.status === "SERVED" && order.payments.length === 0;
-  if (!unpaidServiceSale && (!["OPEN", "PREPARING", "READY"].includes(order.status) || order.servedAt)) {
-    res.status(409).json({ error: "Only orders that have not been served can be reverted" });
+  // Once the kitchen has started an order it can no longer be reverted.
+  if (!unpaidServiceSale && (order.status !== "OPEN" || order.servedAt)) {
+    res.status(409).json({ error: "The kitchen has already started this order, so it can't be reverted" });
     return;
   }
   if (order.payments.length > 0) {
@@ -1260,6 +1261,23 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
           });
         }
       }
+      const value = order.items.reduce((sum, i) => sum + Number(i.unitPrice) * i.quantity, 0) - Number(order.discount);
+      await tx.posOrderRevert.create({
+        data: {
+          tenantId: tid,
+          orderNumber: order.orderNumber,
+          locationName: order.location?.name ?? null,
+          tableLabel: order.table?.label ?? null,
+          orderStatus: order.status,
+          total: value,
+          items: order.items.map((i) => ({ name: i.menuItem?.name ?? i.service?.name ?? i.product?.name ?? "Item", variant: i.variant?.name ?? i.serviceVariant?.name ?? null, quantity: i.quantity })),
+          dispatchNos: dispatched.map((r) => r.requestNo),
+          createdById: order.createdBy ?? null,
+          createdByName: await employeeName(tx, tid, order.createdBy),
+          revertedById: req.userId ?? null,
+          revertedByName: await employeeName(tx, tid, req.userId),
+        },
+      });
       await tx.posOrder.delete({ where: { id: order.id } });
       if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
     });
@@ -1483,6 +1501,13 @@ posRouter.post("/orders/:id/cancel/reject", requirePermission("POS_APPROVE_CANCE
  * is actually ready to settle). Splits are fine either way — several partial
  * payments, or a mix of cash and a room charge, are both allowed. Completes
  * and frees the table once fully covered. */
+// Orders reverted (removed from the sales), newest first, for the Approvals tab.
+posRouter.get("/reverted-orders", requirePermission("POS_APPROVE_CANCELLATION"), async (req, res) => {
+  const tid = tenantIdFor(req);
+  const rows = await prisma.posOrderRevert.findMany({ where: { tenantId: tid }, orderBy: { revertedAt: "desc" }, take: 100 });
+  res.json({ reverted: rows.map((r) => ({ ...r, total: Number(r.total) })) });
+});
+
 posRouter.get("/return-requests", requirePermission("POS_APPROVE_CANCELLATION"), async (req, res) => {
   const query = z.object({
     status: z.enum(["PENDING", "APPROVED", "REJECTED"]).optional(),
