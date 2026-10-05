@@ -656,7 +656,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // recorded the payment. Collecting an old room bill doesn't count as a sale.
     for (const order of completedOrders) addToEmployee(order.createdBy, computeOrderFinancials(order, tax).total, 1);
     const roomLinesByEmployee = new Map<string, typeof roomSoldLines>();
-    for (const l of roomSoldLines) {
+    for (const l of roomSoldLines.filter((line) => line.source === "ROOM")) {
       const key = l.createdBy ?? "unattributed";
       roomLinesByEmployee.set(key, [...(roomLinesByEmployee.get(key) ?? []), l]);
     }
@@ -801,52 +801,64 @@ reportsRouter.get("/employees/:employeeId/breakdown", async (req, res, next) => 
     const employee = await prisma.employee.findFirst({ where: { id: req.params.employeeId, tenantId: tid }, select: { id: true, firstName: true, lastName: true } });
     if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
 
+    const tax = await taxSettingsFor(tid);
     const transactionsIn = await prisma.transaction.findMany({
       where: { tenantId: tid, employeeId: employee.id, direction: "IN", status: "COMPLETE", createdAt: { gte: from, lte: to } },
       include: { paymentMethod: { select: { name: true } } },
     });
     const repaymentTxnIds = await creditRepaymentTxnIds(tid, transactionsIn);
-    const newSaleTransactions = transactionsIn.filter((t) => !repaymentTxnIds.has(t.id));
+    const cashTransactions = transactionsIn.filter((t) => !repaymentTxnIds.has(t.id));
 
-    const creditEntries = await prisma.customerCreditEntry.findMany({
+    // What was sold: completed orders this employee created, and room charges they posted,
+    // on the same basis as Sales by Employee. Cash taken for earlier bills is listed separately.
+    const orders = await prisma.posOrder.findMany({
+      where: { tenantId: tid, createdBy: employee.id, status: "COMPLETED", completedAt: { gte: from, lte: to } },
+      include: { items: { include: orderItemInclude }, payments: { select: { amount: true } } },
+    });
+    const roomLines = await prisma.folioLineItem.findMany({
       where: {
-        tenantId: tid, type: "CREDIT", createdAt: { gte: from, lte: to },
-        OR: [{ createdBy: employee.id }, { createdBy: null, order: { createdBy: employee.id } }],
+        tenantId: tid, createdBy: employee.id, source: "ROOM", createdAt: { gte: from, lte: to },
+        folio: { reservation: { roomSaleType: { not: "COMPLIMENTARY" }, status: { notIn: ["CANCELLED", "NO_SHOW"] } } },
       },
-      select: { amount: true, orderId: true },
+      select: {
+        id: true, label: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true, createdAt: true,
+        folio: { select: { reservation: { select: { room: { select: { number: true } }, customer: { select: { firstName: true, lastName: true } } } } } },
+      },
     });
 
-    // Orders behind these transactions/credits, for the "Sales" list — POS_SALE
-    // txns point at a Payment (sourceRefId), which points at the order.
-    const paymentIds = newSaleTransactions.filter((t) => t.source === "POS_SALE" && t.sourceRefId).map((t) => t.sourceRefId!);
-    const paymentOrderIds = paymentIds.length
-      ? (await prisma.payment.findMany({ where: { tenantId: tid, id: { in: paymentIds } }, select: { orderId: true } })).map((p) => p.orderId)
-      : [];
-    const creditOrderIds = creditEntries.filter((c) => c.orderId).map((c) => c.orderId!);
-    const orderIds = [...new Set([...paymentOrderIds, ...creditOrderIds])];
-    const orders = orderIds.length ? await prisma.posOrder.findMany({
-      where: { tenantId: tid, id: { in: orderIds } },
-      select: {
-        id: true, orderNumber: true, status: true, paymentStatus: true, saleType: true,
-        complimentaryOrderRole: true, complimentaryRecipientName: true, createdAt: true,
-        items: { select: { quantity: true, unitPrice: true } }, payments: { select: { amount: true } },
-      },
-    }) : [];
+    const orderRows = orders.map((o) => {
+      const fin = computeOrderFinancials(o, tax);
+      return {
+        id: o.id, orderNumber: o.orderNumber, status: o.status, paymentStatus: o.paymentStatus, saleType: o.saleType,
+        complimentaryOrderRole: o.complimentaryOrderRole, complimentaryRecipientName: o.complimentaryRecipientName,
+        createdAt: o.createdAt, total: fin.total,
+        paid: o.payments.reduce((s, p) => s + Number(p.amount), 0),
+      };
+    });
+    const roomRows = roomLines.map((line) => ({
+      id: line.id, kind: "FOLIO" as const, label: line.label, source: "ROOM",
+      roomNumber: line.folio.reservation.room.number,
+      guestName: `${line.folio.reservation.customer.firstName} ${line.folio.reservation.customer.lastName ?? ""}`.trim(),
+      createdAt: line.createdAt, total: round2(folioLinesFinancials([line], tax).total),
+    }));
+    const orderTotal = round2(orderRows.reduce((s, o) => s + o.total, 0));
+    const roomTotal = round2(roomRows.reduce((s, r) => s + r.total, 0));
+    const membershipTotal = round2(transactionsIn.filter((t) => t.source === "MEMBERSHIP_PAYMENT").reduce((s, t) => s + Number(t.amount), 0));
+    const totalSales = round2(orderTotal + roomTotal + membershipTotal);
+    const creditSales = round2(orderRows.reduce((s, o) => s + Math.max(0, o.total - o.paid), 0));
 
     const byPaymentMethod = new Map<string, { paymentMethodId: string | null; name: string; total: number; count: number }>();
-    for (const t of newSaleTransactions) {
+    for (const t of cashTransactions) {
       const key = t.paymentMethodId ?? "unknown";
       const bucket = byPaymentMethod.get(key) ?? { paymentMethodId: t.paymentMethodId, name: t.paymentMethod?.name ?? "Unknown", total: 0, count: 0 };
       bucket.total += Number(t.amount);
       bucket.count += 1;
       byPaymentMethod.set(key, bucket);
     }
-    const creditTotal = creditEntries.reduce((s, c) => s + Number(c.amount), 0);
     const byPaymentMethodRows = [...byPaymentMethod.values()];
-    if (creditTotal > 0.01) byPaymentMethodRows.push({ paymentMethodId: null, name: "Credit", total: round2(creditTotal), count: creditEntries.length });
+    if (creditSales > 0.01) byPaymentMethodRows.push({ paymentMethodId: null, name: "Credit", total: creditSales, count: orderRows.filter((o) => o.total - o.paid > 0.01).length });
 
-    const totalPaid = round2(newSaleTransactions.reduce((s, t) => s + Number(t.amount), 0));
-    const totalSales = round2(totalPaid + creditTotal);
+    const totalPaid = round2(cashTransactions.reduce((s, t) => s + Number(t.amount), 0));
 
     res.json({
       employee,
@@ -858,21 +870,15 @@ reportsRouter.get("/employees/:employeeId/breakdown", async (req, res, next) => 
         totalPaid,
         complimentaryTotal: 0,
         complimentaryCount: 0,
-        creditSales: round2(creditTotal),
+        creditSales,
         pendingOrders: 0,
         byPaymentMethod: byPaymentMethodRows.map((b) => ({ ...b, total: round2(b.total) })),
-        transactions: newSaleTransactions.map((t) => ({
+        transactions: cashTransactions.map((t) => ({
           id: t.id, transactionNo: t.transactionNo, direction: t.direction, source: t.source,
           amount: Number(t.amount), paymentMethod: t.paymentMethod?.name ?? null,
           reference: t.reference, description: t.description, createdAt: t.createdAt,
         })),
-        sales: orders.map((o) => ({
-          id: o.id, orderNumber: o.orderNumber, status: o.status, paymentStatus: o.paymentStatus, saleType: o.saleType,
-          complimentaryOrderRole: o.complimentaryOrderRole, complimentaryRecipientName: o.complimentaryRecipientName,
-          createdAt: o.createdAt,
-          total: o.items.reduce((s, i) => s + Number(i.unitPrice) * i.quantity, 0),
-          paid: o.payments.reduce((s, p) => s + Number(p.amount), 0),
-        })),
+        sales: [...orderRows, ...roomRows].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()),
       },
     });
   } catch (error) {

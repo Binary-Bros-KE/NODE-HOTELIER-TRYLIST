@@ -119,7 +119,8 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       orderBy: { createdAt: "asc" },
     }),
     prisma.folioLineItem.findMany({
-      where: { tenantId: tid, createdBy: employeeId, source: { not: "POS_ORDER" }, createdAt: { gte: from, lte: to }, folio: { reservation: { status: { notIn: ["CANCELLED", "NO_SHOW"] } } } },
+      // Sales are gross: a discount never reduces what was sold, and a complimentary room is not a sale.
+      where: { tenantId: tid, createdBy: employeeId, source: { notIn: ["POS_ORDER", "DISCOUNT"] }, createdAt: { gte: from, lte: to }, folio: { reservation: { status: { notIn: ["CANCELLED", "NO_SHOW"] } } }, NOT: { source: "ROOM", folio: { reservation: { roomSaleType: "COMPLIMENTARY" } } } },
       select: {
         id: true,
         source: true,
