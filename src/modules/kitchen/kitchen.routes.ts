@@ -61,10 +61,30 @@ async function loadTicket(req: Request, status: string[]) {
   return order;
 }
 
+/** Only the chef who claimed a ticket can finish or release it. */
+async function assertPreparer(order: { preparingBy: string | null }, userId: string | undefined) {
+  if (order.preparingBy && order.preparingBy === userId) return;
+  if (!order.preparingBy) throw new DispatchError("Nobody has claimed this order yet. Claim it first.", 409, "NOT_CLAIMED");
+  const who = await prisma.employee.findUnique({ where: { id: order.preparingBy }, select: { firstName: true, lastName: true } });
+  throw new DispatchError(`Claimed by ${who ? `${who.firstName} ${who.lastName}`.trim() : "another chef"}. Only they can finish or release it.`, 403, "CLAIMED_BY_OTHER");
+}
+
+/** Adds the names of who claimed and who marked each ticket ready. */
+async function withPreparers<T extends { preparingBy: string | null; readyBy: string | null }>(orders: T[]) {
+  const ids = [...new Set(orders.flatMap((order) => [order.preparingBy, order.readyBy]).filter((id): id is string => Boolean(id)))];
+  const people = ids.length ? await prisma.employee.findMany({ where: { id: { in: ids } }, select: { id: true, firstName: true, lastName: true } }) : [];
+  const names = new Map(people.map((person) => [person.id, `${person.firstName} ${person.lastName}`.trim()]));
+  return orders.map((order) => ({
+    ...order,
+    preparedByName: order.preparingBy ? names.get(order.preparingBy) ?? "Unknown" : null,
+    readyByName: order.readyBy ? names.get(order.readyBy) ?? "Unknown" : null,
+  }));
+}
+
 /** Live queue created by POS, enriched with menu and linked product recipes. */
 kitchenRouter.get("/orders", handle(async (req, res) => {
   const orders = await prisma.posOrder.findMany({ where: { tenantId: tenantId(req), channel: "FOOD", status: { in: ["OPEN", "PREPARING"] }, ...(await locationScope(req)) }, include: orderInclude, orderBy: { createdAt: "asc" } });
-  res.json({ orders: orders.map(withDispatch) });
+  res.json({ orders: await withPreparers(orders.map(withDispatch)) });
 }));
 
 /** Orders with at least one line added (or bumped) after kitchen/bar already
@@ -79,7 +99,7 @@ kitchenRouter.get("/orders/updated", handle(async (req, res) => {
     include: orderInclude,
     orderBy: { updatedAt: "desc" },
   });
-  res.json({ orders: orders.map(withDispatch) });
+  res.json({ orders: await withPreparers(orders.map(withDispatch)) });
 }));
 
 /** Acknowledges every flagged line on this order — kitchen/bar has now seen
@@ -118,13 +138,23 @@ kitchenRouter.patch("/orders/:id/start", handle(async (req, res) => {
  * that's the point the ingredients are truly gone, not before. */
 kitchenRouter.patch("/orders/:id/ready", handle(async (req, res) => {
   const order = await loadTicket(req, ["PREPARING"]);
+  await assertPreparer(order, req.userId);
   // A round added mid-prep needs its own dispatch before the ticket can finish.
   const dispatch = orderDispatchInfo(order);
   if (!dispatch.clear) throw new DispatchError(dispatch.state === "WAITING" ? "Waiting for the store to dispatch the added items" : "Request the added items from the store first", 409, "DISPATCH_REQUIRED");
-  const claimed = await prisma.posOrder.updateMany({ where: { id: order.id, tenantId: tenantId(req), status: "PREPARING" }, data: { status: "READY", readyAt: new Date(), readyBy: req.userId ?? null } });
+  const claimed = await prisma.posOrder.updateMany({ where: { id: order.id, tenantId: tenantId(req), status: "PREPARING", preparingBy: req.userId }, data: { status: "READY", readyAt: new Date(), readyBy: req.userId ?? null } });
   if (!claimed.count) throw new DispatchError("This ticket is no longer being prepared", 409);
   const fresh = await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
   res.json({ notification: { type: "ORDER_READY", message: `Order #${fresh.orderNumber} is ready to serve` }, order: withDispatch(fresh) });
+}));
+
+/** Puts a ticket the chef claimed back in the queue for someone else to take. */
+kitchenRouter.patch("/orders/:id/release", handle(async (req, res) => {
+  const order = await loadTicket(req, ["PREPARING"]);
+  await assertPreparer(order, req.userId);
+  const released = await prisma.posOrder.updateMany({ where: { id: order.id, tenantId: tenantId(req), status: "PREPARING", preparingBy: req.userId }, data: { status: "OPEN", preparingBy: null, preparingAt: null } });
+  if (!released.count) throw new DispatchError("This ticket is no longer being prepared", 409);
+  res.json({ order: withDispatch(await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude })) });
 }));
 
 /** The chef asks the store for the ingredients of every line not yet covered. */
