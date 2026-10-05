@@ -2451,10 +2451,6 @@ model Location {
   // before a ticket can be started. dispatchFromLocationId is the Store that
   // supplies this kitchen (falls back to the first STORE location).
   requireStoreDispatch   Boolean                @default(false)
-  // Sell even when the location doesn't have the stock (e.g. a restaurant posting
-  // a dish whose balance hasn't been counted in). The balance goes negative and
-  // the gap shows on the stock ledger; nothing is blocked at the till.
-  allowOutOfStockSale    Boolean                @default(false)
   // Queue the store's dispatch slip to the store's printer the moment an order
   // is posted (true), or leave printing to the storekeeper's Print button (false).
   dispatchAutoPrint      Boolean                @default(true)

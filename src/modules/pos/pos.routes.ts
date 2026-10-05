@@ -903,7 +903,6 @@ async function applyStockDelta(
 ) {
   before = await perSaleRequirements(tx, tid, before);
   after = await perSaleRequirements(tx, tid, after);
-  const allowNegative = (await tx.location.findUnique({ where: { id: locationId }, select: { allowOutOfStockSale: true } }))?.allowOutOfStockSale ?? false;
   const productIds = new Set([...before.keys(), ...after.keys()]);
   for (const productId of productIds) {
     const b = before.get(productId);
@@ -916,7 +915,6 @@ async function applyStockDelta(
         tenantId: tid, productId, locationId,
         type: delta > 0 ? "SALE" : "RETURN",
         quantity: -delta,
-        allowNegative,
         note: `POS order #${orderNumber} line ${delta > 0 ? "increased" : "reduced"}`,
         sourceType: "POS_ORDER", sourceRefId: String(orderNumber),
         performedBy: req.userId ?? null, label: name,
@@ -1098,8 +1096,6 @@ async function assertStockAvailable(
   requirements: Map<string, { quantity: number; name: string }>,
   locationId: string,
 ) {
-  const allowOutOfStock = (await tx.location.findUnique({ where: { id: locationId }, select: { allowOutOfStockSale: true } }))?.allowOutOfStockSale ?? false;
-  if (allowOutOfStock) return;
   for (const [productId, requirement] of await perSaleRequirements(tx, tid, requirements)) {
     const row = await tx.productStock.findUnique({
       where: { tenantId_productId_locationId: { tenantId: tid, productId, locationId } },

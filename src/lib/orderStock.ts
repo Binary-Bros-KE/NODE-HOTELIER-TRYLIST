@@ -25,12 +25,10 @@ export async function deductStockForOrder(
   orderNumber: number,
   req: { userId?: string },
 ) {
-  const location = await tx.location.findUnique({ where: { id: locationId }, select: { allowOutOfStockSale: true } });
-  const allowNegative = location?.allowOutOfStockSale ?? false;
   for (const [productId, requirement] of await perSaleRequirements(tx, tid, requirements)) {
     try {
       await recordStockMovement(tx, {
-        tenantId: tid, productId, locationId, type: "SALE", quantity: -requirement.quantity, allowNegative,
+        tenantId: tid, productId, locationId, type: "SALE", quantity: -requirement.quantity,
         note: `Used for POS order #${orderNumber}`, sourceType: "POS_ORDER", sourceRefId: String(orderNumber),
         performedBy: req.userId ?? null, label: requirement.name,
       });

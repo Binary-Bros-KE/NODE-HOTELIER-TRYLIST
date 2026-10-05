@@ -42,7 +42,6 @@ const createSchema = z.object({
   serveMode: z.enum(SERVE_MODES).default("KITCHEN"),
   // Kitchen must get its ingredients dispatched by a store before starting a ticket.
   requireStoreDispatch: z.boolean().default(false),
-  allowOutOfStockSale: z.boolean().default(false),
   // Print the store's dispatch slip automatically when an order is posted (else the storekeeper prints it).
   dispatchAutoPrint: z.boolean().default(true),
   dispatchFromLocationId: z.string().cuid().nullable().optional(),
@@ -82,7 +81,6 @@ const locationFields = {
   canSellProducts: true,
   serveMode: true,
   requireStoreDispatch: true,
-  allowOutOfStockSale: true,
   dispatchAutoPrint: true,
   dispatchFromLocationId: true,
   receiptHeader: true,
