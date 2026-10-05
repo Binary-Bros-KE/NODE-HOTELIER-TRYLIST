@@ -7,6 +7,7 @@ import { prisma } from "../../lib/prisma.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
 import { DispatchError, employeeName } from "../../lib/dispatch.js";
 import { InsufficientStockError, recordStockMovement } from "../../lib/stockLedger.js";
+import { refreshOpenRequest } from "../../lib/dispatchAuto.js";
 
 // The store's side of a kitchen's ingredient request: see what the chef asked
 // for, dispatch it (a real store -> kitchen stock transfer) or reject it with a
@@ -62,6 +63,39 @@ const dispatchSchema = z.object({
   // Optional per-line override (e.g. the store only has part of it). Omitted lines go out in full.
   items: z.array(z.object({ itemId: z.string().min(1), quantity: z.coerce.number().min(0) })).optional(),
 });
+
+// The recipes behind a request's order, so the storekeeper can correct one at dispatch.
+dispatchRouter.get("/:id/recipes", handle(async (req, res) => {
+  const tid = tenantId(req);
+  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: req.params.id as string, tenantId: tid }, select: { orderId: true } });
+  if (!request) throw new DispatchError("Dispatch request not found", 404);
+  const lines = await prisma.posOrderItem.findMany({
+    where: { orderId: request.orderId },
+    select: { menuItem: { select: { name: true, recipeId: true } }, variant: { select: { name: true, recipeId: true } } },
+  });
+  const dishesByRecipe = new Map<string, string[]>();
+  for (const line of lines) {
+    const recipeId = line.variant?.recipeId ?? line.menuItem?.recipeId;
+    if (!recipeId) continue;
+    const dish = line.variant ? `${line.menuItem?.name} (${line.variant.name})` : (line.menuItem?.name ?? "");
+    const dishes = dishesByRecipe.get(recipeId) ?? [];
+    if (!dishes.includes(dish)) dishes.push(dish);
+    dishesByRecipe.set(recipeId, dishes);
+  }
+  const recipes = await prisma.recipe.findMany({ where: { tenantId: tid, id: { in: [...dishesByRecipe.keys()] } }, select: { id: true, name: true } });
+  res.json({ recipes: recipes.map((r) => ({ id: r.id, name: r.name, dishes: dishesByRecipe.get(r.id) ?? [] })) });
+}));
+
+// After a recipe is corrected, the waiting request is rebuilt from the order's lines.
+dispatchRouter.post("/:id/refresh", handle(async (req, res) => {
+  const tid = tenantId(req);
+  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: req.params.id as string, tenantId: tid }, select: { id: true, status: true } });
+  if (!request) throw new DispatchError("Dispatch request not found", 404);
+  if (request.status !== "REQUESTED") throw new DispatchError("Only a waiting request can be refreshed", 409);
+  await prisma.$transaction((tx) => refreshOpenRequest(tx, tid, request.id));
+  const fresh = await prisma.stockDispatchRequest.findUniqueOrThrow({ where: { id: request.id }, include: requestInclude });
+  res.json({ request: (await withStoreStock(tid, [fresh]))[0] });
+}));
 
 dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
   const parsed = dispatchSchema.safeParse(req.body ?? {});
