@@ -40,8 +40,25 @@ const listSchema = z.object({
 const advanceSchema = z.object({
   employeeId: z.string().trim().min(1),
   payPeriod: z.coerce.date(),
-  deductions: z.array(salaryLineSchema).min(1),
+  allowances: z.array(salaryLineSchema).default([]),
+  deductions: z.array(salaryLineSchema).default([]),
   notes: optionalText(500),
+}).refine((value) => value.allowances.length + value.deductions.length > 0, { message: "Add at least one allowance or deduction" });
+
+const defaultsSchema = z.object({
+  items: z.array(z.object({
+    id: z.string().trim().min(1).optional(),
+    type: z.enum(itemTypes),
+    label: z.string().trim().min(1).max(120),
+    amount: z.coerce.number().min(0),
+  })),
+});
+
+const reportSchema = z.object({
+  from: optionalDate,
+  to: optionalDate,
+  locationId: optionalId,
+  departmentId: optionalId,
 });
 
 const processSchema = z.object({
@@ -173,9 +190,29 @@ async function getOrCreateDraft(tx: Prisma.TransactionClient, tid: string, emplo
     if (existing.status !== "DRAFT") throw Object.assign(new Error("This month's salary is already closed"), { status: 409 });
     return existing;
   }
-  return tx.employeeSalary.create({
+  const created = await tx.employeeSalary.create({
     data: { tenantId: tid, payslipNo, employeeId, payPeriod, createdBy: by },
     select: { id: true, status: true },
+  });
+  await applyDefaults(tx, tid, created.id, employeeId);
+  return created;
+}
+
+/** Copies the employee's default allowances and deductions onto a salary as lines,
+ * alongside whatever is already there: nothing on the draft is replaced. A default
+ * already copied (by defaultId) is never copied twice. With `since`, only defaults
+ * added after that moment are copied, so one removed from a draft stays removed. */
+async function applyDefaults(tx: Prisma.TransactionClient, tid: string, salaryId: string, employeeId: string, since?: Date) {
+  const defaults = await tx.employeeSalaryDefault.findMany({
+    where: { tenantId: tid, employeeId, ...(since ? { createdAt: { gt: since } } : {}) },
+    orderBy: { createdAt: "asc" },
+  });
+  if (!defaults.length) return;
+  const copied = new Set((await tx.employeeSalaryItem.findMany({ where: { salaryId, defaultId: { not: null } }, select: { defaultId: true } })).map((i) => i.defaultId));
+  const missing = defaults.filter((d) => !copied.has(d.id));
+  if (!missing.length) return;
+  await tx.employeeSalaryItem.createMany({
+    data: missing.map((d) => ({ salaryId, type: d.type, label: d.label, amount: d.amount, defaultId: d.id })),
   });
 }
 
@@ -254,6 +291,95 @@ employeeSalariesRouter.get("/", async (req, res) => {
   });
 });
 
+employeeSalariesRouter.get("/defaults/:employeeId", requirePermission("SALARY_MANAGE"), async (req, res) => {
+  const items = await prisma.employeeSalaryDefault.findMany({ where: { tenantId: tenantId(req), employeeId: String(req.params.employeeId) }, orderBy: { createdAt: "asc" } });
+  res.json({ items });
+});
+
+employeeSalariesRouter.put("/defaults/:employeeId", requirePermission("SALARY_MANAGE"), async (req, res, next) => {
+  const data = defaultsSchema.safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: "Invalid allowances and deductions", details: data.error.flatten() }); return; }
+  const tid = tenantId(req);
+  const employeeId = String(req.params.employeeId);
+  try {
+    await assertEmployee(tid, employeeId);
+    const items = await prisma.$transaction(async (tx) => {
+      const existing = await tx.employeeSalaryDefault.findMany({ where: { tenantId: tid, employeeId }, select: { id: true } });
+      const existingIds = new Set(existing.map((row) => row.id));
+      const keep = data.data.items.flatMap((item) => (item.id && existingIds.has(item.id) ? [item.id] : []));
+      await tx.employeeSalaryDefault.deleteMany({ where: { tenantId: tid, employeeId, id: { notIn: keep } } });
+      for (const item of data.data.items) {
+        if (item.id && existingIds.has(item.id)) {
+          await tx.employeeSalaryDefault.update({ where: { id: item.id }, data: { type: item.type, label: item.label, amount: toMoney(item.amount) } });
+        } else {
+          await tx.employeeSalaryDefault.create({ data: { tenantId: tid, employeeId, type: item.type, label: item.label, amount: toMoney(item.amount) } });
+        }
+      }
+      return tx.employeeSalaryDefault.findMany({ where: { tenantId: tid, employeeId }, orderBy: { createdAt: "asc" } });
+    });
+    res.json({ items });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    next(error);
+  }
+});
+
+const round2Report = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+/** Groups salary rows by a key and totals each group. */
+function groupSalaries<T extends { basicSalary: unknown; totalAllowances: unknown; totalDeductions: unknown; grossPay: unknown; netPay: unknown }>(rows: T[], keyOf: (row: T) => { key: string; name: string }) {
+  const groups = new Map<string, { key: string; name: string; count: number; basic: number; allowances: number; deductions: number; gross: number; net: number }>();
+  for (const row of rows) {
+    const { key, name } = keyOf(row);
+    const group = groups.get(key) ?? { key, name, count: 0, basic: 0, allowances: 0, deductions: 0, gross: 0, net: 0 };
+    group.count += 1;
+    group.basic += Number(row.basicSalary);
+    group.allowances += Number(row.totalAllowances);
+    group.deductions += Number(row.totalDeductions);
+    group.gross += Number(row.grossPay);
+    group.net += Number(row.netPay);
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .map((g) => ({ ...g, basic: round2Report(g.basic), allowances: round2Report(g.allowances), deductions: round2Report(g.deductions), gross: round2Report(g.gross), net: round2Report(g.net) }))
+    .sort((a, b) => b.net - a.net);
+}
+
+/** Completed salaries for a period, totalled overall and by employee, location, department and month. */
+employeeSalariesRouter.get("/report", requirePermission("SALARY_MANAGE"), async (req, res, next) => {
+  const query = reportSchema.safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
+  const { from, to, locationId, departmentId } = query.data;
+  const tid = tenantId(req);
+  const employeeWhere: Prisma.EmployeeWhereInput = {
+    ...(departmentId ? { departmentId } : {}),
+    ...(locationId ? { OR: [{ defaultLocationId: locationId }, { locations: { some: { id: locationId } } }] } : {}),
+  };
+  try {
+    const rows = await prisma.employeeSalary.findMany({
+      where: {
+        tenantId: tid,
+        status: "COMPLETE",
+        ...(from || to ? { payPeriod: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {}),
+        ...(Object.keys(employeeWhere).length ? { employee: employeeWhere } : {}),
+      },
+      include: { employee: { select: { id: true, firstName: true, lastName: true, employeeCode: true, department: { select: { id: true, name: true } }, defaultLocation: { select: { id: true, name: true } } } } },
+      orderBy: { payPeriod: "asc" },
+    });
+    const totals = groupSalaries(rows, () => ({ key: "all", name: "All employees" }))[0] ?? { count: 0, basic: 0, allowances: 0, deductions: 0, gross: 0, net: 0 };
+    res.json({
+      range: { from: from?.toISOString() ?? null, to: to?.toISOString() ?? null },
+      totals,
+      byEmployee: groupSalaries(rows, (r) => ({ key: r.employee.id, name: `${r.employee.firstName} ${r.employee.lastName}`.trim() })),
+      byLocation: groupSalaries(rows, (r) => ({ key: r.employee.defaultLocation?.id ?? "unassigned", name: r.employee.defaultLocation?.name ?? "Unassigned" })),
+      byDepartment: groupSalaries(rows, (r) => ({ key: r.employee.department?.id ?? "none", name: r.employee.department?.name ?? "No department" })),
+      byMonth: groupSalaries(rows, (r) => ({ key: r.payPeriod.toISOString().slice(0, 7), name: `${MONTH_NAMES[r.payPeriod.getUTCMonth()]} ${r.payPeriod.getUTCFullYear()}` })).sort((a, b) => a.key.localeCompare(b.key)),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 employeeSalariesRouter.get("/:id", async (req, res) => {
   const salary = await prisma.employeeSalary.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include: salaryInclude });
   if (!salary) { res.status(404).json({ error: "Salary record not found" }); return; }
@@ -272,7 +398,10 @@ employeeSalariesRouter.post("/advance", async (req, res, next) => {
       const draft = await getOrCreateDraft(tx, tid, data.data.employeeId, payPeriod, payslipNo, req.userId);
       await tx.employeeSalary.update({ where: { id: draft.id }, data: { ...(data.data.notes ? { notes: data.data.notes } : {}) } });
       await tx.employeeSalaryItem.createMany({
-        data: data.data.deductions.map((item) => ({ salaryId: draft.id, type: "DEDUCTION", label: item.label, amount: toMoney(item.amount) })),
+        data: [
+          ...data.data.allowances.map((item) => ({ salaryId: draft.id, type: "ALLOWANCE" as const, label: item.label, amount: toMoney(item.amount) })),
+          ...data.data.deductions.map((item) => ({ salaryId: draft.id, type: "DEDUCTION" as const, label: item.label, amount: toMoney(item.amount) })),
+        ],
       });
       return recalculateSalary(tx, draft.id);
     });
@@ -312,6 +441,8 @@ employeeSalariesRouter.post("/process", async (req, res, next) => {
           await tx.employeeSalaryItem.create({ data: { salaryId: draft.id, type: item.type, label: item.label, amount: toMoney(item.amount) } });
         }
       }
+      const draftRow = await tx.employeeSalary.findUniqueOrThrow({ where: { id: draft.id }, select: { createdAt: true } });
+      await applyDefaults(tx, tid, draft.id, data.data.employeeId, draftRow.createdAt);
       await tx.employeeSalary.update({
         where: { id: draft.id },
         data: {

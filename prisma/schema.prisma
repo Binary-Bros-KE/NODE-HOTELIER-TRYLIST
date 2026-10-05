@@ -492,6 +492,7 @@ model Tenant {
   attendanceRecords          AttendanceRecord[]
   shiftSessions              ShiftSession[]
   employeeSalaries           EmployeeSalary[]
+  employeeSalaryDefaults     EmployeeSalaryDefault[]
   printJobs                  PrintJob[]
   printers                   Printer[]
   menuLedgerEntries          MenuLedgerEntry[]
@@ -3298,6 +3299,7 @@ model Employee {
   approvedShiftStarts           ShiftSession[]          @relation("ShiftStartApprovedBy")
   approvedShiftEnds             ShiftSession[]          @relation("ShiftEndApprovedBy")
   salaries                      EmployeeSalary[]        @relation("EmployeeSalaryEmployee")
+  salaryDefaults                EmployeeSalaryDefault[]
   createdSalaries               EmployeeSalary[]        @relation("EmployeeSalaryCreatedBy")
   voidedSalaries                EmployeeSalary[]        @relation("EmployeeSalaryVoidedBy")
 
@@ -3377,6 +3379,23 @@ model ShiftSession {
   @@index([tenantId, approvedStartAt])
 }
 
+// A recurring allowance or deduction an employee always has (housing, NSSF...).
+// Copied onto each month's salary as a line; the copy is then editable on its own.
+model EmployeeSalaryDefault {
+  id         String                 @id @default(cuid())
+  tenantId   String
+  tenant     Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  employeeId String
+  employee   Employee               @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  type       EmployeeSalaryItemType
+  label      String
+  amount     Decimal                @db.Decimal(12, 2)
+  createdAt  DateTime               @default(now())
+  updatedAt  DateTime               @updatedAt
+
+  @@index([tenantId, employeeId])
+}
+
 model EmployeeSalary {
   id                String                 @id @default(cuid())
   tenantId          String
@@ -3427,6 +3446,9 @@ model EmployeeSalaryItem {
   // (edit-in-place, undo) instead of duplicated.
   shiftSessionId      String?
   carriedFromSalaryId String?
+  // The default allowance/deduction this line was copied from, so a default is
+  // never copied onto the same salary twice.
+  defaultId           String?
   createdAt           DateTime               @default(now())
 
   @@index([salaryId])
