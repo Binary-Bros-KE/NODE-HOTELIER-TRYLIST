@@ -1397,7 +1397,7 @@ reportsRouter.get("/inventory-overview", async (req, res, next) => {
 
     const locations = await prisma.location.findMany({
       where: { tenantId: tid, ...(locationId ? { id: locationId } : {}) },
-      select: { id: true, name: true },
+      select: { id: true, name: true, type: true },
       orderBy: { name: "asc" },
     });
 
@@ -1430,13 +1430,17 @@ reportsRouter.get("/inventory-overview", async (req, res, next) => {
     const trackedProductIds = new Set([...balances.keys()].map((k) => k.split("::")[0]));
     const allProducts = await prisma.product.findMany({
       where: { tenantId: tid, ...tagged, OR: [{ isActive: true }, { id: { in: [...trackedProductIds] } }] },
-      select: { id: true, name: true, sku: true, unit: true, unitCost: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } }, reorderLevel: true, isActive: true, category: { select: { name: true } } },
+      select: { id: true, name: true, sku: true, unit: true, unitCost: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } }, reorderLevel: true, isActive: true, tags: true, category: { select: { name: true } } },
     });
     const productById = new Map(allProducts.map((p) => [p.id, p]));
     const activeProducts = allProducts.filter((p) => p.isActive);
 
+    // Each location section lists only the products tagged for its operation
+    // (Main Bar -> BAR, Restaurant -> RESTAURANT, ...), so a soda can appear in
+    // both Bar and Restaurant while a food item only shows under Store.
     const perLocation = locations.map((loc) => {
-      const rows: StockRow[] = activeProducts.map((p) => ({
+      const sectionProducts = activeProducts.filter((p) => p.tags.includes(loc.type));
+      const rows: StockRow[] = sectionProducts.map((p) => ({
         productId: p.id,
         name: p.name,
         sku: p.sku,
@@ -1451,7 +1455,7 @@ reportsRouter.get("/inventory-overview", async (req, res, next) => {
       }));
       rows.sort((a, b) => a.name.localeCompare(b.name));
       const summary = summarizeStock(rows);
-      return { locationId: loc.id, name: loc.name, ...summary, products: rows.map(({ reorderLevel, ...r }) => ({ ...r, value: round2(stockValue(r.quantity, r.unitCost, r.packSize) ?? 0), low: r.quantity > 0 && r.quantity <= reorderLevel, out: r.quantity === 0 })) };
+      return { locationId: loc.id, name: loc.name, type: loc.type, ...summary, products: rows.map(({ reorderLevel, ...r }) => ({ ...r, value: round2(stockValue(r.quantity, r.unitCost, r.packSize) ?? 0), low: r.quantity > 0 && r.quantity <= reorderLevel, out: r.quantity === 0 })) };
     });
 
     // Overall: one row per product, quantity summed across every location.
