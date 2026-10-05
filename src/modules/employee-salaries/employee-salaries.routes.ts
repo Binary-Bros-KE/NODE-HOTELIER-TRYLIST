@@ -57,6 +57,7 @@ const defaultsSchema = z.object({
 const reportSchema = z.object({
   from: optionalDate,
   to: optionalDate,
+  month: z.preprocess(blankToUndefined, z.string().regex(/^\d{4}-\d{2}$/).optional()),
   locationId: optionalId,
   departmentId: optionalId,
 });
@@ -165,8 +166,11 @@ async function createSalaryPayment(tx: Prisma.TransactionClient, tid: string, sa
   // this month, and no cash movement to record.
   if (Number(salary.netPay) <= 0 && Number(salary.carriedOverAmount) > 0) return;
   if (Number(salary.netPay) <= 0) throw Object.assign(new Error("Net pay must be above zero before completing salary"), { status: 400 });
-  const existing = await tx.transaction.findFirst({ where: { tenantId: tid, source: "SALARY_PAYMENT", sourceRefId: salaryId }, select: { id: true } });
-  if (existing) return;
+  const existing = await tx.transaction.findFirst({ where: { tenantId: tid, source: "SALARY_PAYMENT", sourceRefId: salaryId }, select: { id: true, status: true } });
+  if (existing) {
+    if (existing.status !== "COMPLETE") await tx.transaction.update({ where: { id: existing.id }, data: { status: "COMPLETE", amount: salary.netPay } });
+    return;
+  }
   const reference = salary.reference ? await assertPaymentReferenceUnused(tx, tid, salary.reference) : undefined;
   await tx.transaction.create({
     data: {
@@ -281,13 +285,14 @@ employeeSalariesRouter.get("/", async (req, res) => {
     prisma.employeeSalary.findMany({ where, include: salaryInclude, orderBy: [{ payPeriod: "desc" }, { createdAt: "desc" }] }),
     prisma.employeeSalary.groupBy({ by: ["status"], where, _sum: { netPay: true, totalDeductions: true, totalAllowances: true }, _count: true }),
   ]);
+  const live = aggregate.filter((row) => row.status !== "VOIDED");
   res.json({
     salaries,
     summary: {
-      count: aggregate.reduce((sum, row) => sum + row._count, 0),
-      netPay: aggregate.reduce((sum, row) => sum + Number(row._sum.netPay ?? 0), 0),
-      allowances: aggregate.reduce((sum, row) => sum + Number(row._sum.totalAllowances ?? 0), 0),
-      deductions: aggregate.reduce((sum, row) => sum + Number(row._sum.totalDeductions ?? 0), 0),
+      count: live.reduce((sum, row) => sum + row._count, 0),
+      netPay: live.reduce((sum, row) => sum + Number(row._sum.netPay ?? 0), 0),
+      allowances: live.reduce((sum, row) => sum + Number(row._sum.totalAllowances ?? 0), 0),
+      deductions: live.reduce((sum, row) => sum + Number(row._sum.totalDeductions ?? 0), 0),
       byStatus: aggregate.map((row) => ({ status: row.status, count: row._count, netPay: Number(row._sum.netPay ?? 0) })),
     },
   });
@@ -351,7 +356,10 @@ function groupSalaries<T extends { basicSalary: unknown; totalAllowances: unknow
 employeeSalariesRouter.get("/report", requirePermission("SALARY_MANAGE"), async (req, res, next) => {
   const query = reportSchema.safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
-  const { from, to, locationId, departmentId } = query.data;
+  const { locationId, departmentId } = query.data;
+  // Pay periods are whole months, so the range is taken in months: a day in the middle of a month still includes that month.
+  const from = query.data.month ? new Date(Date.UTC(Number(query.data.month.slice(0, 4)), Number(query.data.month.slice(5, 7)) - 1, 1)) : query.data.from ? monthStart(query.data.from) : undefined;
+  const to = query.data.month ? new Date(Date.UTC(Number(query.data.month.slice(0, 4)), Number(query.data.month.slice(5, 7)), 0)) : query.data.to ? monthStart(query.data.to) : undefined;
   const tid = tenantId(req);
   const employeeWhere: Prisma.EmployeeWhereInput = {
     ...(departmentId ? { departmentId } : {}),
@@ -521,15 +529,82 @@ employeeSalariesRouter.post("/:id/complete", async (req, res, next) => {
   }
 });
 
-employeeSalariesRouter.post("/:id/void", async (req, res) => {
+employeeSalariesRouter.post("/:id/void", async (req, res, next) => {
   const data = voidSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid void reason", details: data.error.flatten() }); return; }
-  const salary = await prisma.employeeSalary.updateMany({
-    where: { id: req.params.id, tenantId: tenantId(req), status: { not: "VOIDED" } },
-    data: { status: "VOIDED", voidReason: data.data.reason, voidedBy: req.userId ?? null },
-  });
-  if (!salary.count) { res.status(404).json({ error: "Salary record not found" }); return; }
-  res.json({ salary: await prisma.employeeSalary.findUniqueOrThrow({ where: { id: req.params.id }, include: salaryInclude }) });
+  const tid = tenantId(req);
+  try {
+    const salary = await prisma.$transaction(async (tx) => {
+      const existing = await tx.employeeSalary.findFirst({ where: { id: req.params.id, tenantId: tid, status: { not: "VOIDED" } }, select: { id: true, carriedOverAmount: true } });
+      if (!existing) throw Object.assign(new Error("Salary record not found"), { status: 404 });
+      if (Number(existing.carriedOverAmount) > 0) {
+        // The deductions this payslip pushed onto next month's draft go with it.
+        const carry = await tx.employeeSalaryItem.findFirst({ where: { carriedFromSalaryId: existing.id }, select: { id: true, salary: { select: { id: true, status: true } } } });
+        if (carry && carry.salary.status !== "DRAFT") throw Object.assign(new Error("Void next month's payslip first - it already carries these deductions"), { status: 409 });
+        if (carry) {
+          await tx.employeeSalaryItem.delete({ where: { id: carry.id } });
+          await recalculateSalary(tx, carry.salary.id);
+        }
+      }
+      await tx.employeeSalary.update({
+        where: { id: existing.id },
+        data: { status: "VOIDED", voidReason: data.data.reason, voidedBy: req.userId ?? null, carriedOverAmount: toMoney(0) },
+      });
+      await recalculateSalary(tx, existing.id);
+      await tx.transaction.updateMany({ where: { tenantId: tid, source: "SALARY_PAYMENT", sourceRefId: existing.id }, data: { status: "VOIDED" } });
+      return tx.employeeSalary.findUniqueOrThrow({ where: { id: existing.id }, include: salaryInclude });
+    });
+    res.json({ salary });
+  } catch (error) {
+    if (sendSalaryError(res, error)) return;
+    next(error);
+  }
+});
+
+// Returns a voided payslip. A paid one comes back as paid; if its deductions now
+// exceed its gross it comes back as a draft to be completed again (with carry-over).
+employeeSalariesRouter.post("/:id/unvoid", async (req, res, next) => {
+  const tid = tenantId(req);
+  try {
+    const salary = await prisma.$transaction(async (tx) => {
+      const row = await tx.employeeSalary.findFirst({ where: { id: req.params.id, tenantId: tid, status: "VOIDED" }, select: { id: true, paidAt: true, netPay: true } });
+      if (!row) throw Object.assign(new Error("Voided payslip not found"), { status: 404 });
+      const back = row.paidAt && Number(row.netPay) >= 0 ? "COMPLETE" : "DRAFT";
+      await tx.employeeSalary.update({ where: { id: row.id }, data: { status: back, voidReason: null, voidedBy: null } });
+      if (back === "COMPLETE") await tx.transaction.updateMany({ where: { tenantId: tid, source: "SALARY_PAYMENT", sourceRefId: row.id }, data: { status: "COMPLETE" } });
+      return tx.employeeSalary.findUniqueOrThrow({ where: { id: row.id }, include: salaryInclude });
+    });
+    res.json({ salary });
+  } catch (error) {
+    if (sendSalaryError(res, error)) return;
+    next(error);
+  }
+});
+
+// Moves a payslip to another month. Refused when it carries deductions into the next
+// month (they'd no longer line up) or when that employee already has a payslip for it.
+employeeSalariesRouter.patch("/:id/period", async (req, res, next) => {
+  const data = z.object({ payPeriod: z.coerce.date() }).safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: "Choose a month" }); return; }
+  const tid = tenantId(req);
+  const target = monthStart(data.data.payPeriod);
+  try {
+    const salary = await prisma.$transaction(async (tx) => {
+      const row = await tx.employeeSalary.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, employeeId: true, payPeriod: true, carriedOverAmount: true } });
+      if (!row) throw Object.assign(new Error("Salary record not found"), { status: 404 });
+      if (row.payPeriod.getTime() === target.getTime()) return tx.employeeSalary.findUniqueOrThrow({ where: { id: row.id }, include: salaryInclude });
+      const carries = Number(row.carriedOverAmount) > 0 || (await tx.employeeSalaryItem.count({ where: { carriedFromSalaryId: row.id } })) > 0;
+      if (carries) throw Object.assign(new Error("This payslip carries deductions into the next month - void it to move it"), { status: 409 });
+      const clash = await tx.employeeSalary.findUnique({ where: { tenantId_employeeId_payPeriod: { tenantId: tid, employeeId: row.employeeId, payPeriod: target } }, select: { id: true } });
+      if (clash) throw Object.assign(new Error(`This employee already has a payslip for ${MONTH_NAMES[target.getUTCMonth()]} ${target.getUTCFullYear()}`), { status: 409 });
+      await tx.employeeSalary.update({ where: { id: row.id }, data: { payPeriod: target } });
+      return tx.employeeSalary.findUniqueOrThrow({ where: { id: row.id }, include: salaryInclude });
+    });
+    res.json({ salary });
+  } catch (error) {
+    if (sendSalaryError(res, error)) return;
+    next(error);
+  }
 });
 
 /** What's already been recorded against this shift, if anything — so the
