@@ -1243,6 +1243,23 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
         const stockLocationId = consumed.size > 0 ? await resolveStockLocationId(tid, order.locationId) : null;
         if (stockLocationId) await applyStockDelta(tx, tid, stockLocationId, consumed, new Map(), order.orderNumber, req);
       }
+      // Stock the store already sent for this order's dispatches goes back into the
+      // store through the ledger, so a reverted order never leaves the books short.
+      const dispatched = await tx.stockDispatchRequest.findMany({
+        where: { orderId: order.id, tenantId: tid, status: "DISPATCHED" },
+        select: { id: true, requestNo: true, fromLocationId: true, items: { select: { productId: true, productName: true, dispatchedQty: true } } },
+      });
+      for (const request of dispatched) {
+        for (const item of request.items) {
+          const qty = Number(item.dispatchedQty ?? 0);
+          if (qty <= 0) continue;
+          await recordStockMovement(tx, {
+            tenantId: tid, productId: item.productId, locationId: request.fromLocationId, type: "RETURN", quantity: qty,
+            note: `Returned: order #${order.orderNumber} was reverted, dispatch ${request.requestNo} undone`,
+            sourceType: "DISPATCH_REVERT", sourceRefId: request.id, performedBy: req.userId ?? null, label: item.productName,
+          });
+        }
+      }
       await tx.posOrder.delete({ where: { id: order.id } });
       if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
     });
