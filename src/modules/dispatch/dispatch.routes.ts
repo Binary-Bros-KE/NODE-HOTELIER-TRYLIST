@@ -6,9 +6,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
 import { DispatchError, employeeName } from "../../lib/dispatch.js";
-import { nextStockTransferNo } from "../../lib/sequence.js";
-import { InsufficientStockError } from "../../lib/stockLedger.js";
-import { performStockTransfer } from "../../lib/stockTransfer.js";
+import { InsufficientStockError, recordStockMovement } from "../../lib/stockLedger.js";
 
 // The store's side of a kitchen's ingredient request: see what the chef asked
 // for, dispatch it (a real store -> kitchen stock transfer) or reject it with a
@@ -78,19 +76,20 @@ dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
   const toSend = lines.filter((l) => l.quantity > 0);
   if (toSend.length === 0) throw new DispatchError("Dispatch at least one item, or reject the request instead");
 
-  const [actorName, transferNo] = await Promise.all([employeeName(prisma, tid, req.userId), nextStockTransferNo(tid)]);
+  const actorName = await employeeName(prisma, tid, req.userId);
   await prisma.$transaction(async (tx) => {
     // Claim first: a conditional update so two storekeepers (or a chef cancelling) can't both act.
     const claimed = await tx.stockDispatchRequest.updateMany({ where: { id: request.id, status: "REQUESTED" }, data: { status: "DISPATCHED", respondedAt: new Date(), respondedBy: req.userId ?? null, respondedByName: actorName } });
     if (claimed.count === 0) throw new DispatchError("This request was just handled by someone else", 409);
-    const transfer = await performStockTransfer(tx, {
-      tenantId: tid, transferNo, fromLocationId: request.fromLocationId, toLocationId: request.toLocationId,
-      items: toSend.map((l) => ({ productId: l.item.productId, quantity: l.quantity, name: l.item.productName })),
-      note: `Kitchen dispatch ${request.requestNo} for order #${request.orderNumber}`,
-      ledgerNote: `Kitchen dispatch ${request.requestNo} (order #${request.orderNumber}): ${request.fromLocation.name} → ${request.toLocation.name}`,
-      performedBy: req.userId,
-    });
-    await tx.stockDispatchRequest.update({ where: { id: request.id }, data: { transferId: transfer.id } });
+    // The store consumes what it sends right here (guarded: it can't send more than it holds).
+    // The kitchen never holds the stock, so the chef cooks with whatever was dispatched.
+    for (const l of toSend) {
+      await recordStockMovement(tx, {
+        tenantId: tid, productId: l.item.productId, locationId: request.fromLocationId, type: "ISSUE", quantity: -l.quantity,
+        note: `Kitchen dispatch ${request.requestNo} (order #${request.orderNumber}) to ${request.toLocation.name}`,
+        sourceType: "STOCK_DISPATCH", sourceRefId: request.id, performedBy: req.userId ?? null, label: l.item.productName,
+      });
+    }
     for (const l of lines) await tx.stockDispatchItem.update({ where: { id: l.item.id }, data: { dispatchedQty: l.quantity } });
   });
   const fresh = await prisma.stockDispatchRequest.findUniqueOrThrow({ where: { id: request.id }, include: requestInclude });

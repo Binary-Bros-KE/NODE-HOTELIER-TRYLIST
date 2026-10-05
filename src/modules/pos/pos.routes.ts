@@ -681,6 +681,16 @@ posRouter.post("/orders", async (req, res) => {
     }
   }
 
+  const postingLocation = effectiveLocationId
+    ? await prisma.location.findFirst({ where: { id: effectiveLocationId, tenantId: tid }, select: { id: true, serveMode: true, requireStoreDispatch: true, dispatchFromLocationId: true, allowOutOfStockOrders: true } })
+    : null;
+  try {
+    await assertPostableToStore(tid, postingLocation, orderStockRequirements);
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    throw error;
+  }
+
   let customerId: string | undefined;
   let billToReservationId: string | undefined;
   let complimentarySessionId: string | undefined;
@@ -791,6 +801,15 @@ posRouter.post("/orders/:id/items", async (req, res) => {
   // not at Serve, after the kitchen has already cooked it. (A SERVED order
   // deducts immediately below, guarded; a store-dispatch location is checked
   // against the store when the kitchen requests the ingredients.)
+  if (order.status !== "SERVED" && dispatchRequired(order.location)) {
+    const addedRequirements = computeStockRequirements(resolvedLinesForStock(resolvedLines, menuItemsById, addonsById));
+    try {
+      await assertPostableToStore(tid, order.location, addedRequirements);
+    } catch (error) {
+      if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+      throw error;
+    }
+  }
   if (order.status !== "SERVED" && !dispatchRequired(order.location)) {
     const addedRequirements = computeStockRequirements(resolvedLinesForStock(resolvedLines, menuItemsById, addonsById));
     const addedStockLocationId = addedRequirements.size > 0 ? await resolveStockLocationId(tid, order.locationId) : null;
@@ -901,6 +920,8 @@ async function applyStockDelta(
   orderNumber: number,
   req: { userId?: string },
 ) {
+  const kitchen = await tx.location.findUnique({ where: { id: locationId }, select: { serveMode: true, requireStoreDispatch: true } });
+  if (dispatchRequired(kitchen)) return; // the store consumed it at dispatch
   before = await perSaleRequirements(tx, tid, before);
   after = await perSaleRequirements(tx, tid, after);
   const productIds = new Set([...before.keys(), ...after.keys()]);
@@ -1090,6 +1111,17 @@ function resolvedLinesForStock(
  * counter's approval step, so it's gated to whoever holds
  * POS_APPROVE_COUNTER that shift — not tied to a fixed account, since who's
  * on counter duty changes day to day. */
+async function assertPostableToStore(
+  tid: string,
+  location: { id: string; serveMode: string; requireStoreDispatch: boolean; dispatchFromLocationId: string | null; allowOutOfStockOrders: boolean } | null,
+  requirements: Map<string, { quantity: number; name: string }>,
+) {
+  if (requirements.size === 0 || !location || !dispatchRequired(location) || location.allowOutOfStockOrders) return;
+  const storeId = await supplyingStoreId(tid, location);
+  if (!storeId) throw Object.assign(new Error("No store is set up to supply this kitchen"), { status: 409 });
+  await prisma.$transaction((tx) => assertStockAvailable(tx, tid, requirements, storeId));
+}
+
 async function assertStockAvailable(
   tx: Prisma.TransactionClient,
   tid: string,
@@ -1986,6 +2018,9 @@ posRouter.get("/menu-items", async (req, res) => {
   // wrongly sum them). When there's genuinely no location context yet,
   // availableQuantity is forced to null (untracked) after the query, not
   // computed from this deliberately-empty result.
+  const locationAllowsOutOfStockOrders = effectiveLocationId
+    ? Boolean((await prisma.location.findFirst({ where: { id: effectiveLocationId, tenantId: tid }, select: { allowOutOfStockOrders: true } }))?.allowOutOfStockOrders)
+    : false;
   const stockWhere = { locationId: availabilityLocationId ?? "__no_location__" };
 
   const rows = await prisma.menuItem.findMany({
@@ -2085,6 +2120,7 @@ posRouter.get("/menu-items", async (req, res) => {
       variants: variantsWithStock.map((v) => ({ ...v, availableQuantity: effectiveLocationId ? v.availableQuantity : null })),
       availableQuantity,
       availabilityUnitLabel: effectiveLocationId ? availabilityUnitLabel : null,
+      locationAllowsOutOfStockOrders,
       // Resolved effective tax (item override else tenant default) so the cart
       // can show a correct preview. The server re-resolves and snapshots this
       // on order create — the client value is never trusted for money.

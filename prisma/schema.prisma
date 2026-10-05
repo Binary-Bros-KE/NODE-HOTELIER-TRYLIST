@@ -2451,6 +2451,9 @@ model Location {
   // before a ticket can be started. dispatchFromLocationId is the Store that
   // supplies this kitchen (falls back to the first STORE location).
   requireStoreDispatch   Boolean                @default(false)
+  // Off by default: a store-dispatch kitchen can't post what the store doesn't hold.
+  // On: orders post anyway and go to the store request; the store sends only what it has.
+  allowOutOfStockOrders  Boolean                @default(false)
   // Queue the store's dispatch slip to the store's printer the moment an order
   // is posted (true), or leave printing to the storekeeper's Print button (false).
   dispatchAutoPrint      Boolean                @default(true)

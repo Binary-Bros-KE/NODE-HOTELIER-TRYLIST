@@ -25,6 +25,9 @@ export async function deductStockForOrder(
   orderNumber: number,
   req: { userId?: string },
 ) {
+  // A store-dispatch kitchen holds no stock: the store consumed it when it dispatched.
+  const kitchen = await tx.location.findUnique({ where: { id: locationId }, select: { serveMode: true, requireStoreDispatch: true } });
+  if (dispatchRequired(kitchen)) return;
   for (const [productId, requirement] of await perSaleRequirements(tx, tid, requirements)) {
     try {
       await recordStockMovement(tx, {
