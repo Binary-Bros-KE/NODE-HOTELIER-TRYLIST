@@ -1145,9 +1145,19 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
   const activeOrder = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid, status: "READY" }, include: orderInclude });
   if (!activeOrder) { res.status(404).json({ error: "Ready order not found" }); return; }
 
-  if (activeOrder.location?.serveMode === "COUNTER") {
+  const serveMode = activeOrder.location?.serveMode ?? "KITCHEN";
+  if (serveMode === "COUNTER") {
     const allowed = await hasPermission(tid, req.userId, "POS_APPROVE_COUNTER");
     if (!allowed) { res.status(403).json({ error: "You don't have permission to approve counter orders" }); return; }
+  } else if (serveMode === "KITCHEN") {
+    const superAdmin = await isSuperAdminUser(tid, req.userId);
+    if (!superAdmin && !ownsOrder(activeOrder, req)) {
+      res.status(403).json({ error: "Only the waiter who owns this kitchen order can mark it served" });
+      return;
+    }
+  } else {
+    res.status(409).json({ error: "This location serves orders instantly; there is no handoff to approve" });
+    return;
   }
 
   const dispatch = orderDispatchInfo(activeOrder);
