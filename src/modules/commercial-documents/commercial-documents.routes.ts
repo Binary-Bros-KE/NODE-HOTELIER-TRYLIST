@@ -681,6 +681,7 @@ commercialDocumentsRouter.post("/from-order", async (req, res) => {
   const order = await prisma.posOrder.findFirst({ where: { id: parsed.data.orderId, tenantId: tid }, include: orderInclude });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   if (order.status !== "COMPLETED") { res.status(400).json({ error: "Only completed orders can be invoiced" }); return; }
+  if (order.billedToRoomAt) { res.status(409).json({ error: "This bill is charged to a room. Invoice the stay from its folio instead." }); return; }
   if (!order.customerId) { res.status(400).json({ error: "Attach a customer before generating an invoice" }); return; }
   const existing = await prisma.commercialDocument.findFirst({
     where: { tenantId: tid, type: "INVOICE", sourceRefId: order.id, source: { in: ["SERVICE_SALE", "RESTAURANT_ORDER"] }, status: { notIn: ["CANCELLED", "VOID"] } },
