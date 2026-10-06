@@ -406,7 +406,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     let discountsGiven = 0;
     let menuOrdersCompleted = 0;
     const taxBuckets = new Map<string, { key: string; label: string; treatment: string; rate: number; mode: string; net: number; tax: number; gross: number }>();
-    const topItemsMap = new Map<string, { name: string; qty: number; revenue: number }>();
+    const topItemsMap = new Map<string, { kind: "MENU" | "PRODUCT" | "SERVICE" | "OTHER"; name: string; variant: string | null; qty: number; revenue: number }>();
     const byLocationMap = new Map<string, { name: string; count: number; revenue: number; cogs: number }>();
     const byCustomerMap = new Map<string, { name: string; count: number; revenue: number }>();
     const compSessions = new Map<string, { id: string; title: string; hostName: string | null; startsAt: Date | null; endsAt: Date | null; complimentaryValue: number; complimentaryCogs: number; guestRevenue: number; guestCogs: number; orders: number }>();
@@ -432,9 +432,13 @@ reportsRouter.get("/sales", async (req, res, next) => {
         itemsSold += item.quantity;
         const cost = resolveItemCost(item);
         if (cost == null) unresolvedCostLines += 1; else orderCogs += cost;
-        const key = item.menuItem?.id ?? item.product?.id ?? item.service?.id ?? "unknown";
+        // Each sold line is typed (menu item, retail product, service) and keeps its variant,
+        // so the report can list what was sold exactly rather than one mixed list.
+        const kind = item.menuItem ? "MENU" as const : item.product ? "PRODUCT" as const : item.service ? "SERVICE" as const : "OTHER" as const;
+        const variantName = item.variant?.name ?? null;
+        const key = `${kind}:${item.menuItem?.id ?? item.product?.id ?? item.service?.id ?? "unknown"}:${variantName ?? ""}`;
         const name = item.menuItem?.name ?? item.product?.name ?? item.service?.name ?? "Unknown";
-        const bucket = topItemsMap.get(key) ?? { name, qty: 0, revenue: 0 };
+        const bucket = topItemsMap.get(key) ?? { kind, name, variant: variantName, qty: 0, revenue: 0 };
         bucket.qty += item.quantity;
         bucket.revenue += Number(item.unitPrice) * item.quantity;
         topItemsMap.set(key, bucket);
@@ -532,6 +536,54 @@ reportsRouter.get("/sales", async (req, res, next) => {
     }
 
     const soldItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).map((i) => ({ ...i, revenue: round2(i.revenue) }));
+    const soldByKind = (["MENU", "PRODUCT", "SERVICE"] as const).map((kind) => {
+      const rows = soldItems.filter((i) => i.kind === kind);
+      return { kind, lines: rows.length, qty: rows.reduce((sum, i) => sum + i.qty, 0), revenue: round2(rows.reduce((sum, i) => sum + i.revenue, 0)) };
+    });
+
+    // ---- Memberships and service bookings in the period. A renewal is a paid
+    // membership payment made after the membership's first payment. Extending a
+    // membership by editing its end date isn't logged, so it can't be reported here. ----
+    const registeredMemberships = await prisma.membership.findMany({
+      where: { tenantId: tid, createdAt: { gte: start, lte: end } },
+      select: { planName: true, planPrice: true, startsAt: true, customer: { select: { firstName: true, lastName: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+    const periodMembershipPayments = await prisma.membershipPayment.findMany({
+      where: { tenantId: tid, status: "PAID", createdAt: { gte: start, lte: end } },
+      select: { membershipId: true, amount: true, createdAt: true, membership: { select: { planName: true, customer: { select: { firstName: true, lastName: true } } } } },
+      orderBy: { createdAt: "asc" },
+    });
+    const firstPaymentDates = periodMembershipPayments.length
+      ? await prisma.membershipPayment.groupBy({ by: ["membershipId"], where: { tenantId: tid, status: "PAID", membershipId: { in: [...new Set(periodMembershipPayments.map((p) => p.membershipId))] } }, _min: { createdAt: true } })
+      : [];
+    const firstPaidAt = new Map(firstPaymentDates.map((row) => [row.membershipId, row._min.createdAt?.getTime() ?? 0]));
+    const renewals = periodMembershipPayments.filter((p) => p.createdAt.getTime() > (firstPaidAt.get(p.membershipId) ?? 0));
+    const bookings = await prisma.appointment.findMany({
+      where: { tenantId: tid, createdAt: { gte: start, lte: end } },
+      select: { startsAt: true, status: true, service: { select: { name: true } }, customer: { select: { firstName: true, lastName: true } } },
+      orderBy: { startsAt: "asc" },
+    });
+    const personName = (c: { firstName: string; lastName: string | null } | null | undefined) => (c ? `${c.firstName} ${c.lastName ?? ""}`.trim() : "Walk-in");
+    const bookingsByService = new Map<string, number>();
+    for (const b of bookings) bookingsByService.set(b.service.name, (bookingsByService.get(b.service.name) ?? 0) + 1);
+    const membershipActivity = {
+      registered: {
+        count: registeredMemberships.length,
+        value: round2(registeredMemberships.reduce((sum, m) => sum + Number(m.planPrice), 0)),
+        rows: registeredMemberships.map((m) => ({ customer: personName(m.customer), plan: m.planName, startsAt: m.startsAt, price: round2(Number(m.planPrice)) })),
+      },
+      renewed: {
+        count: renewals.length,
+        value: round2(renewals.reduce((sum, p) => sum + Number(p.amount), 0)),
+        rows: renewals.map((p) => ({ customer: personName(p.membership.customer), plan: p.membership.planName, paidAt: p.createdAt, amount: round2(Number(p.amount)) })),
+      },
+      bookings: {
+        count: bookings.length,
+        byService: [...bookingsByService.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+        rows: bookings.map((b) => ({ customer: personName(b.customer), service: b.service.name, startsAt: b.startsAt, status: b.status })),
+      },
+    };
     const topItems = soldItems.slice(0, 10);
     const taxBreakdown = [...taxBuckets.values()].map((b) => ({ ...b, net: round2(b.net), tax: round2(b.tax), gross: round2(b.gross) })).sort((a, b) => b.gross - a.gross);
 
@@ -762,6 +814,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
       })).sort((a, b) => b.netImpact - a.netImpact),
       topItems,
       soldItems,
+      soldByKind,
+      membershipActivity,
       expensesByCategory,
       purchasesBySupplier,
       trend,
