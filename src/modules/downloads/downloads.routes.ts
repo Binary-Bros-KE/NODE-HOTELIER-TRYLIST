@@ -25,7 +25,7 @@ function bridgeManifest(): BridgeManifest {
   const file = path.join(RELEASE_DIR, MANIFEST_NAME);
   if (!fs.existsSync(file)) return {};
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as BridgeManifest;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "").trim()) as BridgeManifest;
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
