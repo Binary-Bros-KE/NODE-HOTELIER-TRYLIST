@@ -545,8 +545,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // membership payment made after the membership's first payment. Extending a
     // membership by editing its end date isn't logged, so it can't be reported here. ----
     const registeredMemberships = await prisma.membership.findMany({
-      where: { tenantId: tid, createdAt: { gte: start, lte: end } },
-      select: { planName: true, planPrice: true, startsAt: true, customer: { select: { firstName: true, lastName: true } } },
+      where: { tenantId: tid, createdAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
+      select: { planName: true, planPrice: true, startsAt: true, customer: { select: { firstName: true, lastName: true } }, location: { select: { name: true } } },
       orderBy: { createdAt: "asc" },
     });
     const periodMembershipPayments = await prisma.membershipPayment.findMany({
@@ -571,7 +571,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       registered: {
         count: registeredMemberships.length,
         value: round2(registeredMemberships.reduce((sum, m) => sum + Number(m.planPrice), 0)),
-        rows: registeredMemberships.map((m) => ({ customer: personName(m.customer), plan: m.planName, startsAt: m.startsAt, price: round2(Number(m.planPrice)) })),
+        rows: registeredMemberships.map((m) => ({ customer: personName(m.customer), plan: m.planName, location: m.location?.name ?? null, startsAt: m.startsAt, price: round2(Number(m.planPrice)) })),
       },
       renewed: {
         count: renewals.length,

@@ -2475,6 +2475,7 @@ model Location {
   orders                 PosOrder[]
   transactions           Transaction[]
   membershipPayments     MembershipPayment[]
+  memberships            Membership[]
   expenses               Expense[]
   productStocks          ProductStock[]
   inventoryMovements     InventoryMovement[]
@@ -3747,8 +3748,12 @@ model Membership {
   customer        Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
   payments        MembershipPayment[]
   appointments    Appointment[]
+  // Where the membership was registered. Set when it is created; payments carry their own location too.
+  locationId      String?
+  location        Location?           @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, customerId, status])
+  @@index([tenantId, locationId])
 }
 
 // One check-in of a member (a gym entry, a class attended). Counted against

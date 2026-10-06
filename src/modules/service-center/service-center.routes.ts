@@ -47,6 +47,8 @@ const planSchema = z.object({
 });
 const membershipSchema = z.object({
   customerId: z.string().cuid(),
+  // Where the membership is registered. Locked for an employee pinned to one location.
+  locationId: z.string().trim().min(1).nullable().optional(),
   // Sell from the plan catalog (the plan fills the name/price/duration/discount), or leave out for a one-off.
   planId: z.string().cuid().nullable().optional(),
   planName: z.string().trim().min(2).max(80).optional(),
@@ -127,8 +129,24 @@ const include = {
   // Once completed, the real sale (tax, payment status, receipt) lives here — see /appointments/:id/complete.
   order: { select: { id: true, orderNumber: true, status: true } },
 } as const;
+/** Where a membership or payment is recorded: an employee pinned to one location is always
+ * there; one pinned to several must pick one of theirs; one with none picks any (or defaults). */
+async function resolveLocation(tid: string, userId: string | undefined, requested: string | null | undefined): Promise<{ locationId: string | null } | { error: string; status: number }> {
+  const recorder = await prisma.employee.findFirst({ where: { id: userId, tenantId: tid }, select: { defaultLocationId: true, locations: { select: { id: true } } } });
+  const assigned = (recorder?.locations ?? []).map((l) => l.id);
+  if (assigned.length === 1) return { locationId: assigned[0] };
+  if (requested) {
+    if (assigned.length && !assigned.includes(requested)) return { error: "You can only record this at your own locations", status: 403 };
+    const location = await prisma.location.findFirst({ where: { id: requested, tenantId: tid }, select: { id: true } });
+    if (!location) return { error: "Location not found", status: 400 };
+    return { locationId: location.id };
+  }
+  return { locationId: recorder?.defaultLocationId ?? null };
+}
+
 const membershipInclude = {
   customer: { include: customerInclude },
+  location: { select: { id: true, name: true } },
   payments: { include: { paymentMethod: true }, orderBy: { createdAt: "desc" as const } },
   visits: { select: { id: true, visitedAt: true, note: true }, orderBy: { visitedAt: "desc" as const }, take: 500 },
   _count: { select: { appointments: true } },
@@ -326,8 +344,10 @@ serviceCenterRouter.post("/memberships", async (req, res) => {
   const tid = tenantId(req);
   const resolved = await resolveMembership(tid, parsed.data);
   if ("error" in resolved) { res.status(400).json({ error: resolved.error }); return; }
+  const membershipLocation = await resolveLocation(tid, req.userId, parsed.data.locationId);
+  if ("error" in membershipLocation) { res.status(membershipLocation.status).json({ error: membershipLocation.error }); return; }
   const membership = await prisma.membership.create({
-    data: { tenantId: tid, customerId: parsed.data.customerId, planId: parsed.data.planId ?? null, ...resolved.terms, startsAt: parsed.data.startsAt, status: parsed.data.status, endsAt: resolved.endsAt },
+    data: { tenantId: tid, customerId: parsed.data.customerId, planId: parsed.data.planId ?? null, ...resolved.terms, startsAt: parsed.data.startsAt, status: parsed.data.status, endsAt: resolved.endsAt, locationId: membershipLocation.locationId },
     include: membershipInclude,
   });
   res.status(201).json({ membership: withPlanSnapshot(membership) });
@@ -481,21 +501,9 @@ serviceCenterRouter.post("/membership-payments", async (req, res) => {
   }
   const reference = await resolveMembershipPaymentReference(tid, resolved.paymentMethod, parsed.data.reference);
   const paidAt = parsed.data.paidAt ?? new Date();
-  // Location: an employee pinned to one location is always recorded there; one
-  // pinned to several must pick one of theirs; one with none can pick any.
-  const recorder = await prisma.employee.findFirst({ where: { id: req.userId, tenantId: tid }, select: { defaultLocationId: true, locations: { select: { id: true } } } });
-  const assigned = (recorder?.locations ?? []).map((l) => l.id);
-  let locationId: string | null = null;
-  if (assigned.length === 1) {
-    locationId = assigned[0];
-  } else if (parsed.data.locationId) {
-    if (assigned.length && !assigned.includes(parsed.data.locationId)) { res.status(403).json({ error: "You can only record payments at your own locations" }); return; }
-    const location = await prisma.location.findFirst({ where: { id: parsed.data.locationId, tenantId: tid }, select: { id: true } });
-    if (!location) { res.status(400).json({ error: "Location not found" }); return; }
-    locationId = location.id;
-  } else {
-    locationId = recorder?.defaultLocationId ?? null;
-  }
+  const located = await resolveLocation(tid, req.userId, parsed.data.locationId);
+  if ("error" in located) { res.status(located.status).json({ error: located.error }); return; }
+  const locationId = located.locationId;
   if (parsed.data.termEndsAt && parsed.data.termEndsAt <= paidAt) {
     res.status(400).json({ error: "The term's end date must be after the payment date" });
     return;
