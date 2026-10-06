@@ -40,6 +40,7 @@ mpesaRouter.post("/stk/orders/:orderId", async (req, res, next) => {
     ]);
     if (!order) { res.status(404).json({ error: "Order not found" }); return; }
     if (!order.locationId) { res.status(409).json({ error: "This order has no location, so M-Pesa can't be charged" }); return; }
+    if (order.billedToRoomAt) { res.status(409).json({ error: "This bill is charged to a room. Settle it on the room's folio at reception, not at the POS." }); return; }
     const isDebtPayment = order.status === "COMPLETED" && order.paymentStatus !== "PAID";
     if (isDebtPayment) {
       if (!(await hasPermission(tid, req.userId, "CREDIT_COLLECT"))) { res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager" }); return; }

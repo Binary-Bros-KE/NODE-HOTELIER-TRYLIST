@@ -372,7 +372,8 @@ type FinancialOrder = Parameters<typeof computeOrderFinancials>[0] & { payments:
 export function withFinancials<T extends FinancialOrder>(order: T, tax: Awaited<ReturnType<typeof taxSettingsFor>>) {
   const financials = computeOrderFinancials(order, tax);
   const paid = order.payments.reduce((s, p) => s + Number(p.amount), 0);
-  return { ...order, financials, total: financials.total, paid };
+  // PAID means the whole bill is cleared (for a room bill, by the folio), so show it that way.
+  return { ...order, financials, total: financials.total, paid: (order as { paymentStatus?: string }).paymentStatus === "PAID" ? Math.max(paid, financials.total) : paid };
 }
 
 export function hasPendingReturnRequests(order: { returnRequests?: { status: string }[]; items?: { returnRequests?: { status: string }[] }[] }) {
@@ -1780,6 +1781,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
   const remaining = Math.round((total - alreadyPaid) * 100) / 100;
   if (parsed.data.amount > remaining + 0.01) { res.status(400).json({ error: `Amount exceeds the remaining balance of ${remaining.toFixed(2)}` }); return; }
 
+  if (order.billedToRoomAt && parsed.data.method !== "ROOM") { res.status(409).json({ error: "This bill is charged to a room. Settle it on the room's folio at reception, not at the POS." }); return; }
   try {
     let updatedOrder;
     const data = parsed.data;
