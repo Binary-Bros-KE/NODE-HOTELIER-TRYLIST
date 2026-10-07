@@ -521,7 +521,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
 
     const [
       tax, completedOrders, cancelledOrders, transactionsIn, trendTransactions,
-      membershipPayments, expenses, goodsReceiptItems,
+      membershipPayments, expenses, inventoryConsumption, goodsReceiptItems,
       cancelledPurchases, supplierPayments, debtorCustomers, openFolios,
       creditorSuppliers, employeesForBranch, creditEntries, trendCreditEntries,
       roomRevenueFolios, salaryPayments,
@@ -545,6 +545,15 @@ reportsRouter.get("/sales", async (req, res, next) => {
       }),
       prisma.membershipPayment.findMany({ where: { tenantId: tid, status: "PAID", createdAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) }, select: { amount: true, locationId: true, location: { select: { name: true } } } }),
       prisma.expense.findMany({ where: { tenantId: tid, status: "ACTIVE", expenseDate: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) }, include: { category: { select: { name: true } } } }),
+      prisma.inventoryMovement.findMany({
+        where: {
+          tenantId: tid,
+          type: { in: ["ISSUE", "USAGE", "ROOM_CONSUMPTION", "DAMAGE_LOSS"] },
+          occurredAt: { gte: start, lte: end },
+          ...(locationId ? { locationId } : {}),
+        },
+        select: { value: true },
+      }),
       prisma.goodsReceiptItem.findMany({
         where: { goodsReceipt: { tenantId: tid, receivedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) } },
         select: { quantity: true, unitCost: true, product: { select: { packSize: true } }, goodsReceipt: { select: { purchase: { select: { supplierId: true, supplier: { select: { name: true } } } } } } },
@@ -826,8 +835,9 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // defaultLocationId is informational, not a hard assignment, so per-
     // location net profit (salesByLocation) stays Expense-tab-only too. ----
     const expensesOnly = round2(expenses.reduce((s, e) => s + Number(e.amount), 0));
+    const inventoryConsumptionExpenses = round2(inventoryConsumption.reduce((s, m) => s + Number(m.value ?? 0), 0));
     const salariesPaid = round2(salaryPayments.reduce((s, sp) => s + Number(sp.netPay), 0));
-    const totalExpenses = round2(expensesOnly + salariesPaid);
+    const totalExpenses = round2(expensesOnly + salariesPaid + inventoryConsumptionExpenses);
     const expensesByCategoryMap = new Map<string, { name: string; count: number; total: number }>();
     const expensesByLocationMap = new Map<string, number>();
     for (const e of expenses) {
@@ -1028,7 +1038,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         creditGiven, creditCount, creditRepaymentsCash,
         roomSalesValue, roomSalesCount, roomDiscountsGiven,
         completedSalesValue, totalSoldValue, grossPosSales, roomGross, discountsAll, soldNetValue, unpaidValue, cashCollected: totalRevenue, cogs: cogsTotal, unresolvedCostLines,
-        expensesOnly, salariesPaid,
+        expensesOnly, salariesPaid, inventoryConsumptionExpenses,
       },
       complimentarySessions: [...compSessions.values()].map((s) => ({
         ...s,
@@ -1885,7 +1895,7 @@ reportsRouter.get("/expenses", async (req, res, next) => {
     const inPeriod = (d: Date) => d >= start && d <= end;
     const inTrendBand = (d: Date) => d >= trendStart && d <= trendEnd;
 
-    const [expensesFetched, salariesFetched, supplierPaymentsFetched, assetMovementsFetched] = await Promise.all([
+    const [expensesFetched, salariesFetched, inventoryConsumptionFetched, supplierPaymentsFetched, assetMovementsFetched] = await Promise.all([
       prisma.expense.findMany({
         where: { tenantId: tid, status: "ACTIVE", expenseDate: { gte: fetchStart, lte: fetchEnd }, ...(locationId ? { locationId } : {}) },
         include: { category: { select: { name: true } }, paymentMethod: { select: { name: true } }, location: { select: { name: true } }, createdByEmployee: { select: { firstName: true, lastName: true } } },
@@ -1895,6 +1905,20 @@ reportsRouter.get("/expenses", async (req, res, next) => {
         where: { tenantId: tid, status: "COMPLETE", paidAt: { gte: fetchStart, lte: fetchEnd }, ...(locationId ? { employee: { defaultLocationId: locationId } } : {}) },
         include: { employee: { select: { firstName: true, lastName: true, department: { select: { name: true } }, defaultLocation: { select: { name: true } } } } },
         orderBy: { paidAt: "desc" },
+      }),
+      prisma.inventoryMovement.findMany({
+        where: {
+          tenantId: tid,
+          type: { in: ["ISSUE", "USAGE", "ROOM_CONSUMPTION", "DAMAGE_LOSS"] },
+          occurredAt: { gte: fetchStart, lte: fetchEnd },
+          ...(locationId ? { locationId } : {}),
+        },
+        include: {
+          product: { select: { name: true } },
+          location: { select: { name: true } },
+          employee: { select: { firstName: true, lastName: true } },
+        },
+        orderBy: { occurredAt: "desc" },
       }),
       prisma.supplierPayment.findMany({
         where: { tenantId: tid, paidAt: { gte: fetchStart, lte: fetchEnd }, ...(locationId ? { purchase: { locationId } } : {}) },
@@ -1909,10 +1933,12 @@ reportsRouter.get("/expenses", async (req, res, next) => {
     ]);
     const expenses = expensesFetched.filter((e) => inPeriod(e.expenseDate));
     const salaries = salariesFetched.filter((s) => s.paidAt && inPeriod(s.paidAt));
+    const inventoryConsumption = inventoryConsumptionFetched.filter((m) => inPeriod(m.occurredAt));
     const supplierPayments = supplierPaymentsFetched.filter((p) => inPeriod(p.paidAt));
     const assetMovements = assetMovementsFetched.filter((m) => inPeriod(m.occurredAt));
     const expensesInTrendBand = expensesFetched.filter((e) => inTrendBand(e.expenseDate));
     const salariesInTrendBand = salariesFetched.filter((s) => s.paidAt && inTrendBand(s.paidAt));
+    const inventoryConsumptionInTrendBand = inventoryConsumptionFetched.filter((m) => inTrendBand(m.occurredAt));
     const supplierPaymentsInTrendBand = supplierPaymentsFetched.filter((p) => inTrendBand(p.paidAt));
     const assetMovementsInTrendBand = assetMovementsFetched.filter((m) => inTrendBand(m.occurredAt));
 
@@ -1922,10 +1948,11 @@ reportsRouter.get("/expenses", async (req, res, next) => {
     // ---- Totals ----
     const expensesTotal = round2(expenses.reduce((s, e) => s + Number(e.amount), 0));
     const salariesTotal = round2(salaries.reduce((s, sal) => s + Number(sal.netPay), 0));
+    const inventoryConsumptionTotal = round2(inventoryConsumption.reduce((s, m) => s + Number(m.value ?? 0), 0));
     const supplierPaymentsTotal = round2(supplierPayments.reduce((s, p) => s + Number(p.amount), 0));
     const assetMovementValue = (m: (typeof assetMovements)[number]) => Number(m.quantity) * Number(m.unitCost ?? 0);
     const assetPurchasesTotal = round2(assetMovements.reduce((s, m) => s + assetMovementValue(m), 0));
-    const operatingExpenses = round2(expensesTotal + salariesTotal);
+    const operatingExpenses = round2(expensesTotal + salariesTotal + inventoryConsumptionTotal);
     const capitalOutflows = round2(supplierPaymentsTotal + assetPurchasesTotal);
     const totalCashOut = round2(operatingExpenses + capitalOutflows);
 
@@ -1970,6 +1997,7 @@ reportsRouter.get("/expenses", async (req, res, next) => {
     const addToTrend = (date: Date, amount: number) => trendMap.set(businessDayKey(startHour, date), (trendMap.get(businessDayKey(startHour, date)) ?? 0) + amount);
     for (const e of expensesInTrendBand) addToTrend(e.expenseDate, Number(e.amount));
     for (const s of salariesInTrendBand) if (s.paidAt) addToTrend(s.paidAt, Number(s.netPay));
+    for (const m of inventoryConsumptionInTrendBand) addToTrend(m.occurredAt, Number(m.value ?? 0));
     for (const p of supplierPaymentsInTrendBand) addToTrend(p.paidAt, Number(p.amount));
     for (const m of assetMovementsInTrendBand) addToTrend(m.occurredAt, assetMovementValue(m));
     const trend = [...trendMap.entries()].map(([trendDate, value]) => ({ date: trendDate, total: round2(value) }));
@@ -1980,6 +2008,7 @@ reportsRouter.get("/expenses", async (req, res, next) => {
         totalCashOut, operatingExpenses, capitalOutflows,
         expensesTotal, expensesCount: expenses.length,
         salariesTotal, salariesCount: salaries.length,
+        inventoryConsumptionTotal, inventoryConsumptionCount: inventoryConsumption.length,
         supplierPaymentsTotal, supplierPaymentsCount: supplierPayments.length,
         assetPurchasesTotal, assetPurchasesCount: assetMovements.length,
       },
@@ -1999,6 +2028,11 @@ reportsRouter.get("/expenses", async (req, res, next) => {
         id: s.id, payslipNo: s.payslipNo, payPeriod: s.payPeriod.toISOString(), employeeName: fullName(s.employee), department: s.employee.department.name,
         location: s.employee.defaultLocation?.name ?? null, grossPay: round2(Number(s.grossPay)), totalDeductions: round2(Number(s.totalDeductions)),
         netPay: round2(Number(s.netPay)), paymentMethod: s.paymentMethod ? salaryMethodLabel[s.paymentMethod] ?? s.paymentMethod : null, paidAt: s.paidAt?.toISOString() ?? null,
+      })),
+      inventoryConsumptionList: inventoryConsumption.map((m) => ({
+        id: m.id, occurredAt: m.occurredAt.toISOString(), productName: m.product.name, type: m.type,
+        quantity: Math.abs(Number(m.quantity)), value: round2(Number(m.value ?? 0)), location: m.location.name,
+        note: m.note, recordedBy: m.employee ? fullName(m.employee) : null,
       })),
       supplierPaymentsList: supplierPayments.map((p) => ({
         id: p.id, paymentNo: p.paymentNo, supplier: p.supplier.name, purchaseNo: p.purchase?.purchaseNo ?? null,

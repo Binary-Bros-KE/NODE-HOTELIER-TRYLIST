@@ -91,10 +91,11 @@ stockIssuesRouter.post("/issue", requirePermission("STORE_DISPATCH"), handle(asy
   const transferNo = await nextStockTransferNo(tid);
   const performedBy = req.userId ?? null;
   const note = body.note ?? null;
-  // Every hand-issued product goes to the kitchen and stays there until it's used up or counted.
-  // Only products tracked per dish are consumed from the store (at dispatch), never issued here.
-  const issuedOnly: typeof body.lines = [];
-  const kept = body.lines;
+  // ISSUE_ONLY is consumed the moment it leaves the issuing shelf: no
+  // destination stock is created. PERIODIC_COUNT is still stocked at the
+  // destination so the user can later count what remains and post USAGE.
+  const issuedOnly = body.lines.filter((line) => byId.get(line.productId)?.trackingMode === "ISSUE_ONLY");
+  const kept = body.lines.filter((line) => byId.get(line.productId)?.trackingMode === "PERIODIC_COUNT");
 
   await prisma.$transaction(async (tx) => {
     for (const line of issuedOnly) {

@@ -99,8 +99,13 @@ stockReceiptsRouter.post("/", async (req, res, next) => {
     const location = await assertLocation(tid, locationId);
     const productIds = [...new Set(items.map((i) => i.productId))];
     if (productIds.length !== items.length) { res.status(400).json({ error: "Each product can only appear once" }); return; }
-    const products = await prisma.product.findMany({ where: { id: { in: productIds }, tenantId: tid }, select: { id: true, name: true } });
+    const products = await prisma.product.findMany({ where: { id: { in: productIds }, tenantId: tid }, select: { id: true, name: true, isExpenseItem: true } });
     if (products.length !== productIds.length) { res.status(400).json({ error: "One or more items reference a product that was not found" }); return; }
+    const expenseProduct = products.find((p) => p.isExpenseItem);
+    if (expenseProduct) {
+      res.status(400).json({ error: `${expenseProduct.name} is an expense item. Receive it through Purchases/Goods Received so it is expensed instead of stocked.` });
+      return;
+    }
 
     const receiptNo = await nextStockReceiptNo(tid);
     const receiptNote = note ?? `Goods received into ${location.name}`;
