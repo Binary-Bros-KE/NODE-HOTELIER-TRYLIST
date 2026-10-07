@@ -1281,6 +1281,10 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
   // A service sale is created already SERVED and paid in a second step; if that step fails the
   // till withdraws it (no payment yet) and puts back whatever stock it consumed.
   const unpaidServiceSale = order.channel === "SERVICES" && order.status === "SERVED" && order.payments.length === 0;
+  if (order.channel === "FOOD" && dispatchRequired(order.location)) {
+    res.status(409).json({ error: "Orders posted to the store cannot be reverted. Request a return instead." });
+    return;
+  }
   // Once the kitchen has started an order it can no longer be reverted.
   if (!unpaidServiceSale && (order.status !== "OPEN" || order.servedAt)) {
     res.status(409).json({ error: "The kitchen has already started this order, so it can't be reverted" });
