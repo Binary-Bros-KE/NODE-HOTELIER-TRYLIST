@@ -112,6 +112,7 @@ const menuLineInclude = {
   variants: { where: { isActive: true }, include: variantStockInclude },
   product: true,
   recipe: { include: { ingredients: { include: { product: true } } } },
+  locations: { where: { isActive: true, canSellMenu: true } },
 } satisfies Prisma.MenuItemInclude;
 
 type LineTaxSnapshot = {
@@ -127,6 +128,8 @@ type ResolvedLine = {
   unitPrice: Prisma.Decimal;
   addons: { addonId: string; quantity: number; unitPrice: Prisma.Decimal }[];
 } & LineTaxSnapshot;
+
+type FulfillmentLocation = Prisma.LocationGetPayload<{}> | null;
 
 /** Validates a set of POS order lines against the current menu — item
  * availability, variant choice (required once an item has variants), and
@@ -200,6 +203,12 @@ function lineCreatePayload(lines: ResolvedLine[]): Prisma.PosOrderItemCreateWith
     taxTreatment: line.taxTreatment,
     addons: { create: line.addons.map((addon) => ({ addonId: addon.addonId, quantity: addon.quantity, unitPrice: addon.unitPrice })) },
   }));
+}
+
+function lineSubtotal(line: ResolvedLine): number {
+  const base = Number(line.unitPrice) * line.quantity;
+  const addons = line.addons.reduce((sum, addon) => sum + (Number(addon.unitPrice) * addon.quantity * line.quantity), 0);
+  return base + addons;
 }
 
 // Bill-to-room is decided at settlement, not order creation — a tab isn't
@@ -660,34 +669,62 @@ posRouter.post("/orders", async (req, res) => {
   // straight at READY, same as if a kitchen had just finished it, and
   // whoever's staffing the counter marks it served via the existing
   // PATCH .../serve (gated to POS_APPROVE_COUNTER for this mode).
-  const serveMode = location?.serveMode ?? "KITCHEN";
-  const instantServe = serveMode === "DIRECT";
-  const startsAtCounter = serveMode === "COUNTER";
-  const orderStockItems = resolvedLinesForStock(resolvedLines, menuItemsById, addonsById);
-  const orderStockRequirements = computeStockRequirements(orderStockItems);
-  const orderStockLocationId = orderStockRequirements.size > 0 ? await resolveStockLocationId(tid, effectiveLocationId) : null;
-  if (orderStockRequirements.size > 0 && !orderStockLocationId) {
-    res.status(400).json({ error: "No location is configured to hold stock for this order" });
-    return;
-  }
-  // Where the kitchen must request its ingredients from the store, its own
-  // shelves are empty until the storekeeper dispatches - availability is
-  // checked against the store at dispatch time instead.
-  if (!instantServe && orderStockLocationId && !dispatchRequired(location)) {
-    try {
-      await prisma.$transaction((tx) => assertStockAvailable(tx, tid, orderStockRequirements, orderStockLocationId));
-    } catch (error) {
-      if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
-      throw error;
+  const groupsByLocation = new Map<string, { location: FulfillmentLocation; lines: ResolvedLine[] }>();
+  const targetForLine = (line: ResolvedLine): FulfillmentLocation => {
+    const item = menuItemsById.get(line.menuItemId)!;
+    if (!location || item.locations.length === 0 || item.locations.some((loc) => loc.id === effectiveLocationId)) return location;
+    if (item.locations.length === 1) return item.locations[0];
+    throw Object.assign(new Error(`${item.name} is sold in more than one other location. Switch to that location before adding it.`), { status: 400 });
+  };
+  try {
+    for (const line of resolvedLines) {
+      const target = targetForLine(line);
+      if (target && !target.canSellMenu) throw Object.assign(new Error(`${target.name} isn't set up to sell menu items`), { status: 409 });
+      const key = target?.id ?? "__none__";
+      const bucket = groupsByLocation.get(key) ?? { location: target, lines: [] };
+      bucket.lines.push(line);
+      groupsByLocation.set(key, bucket);
     }
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    throw error;
   }
 
-  const postingLocation = effectiveLocationId
-    ? await prisma.location.findFirst({ where: { id: effectiveLocationId, tenantId: tid }, select: { id: true, serveMode: true, requireStoreDispatch: true, dispatchFromLocationId: true, allowOutOfStockOrders: true } })
-    : null;
+  const rawGroups = [...groupsByLocation.values()];
+  const overallSubtotal = rawGroups.reduce((sum, group) => sum + group.lines.reduce((lineSum, line) => lineSum + lineSubtotal(line), 0), 0);
+  let allocatedDiscount = 0;
+  let orderGroups: {
+    location: FulfillmentLocation;
+    lines: ResolvedLine[];
+    instantServe: boolean;
+    startsAtCounter: boolean;
+    requirements: Map<string, { quantity: number; name: string }>;
+    stockLocationId: string | null;
+    discount: number;
+  }[];
   try {
-    await assertPostableToStore(tid, postingLocation, orderStockRequirements);
+    orderGroups = await Promise.all(rawGroups.map(async (group, index) => {
+      const serveMode = group.location?.serveMode ?? "KITCHEN";
+      const instantServe = serveMode === "DIRECT";
+      const startsAtCounter = serveMode === "COUNTER";
+      const requirements = computeStockRequirements(resolvedLinesForStock(group.lines, menuItemsById, addonsById));
+      const stockLocationId = requirements.size > 0 ? await resolveStockLocationId(tid, group.location?.id ?? null) : null;
+      if (requirements.size > 0 && !stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this order"), { status: 400 });
+      if (!instantServe && stockLocationId && !dispatchRequired(group.location)) {
+        await prisma.$transaction((tx) => assertStockAvailable(tx, tid, requirements, stockLocationId));
+      }
+      await assertPostableToStore(tid, group.location, requirements);
+      const groupSubtotal = group.lines.reduce((sum, line) => sum + lineSubtotal(line), 0);
+      const discount = parsed.data.saleType === "COMPLIMENTARY" ? 0 : rawGroups.length === 1
+        ? parsed.data.discount
+        : index === rawGroups.length - 1
+          ? money2(parsed.data.discount - allocatedDiscount)
+          : money2(overallSubtotal > 0 ? parsed.data.discount * (groupSubtotal / overallSubtotal) : 0);
+      allocatedDiscount += discount;
+      return { ...group, instantServe, startsAtCounter, requirements, stockLocationId, discount };
+    }));
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     throw error;
   }
@@ -715,45 +752,52 @@ posRouter.post("/orders", async (req, res) => {
   }
 
   try {
-    const order = await prisma.$transaction(async (tx) => {
+    const createdOrders = await prisma.$transaction(async (tx) => {
       const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
-      const created = await tx.posOrder.create({
-        data: {
-          tenantId: tid,
-          orderNumber: (last?.orderNumber ?? 0) + 1,
-          tableId: parsed.data.tableId,
-          locationId: effectiveLocationId,
-          customerId,
-          reservationId: billToReservationId,
-          saleType: parsed.data.saleType,
-          complimentarySessionId,
-          complimentaryOrderRole: parsed.data.saleType === "COMPLIMENTARY" ? "HOST_COMP" : parsed.data.complimentarySessionId ? (parsed.data.complimentaryOrderRole ?? "GUEST_SPEND") : undefined,
-          complimentaryReason: parsed.data.complimentaryReason,
-          complimentaryRecipientName: parsed.data.complimentaryRecipientName,
-          createdBy: req.userId,
-          notes: parsed.data.notes,
-          discount: parsed.data.saleType === "COMPLIMENTARY" ? 0 : parsed.data.discount,
-          paymentStatus: parsed.data.saleType === "COMPLIMENTARY" ? "PAID" : "UNPAID",
-          status: instantServe ? "SERVED" : startsAtCounter ? "READY" : "OPEN",
-          servedAt: instantServe ? new Date() : undefined,
-          readyAt: startsAtCounter ? new Date() : undefined,
-          items: { create: lineCreatePayload(resolvedLines) },
-        },
-        include: orderInclude,
-      });
+      const billGroupId = orderGroups.length > 1 ? randomBytes(12).toString("hex") : undefined;
+      const created: Prisma.PosOrderGetPayload<{ include: typeof orderInclude }>[] = [];
+      for (const [index, group] of orderGroups.entries()) {
+        const order = await tx.posOrder.create({
+          data: {
+            tenantId: tid,
+            orderNumber: (last?.orderNumber ?? 0) + index + 1,
+            tableId: parsed.data.tableId,
+            locationId: group.location?.id,
+            billGroupId,
+            customerId,
+            reservationId: billToReservationId,
+            saleType: parsed.data.saleType,
+            complimentarySessionId,
+            complimentaryOrderRole: parsed.data.saleType === "COMPLIMENTARY" ? "HOST_COMP" : parsed.data.complimentarySessionId ? (parsed.data.complimentaryOrderRole ?? "GUEST_SPEND") : undefined,
+            complimentaryReason: parsed.data.complimentaryReason,
+            complimentaryRecipientName: parsed.data.complimentaryRecipientName,
+            createdBy: req.userId,
+            notes: parsed.data.notes,
+            discount: group.discount,
+            paymentStatus: parsed.data.saleType === "COMPLIMENTARY" ? "PAID" : "UNPAID",
+            status: group.instantServe ? "SERVED" : group.startsAtCounter ? "READY" : "OPEN",
+            servedAt: group.instantServe ? new Date() : undefined,
+            readyAt: group.startsAtCounter ? new Date() : undefined,
+            items: { create: lineCreatePayload(group.lines) },
+          },
+          include: orderInclude,
+        });
+        if (group.instantServe) {
+          if (group.stockLocationId) await deductStockForOrder(tx, tid, group.requirements, group.stockLocationId, order.orderNumber, req);
+          await recordMenuLedger(tx, { tenantId: tid, type: order.saleType === "COMPLIMENTARY" ? "COMPLIMENTARY" : "SALE", order, lines: menuLedgerLinesFromItems(order.items), by: req.userId });
+        }
+        created.push(order);
+      }
       if (parsed.data.tableId) {
         await tx.table.updateMany({ where: { id: parsed.data.tableId }, data: { status: "OCCUPIED" } });
-      }
-      if (instantServe) {
-        if (orderStockLocationId) await deductStockForOrder(tx, tid, orderStockRequirements, orderStockLocationId, created.orderNumber, req);
-        await recordMenuLedger(tx, { tenantId: tid, type: created.saleType === "COMPLIMENTARY" ? "COMPLIMENTARY" : "SALE", order: created, lines: menuLedgerLinesFromItems(created.items), by: req.userId });
       }
       return created;
     });
     // Store-dispatch locations: the ingredients are requested from the store right now,
     // so the chef just sees "waiting for store approval".
-    await autoRequestDispatch(tid, order.id, req.userId);
-    res.status(201).json({ order: withFinancials(order, tax) });
+    await Promise.all(createdOrders.map((order) => autoRequestDispatch(tid, order.id, req.userId)));
+    const primary = createdOrders.find((order) => order.locationId === effectiveLocationId) ?? createdOrders[0];
+    res.status(201).json({ order: withFinancials(primary, tax), linkedOrders: createdOrders.map((order) => withFinancials(order, tax)) });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
@@ -1754,6 +1798,100 @@ export async function applyOrderPayment(
   return { paidSoFar, newStatus };
 }
 
+posRouter.get("/bill-groups/:billGroupId", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const orders = await prisma.posOrder.findMany({
+    where: { tenantId: tid, billGroupId: req.params.billGroupId },
+    include: orderInclude,
+    orderBy: { orderNumber: "asc" },
+  });
+  if (orders.length === 0) { res.status(404).json({ error: "Linked bill not found" }); return; }
+  if (orders.some((order) => !ownsOrder(order, req))) { res.status(403).json({ error: "You can only manage your own linked bills" }); return; }
+  const tax = await taxSettingsFor(tid);
+  res.status(200).json({ orders: orders.map((order) => withFinancials(order, tax)) });
+});
+
+posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
+  const parsed = paymentSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid payment", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  const [orders, tax] = await Promise.all([
+    prisma.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId }, include: orderInclude, orderBy: { orderNumber: "asc" } }),
+    taxSettingsFor(tid),
+  ]);
+  if (orders.length === 0) { res.status(404).json({ error: "Linked bill not found" }); return; }
+  if (orders.some((order) => !ownsOrder(order, req))) { res.status(403).json({ error: "You can only take payment on your own linked bills" }); return; }
+  if (orders.some((order) => order.saleType === "COMPLIMENTARY")) { res.status(409).json({ error: "Complimentary linked bills do not take payments" }); return; }
+  if (orders.some(hasPendingReturnRequests)) { res.status(409).json({ error: "Approve or reject pending returns before taking payment" }); return; }
+  if (orders.some(hasPendingAdditions)) { res.status(409).json({ error: "The kitchen hasn't handed over all added items yet" }); return; }
+
+  const payable = orders.map((order) => {
+    const withTotals = withFinancials(order, tax);
+    const remaining = money2(withTotals.total - withTotals.paid);
+    return { order, total: withTotals.total, paid: withTotals.paid, remaining };
+  }).filter((row) => row.remaining > 0.01);
+  if (payable.length === 0) { res.status(409).json({ error: "This linked bill is already fully paid" }); return; }
+  const notReady = payable.find(({ order }) => !(order.status === "SERVED" || (order.status === "COMPLETED" && order.paymentStatus !== "PAID")));
+  if (notReady) { res.status(409).json({ error: `Order #${notReady.order.orderNumber} must be served before this linked bill can be paid` }); return; }
+  const groupRemaining = money2(payable.reduce((sum, row) => sum + row.remaining, 0));
+  if (parsed.data.amount > groupRemaining + 0.01) { res.status(400).json({ error: `Amount exceeds the remaining linked bill balance of ${groupRemaining.toFixed(2)}` }); return; }
+  try {
+    const data = parsed.data;
+    let updatedOrders;
+    if (data.method === "ROOM") {
+      if (Math.abs(data.amount - groupRemaining) > 0.01) throw Object.assign(new Error(`Charge the full remaining linked balance of ${groupRemaining.toFixed(2)} to the room`), { status: 400 });
+      const reservation = await resolveBillableReservation(tid, data.reservationId);
+      updatedOrders = await prisma.$transaction(async (tx) => {
+        for (const row of payable) {
+          await chargeOrderToFolio(tx, tid, reservation!.folio!.id, row.order, row.remaining, req);
+          await tx.posOrder.update({
+            where: { id: row.order.id },
+            data: {
+              reservationId: row.order.reservationId ?? reservation!.id,
+              customerId: row.order.customerId ?? reservation!.customerId,
+              billedToRoomAt: row.order.billedToRoomAt ?? new Date(),
+              billedToRoomBy: row.order.billedToRoomBy ?? req.userId,
+              status: row.order.status === "SERVED" ? "COMPLETED" : row.order.status,
+              paymentStatus: "PAID",
+              ...(row.order.status === "SERVED" ? { completedAt: new Date() } : {}),
+            },
+          });
+          if (row.order.status === "SERVED" && row.order.tableId) await releaseTableIfIdle(tx, row.order.tableId);
+          await mergeDuplicateOrderLines(tx, row.order.id, { includeFlagged: true });
+        }
+        return tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId }, include: orderInclude, orderBy: { orderNumber: "asc" } });
+      });
+    } else {
+      const resolvedPayment = await resolvePaymentMethod(tid, data.paymentMethodId, data.reference);
+      let remainingToAllocate = data.amount;
+      updatedOrders = await prisma.$transaction(async (tx) => {
+        for (const [index, row] of payable.entries()) {
+          const amount = index === payable.length - 1 ? money2(remainingToAllocate) : Math.min(row.remaining, money2(remainingToAllocate));
+          if (amount <= 0.01) break;
+          remainingToAllocate = money2(remainingToAllocate - amount);
+          await applyOrderPayment(tx, {
+            tenantId: tid,
+            order: row.order,
+            total: row.total,
+            alreadyPaid: row.paid,
+            paymentMethodId: data.paymentMethodId,
+            amount,
+            reference: resolvedPayment.reference,
+            employeeId: req.userId,
+            transactionNo: await nextTransactionNo(tid),
+            description: `Linked POS bill ${req.params.billGroupId} payment`,
+          });
+        }
+        return tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId }, include: orderInclude, orderBy: { orderNumber: "asc" } });
+      });
+    }
+    res.status(201).json({ orders: updatedOrders.map((order) => withFinancials(order, tax)) });
+  } catch (error) {
+    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    throw error;
+  }
+});
+
 posRouter.post("/orders/:id/payments", async (req, res) => {
   const parsed = paymentSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid payment", details: parsed.error.flatten() }); return; }
@@ -2044,7 +2182,7 @@ posRouter.put("/settings", async (req, res) => {
  * that have never created a Location see everything, unfiltered. */
 posRouter.get("/menu-items", async (req, res) => {
   const tid = tenantIdFor(req);
-  const query = z.object({ locationId: z.string().cuid().optional() }).safeParse(req.query);
+  const query = z.object({ locationId: z.string().cuid().optional(), includeRemote: z.enum(["true", "false"]).optional() }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
 
   const [fixedLocationId, locationCount, taxDefaults] = await Promise.all([
@@ -2053,6 +2191,7 @@ posRouter.get("/menu-items", async (req, res) => {
     taxSettingsFor(tid),
   ]);
   const effectiveLocationId = fixedLocationId ?? query.data.locationId ?? null;
+  const includeRemote = query.data.includeRemote === "true";
   // Where the kitchen must ask the store for ingredients, its own shelf is empty
   // by design - "how many can I sell" is what the supplying store still holds.
   const availabilityLocationId = await (async () => {
@@ -2064,7 +2203,7 @@ posRouter.get("/menu-items", async (req, res) => {
   const where: Prisma.MenuItemWhereInput = {
     tenantId: tid,
     isAvailable: true,
-    ...(locationCount > 0 ? { OR: [{ locations: { none: {} } }, ...(effectiveLocationId ? [{ locations: { some: { id: effectiveLocationId } } }] : [])] } : {}),
+    ...(locationCount > 0 && !includeRemote ? { OR: [{ locations: { none: {} } }, ...(effectiveLocationId ? [{ locations: { some: { id: effectiveLocationId } } }] : [])] } : {}),
   };
 
   // A sentinel that can never match a real location id — used instead of
@@ -2082,7 +2221,7 @@ posRouter.get("/menu-items", async (req, res) => {
     include: {
       menuCategory: true,
       product: { include: { packUnit: { select: { id: true, name: true } }, stocks: { where: stockWhere, select: { quantity: true } } } },
-      locations: { select: { id: true, name: true } },
+      locations: { where: { isActive: true, canSellMenu: true }, select: { id: true, name: true, serveMode: true } },
       recipe: { include: { ingredients: { include: { product: { include: { stocks: { where: stockWhere, select: { quantity: true } } } } } } } },
       variants: {
         where: { isActive: true },
@@ -2167,14 +2306,19 @@ posRouter.get("/menu-items", async (req, res) => {
       availableQuantity = bestVariant.availableQuantity;
       availabilityUnitLabel = bestVariant.availabilityUnitLabel;
     }
-    if (!effectiveLocationId) availableQuantity = null;
+    const routesHere = !effectiveLocationId || item.locations.length === 0 || item.locations.some((loc) => loc.id === effectiveLocationId);
+    const fulfillmentLocation = routesHere ? null : item.locations[0] ?? null;
+    if (!effectiveLocationId || fulfillmentLocation) availableQuantity = null;
     return {
       ...item,
       category: menuCategory,
-      variants: variantsWithStock.map((v) => ({ ...v, availableQuantity: effectiveLocationId ? v.availableQuantity : null })),
+      variants: variantsWithStock.map((v) => ({ ...v, availableQuantity: effectiveLocationId && !fulfillmentLocation ? v.availableQuantity : null })),
       availableQuantity,
-      availabilityUnitLabel: effectiveLocationId ? availabilityUnitLabel : null,
+      availabilityUnitLabel: effectiveLocationId && !fulfillmentLocation ? availabilityUnitLabel : null,
       locationAllowsOutOfStockOrders,
+      fulfillmentLocationId: fulfillmentLocation?.id ?? null,
+      fulfillmentLocationName: fulfillmentLocation?.name ?? null,
+      fulfillmentServeMode: fulfillmentLocation?.serveMode ?? null,
       // Resolved effective tax (item override else tenant default) so the cart
       // can show a correct preview. The server re-resolves and snapshots this
       // on order create — the client value is never trusted for money.

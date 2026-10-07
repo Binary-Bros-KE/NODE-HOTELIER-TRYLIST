@@ -2739,6 +2739,10 @@ model PosOrder {
   customerId                 String?
   tableId                    String?
   locationId                 String?
+  // Orders created from one mixed-location bill share this token. Each
+  // child order still follows its own location workflow, while settlement UI
+  // can later treat the group as one bill.
+  billGroupId                String?
   // The employee who rang this order up. Plain id, no relation — same
   // convention as cancelRequestedBy/cancelDecidedBy below — so a waiter's
   // order list can be scoped to their own (GET /orders restricts to
@@ -2817,6 +2821,7 @@ model PosOrder {
   @@index([tenantId, creditExpectedAt])
   @@index([tenantId, billedToRoomAt])
   @@index([tenantId, status, completedAt])
+  @@index([tenantId, billGroupId])
 }
 
 model ComplimentarySession {
