@@ -46,6 +46,11 @@ export function createApp(): Application {
   app.use(express.json());
   app.use(cookieParser());
 
+  app.use("/api", (_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
+
   // Scoped CORP relaxation: the global helmet() above defaults to
   // Cross-Origin-Resource-Policy: same-origin, which would silently block
   // <img src> loading an uploaded logo when the frontend is served from a

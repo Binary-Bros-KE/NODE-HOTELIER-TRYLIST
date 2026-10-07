@@ -5,7 +5,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { resolveEffectiveLocation } from "../../lib/location.js";
-import { nextCommercialDocumentPaymentNo, nextInvoiceNo, nextQuotationNo, nextTransactionNo } from "../../lib/sequence.js";
+import { nextCommercialDocumentPaymentNo, nextCustomerNo, nextInvoiceNo, nextQuotationNo, nextTransactionNo } from "../../lib/sequence.js";
 import { orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
@@ -903,13 +903,61 @@ commercialDocumentsRouter.post("/:id/status", async (req, res) => {
   res.json({ document });
 });
 
+const convertSchema = z.object({
+  customerId: z.string().cuid().optional(),
+  createCustomerFromProspect: z.boolean().optional(),
+});
+
+/** The customer an unlinked quotation is converted for. Either an existing customer is
+ * picked, or one is created from the prospect's details (the phone number is required
+ * for a customer, so a prospect without one can't be converted that way). */
+async function customerForConversion(
+  tid: string,
+  quote: { prospectName: string | null; prospectPhone: string | null; prospectEmail: string | null; prospectAddress: string | null },
+  options: { customerId?: string; createCustomerFromProspect?: boolean },
+): Promise<{ customerId: string } | { error: string; status: number; code?: string }> {
+  if (options.customerId) {
+    const customer = await prisma.customer.findFirst({ where: { id: options.customerId, tenantId: tid, status: { not: "BLOCKED" } }, select: { id: true } });
+    if (!customer) return { error: "Customer not found", status: 400 };
+    return { customerId: customer.id };
+  }
+  if (options.createCustomerFromProspect) {
+    const name = quote.prospectName?.trim();
+    if (!name) return { error: "This quotation has no prospect name to create a customer from", status: 400 };
+    const phone = quote.prospectPhone?.trim();
+    if (!phone) return { error: "Add the prospect's phone number to the quotation, or choose an existing customer", status: 400 };
+    const [firstName, ...rest] = name.split(/\s+/);
+    const customer = await prisma.customer.create({
+      data: {
+        tenantId: tid,
+        customerNo: await nextCustomerNo(tid),
+        firstName,
+        lastName: rest.join(" ") || null,
+        phone,
+        email: quote.prospectEmail?.trim() || null,
+        address: quote.prospectAddress?.trim() || null,
+      },
+      select: { id: true },
+    });
+    return { customerId: customer.id };
+  }
+  return { error: "Attach a customer before converting this quotation to an invoice", status: 409, code: "CUSTOMER_REQUIRED" };
+}
+
 commercialDocumentsRouter.post("/:id/convert-to-invoice", async (req, res) => {
+  const convertBody = convertSchema.safeParse(req.body ?? {});
+  if (!convertBody.success) { res.status(400).json({ error: "Invalid conversion", details: convertBody.error.flatten() }); return; }
   const tid = tenantId(req);
   await syncTemporalStatuses(tid);
   const quote = await prisma.commercialDocument.findFirst({ where: { id: req.params.id, tenantId: tid, type: "QUOTATION" }, include });
   if (!quote) { res.status(404).json({ error: "Quotation not found" }); return; }
   if (quote.status !== "ACCEPTED") { res.status(409).json({ error: "Only accepted quotations can be converted to invoices" }); return; }
-  if (!quote.customerId) { res.status(400).json({ error: "Attach a customer before converting this quotation to an invoice" }); return; }
+  if (!quote.customerId) {
+    const attached = await customerForConversion(tid, quote, convertBody.data);
+    if ("error" in attached) { res.status(attached.status).json({ error: attached.error, ...(attached.code ? { code: attached.code } : {}) }); return; }
+    await prisma.commercialDocument.update({ where: { id: quote.id }, data: { customerId: attached.customerId } });
+    quote.customerId = attached.customerId;
+  }
   const existing = quote.convertedDocuments.find((d) => d.type === "INVOICE");
   if (existing) { res.status(409).json({ error: `Already converted to ${existing.documentNo}` }); return; }
   const invoiceNo = await nextInvoiceNo(tid);
