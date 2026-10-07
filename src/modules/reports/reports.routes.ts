@@ -149,11 +149,66 @@ function fullName(person: { firstName: string; lastName?: string | null }) {
   return `${person.firstName} ${person.lastName ?? ""}`.trim();
 }
 
+function customerLabel(customer: { firstName: string; lastName?: string | null; businessName?: string | null }) {
+  return customer.businessName || fullName(customer);
+}
+
+function paymentSum(payments: { amount: unknown }[]) {
+  return round2(payments.reduce((sum, payment) => sum + Number(payment.amount), 0));
+}
+
 function linesByFolio<T extends { folioId: string }>(lines: T[]) {
   const grouped = new Map<string, T[]>();
   for (const line of lines) grouped.set(line.folioId, [...(grouped.get(line.folioId) ?? []), line]);
   return grouped;
 }
+
+function orderOutstanding(
+  order: {
+    discount: Prisma.Decimal | number;
+    paymentStatus: string;
+    payments: { amount: Prisma.Decimal | number }[];
+    items: {
+      quantity: number;
+      unitPrice: Prisma.Decimal | number;
+      taxRate: Moneyish;
+      taxMode: "INCLUSIVE" | "EXCLUSIVE" | null;
+      taxTreatment: "STANDARD" | "ZERO_RATED" | "EXEMPT" | null;
+      addons: { quantity: number; unitPrice: Prisma.Decimal | number }[];
+    }[];
+  },
+  tax: Awaited<ReturnType<typeof taxSettingsFor>>,
+) {
+  const financials = computeOrderFinancials(order, tax);
+  const paidRaw = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0);
+  const paid = order.paymentStatus === "PAID" ? Math.max(paidRaw, financials.total) : paidRaw;
+  return {
+    total: round2(financials.total),
+    paid: round2(paid),
+    balance: Math.max(0, round2(financials.total - paid)),
+  };
+}
+
+function folioOutstanding(
+  folio: {
+    lineItems: ReportTaxLine[];
+    payments: { amount: Prisma.Decimal | number }[];
+  },
+  tax: Awaited<ReturnType<typeof taxSettingsFor>>,
+) {
+  const financials = folioLinesFinancials(folio.lineItems, tax);
+  const paid = paymentSum(folio.payments);
+  return {
+    total: round2(financials.total),
+    paid,
+    balance: Math.max(0, round2(financials.total - paid)),
+  };
+}
+
+const creditDebtorsQuerySchema = z.object({
+  locationId: z.string().trim().optional(),
+  search: z.string().trim().optional(),
+});
 
 /** Cost of one sold line (quantity already applied), checked in priority
  * order: a direct retail-product sale, then a variant's own bar/stock link,
@@ -276,6 +331,181 @@ const orderItemInclude = {
     },
   },
 } as const;
+
+reportsRouter.get("/credit-debtors", async (req, res, next) => {
+  try {
+    const parsed = creditDebtorsQuerySchema.safeParse(req.query);
+    if (!parsed.success) { res.status(400).json({ error: "Invalid report filters", details: parsed.error.flatten() }); return; }
+    const tid = tenantId(req);
+    const { locationId } = parsed.data;
+    const search = parsed.data.search?.toLowerCase() ?? "";
+    const tax = await taxSettingsFor(tid);
+    const orderScope = { tenantId: tid, status: "COMPLETED" as const, paymentStatus: { not: "PAID" as const }, saleType: "SALE" as const, ...(locationId ? { locationId } : {}) };
+    const [
+      creditOrders,
+      openFolios,
+      creditFolios,
+      suppliers,
+    ] = await Promise.all([
+      prisma.posOrder.findMany({
+        where: orderScope,
+        include: {
+          items: {
+            select: {
+              quantity: true,
+              unitPrice: true,
+              taxRate: true,
+              taxMode: true,
+              taxTreatment: true,
+              addons: { select: { quantity: true, unitPrice: true } },
+              service: { select: { name: true } },
+              serviceVariant: { select: { name: true } },
+              menuItem: { select: { name: true } },
+              variant: { select: { name: true } },
+              product: { select: { name: true } },
+            },
+          },
+          payments: { select: { amount: true } },
+          customer: { select: { id: true, firstName: true, lastName: true, phone: true, businessName: true } },
+          location: { select: { id: true, name: true } },
+          reservation: { select: { reservationNo: true, room: { select: { number: true } }, customer: { select: { firstName: true, lastName: true } } } },
+        },
+        orderBy: [{ creditExpectedAt: "asc" }, { completedAt: "desc" }],
+      }),
+      prisma.folio.findMany({
+        where: { tenantId: tid, status: "OPEN", reservation: { status: "CHECKED_IN", ...(locationId ? { locationId } : {}) } },
+        include: {
+          lineItems: { select: { amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true } },
+          payments: { select: { amount: true } },
+          reservation: { select: { id: true, reservationNo: true, checkIn: true, checkOut: true, location: { select: { id: true, name: true } }, room: { select: { number: true } }, customer: { select: { id: true, firstName: true, lastName: true, phone: true, businessName: true } } } },
+        },
+        orderBy: { updatedAt: "desc" },
+      }),
+      prisma.folio.findMany({
+        where: { tenantId: tid, creditAmount: { gt: 0 }, reservation: { ...(locationId ? { locationId } : {}) } },
+        include: {
+          lineItems: { select: { amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true } },
+          payments: { select: { amount: true } },
+          reservation: { select: { id: true, reservationNo: true, checkIn: true, checkOut: true, location: { select: { id: true, name: true } }, room: { select: { number: true } }, customer: { select: { id: true, firstName: true, lastName: true, phone: true, businessName: true } } } },
+        },
+        orderBy: { updatedAt: "desc" },
+      }),
+      prisma.supplier.findMany({ where: { tenantId: tid, balance: { gt: 0 } }, select: { id: true, name: true, phone: true, email: true, balance: true, paymentTerms: true, updatedAt: true }, orderBy: { balance: "desc" } }),
+    ]);
+
+    const orderRows = creditOrders.map((order) => {
+      const money = orderOutstanding(order, tax);
+      const customerName = order.customer ? customerLabel(order.customer) : order.reservation?.customer ? fullName(order.reservation.customer) : "Walk-in";
+      const itemNames = order.items.map((item) => item.service?.name ?? item.menuItem?.name ?? item.product?.name ?? "Item");
+      return {
+        id: order.id,
+        kind: order.channel === "SERVICES" ? "SERVICE_CREDIT" : "POS_CREDIT",
+        orderNumber: order.orderNumber,
+        customerId: order.customer?.id ?? null,
+        customerName,
+        phone: order.customer?.phone ?? null,
+        locationId: order.location?.id ?? null,
+        locationName: order.location?.name ?? null,
+        reference: `Order #${order.orderNumber}`,
+        description: itemNames.slice(0, 3).join(", ") + (itemNames.length > 3 ? ` +${itemNames.length - 3}` : ""),
+        completedAt: order.completedAt?.toISOString() ?? order.updatedAt.toISOString(),
+        expectedAt: order.creditExpectedAt?.toISOString() ?? null,
+        reason: order.creditReason,
+        total: money.total,
+        paid: money.paid,
+        balance: money.balance,
+      };
+    }).filter((row) => row.balance > 0.01);
+
+    const openRoomRows = openFolios.map((folio) => {
+      const money = folioOutstanding(folio, tax);
+      return {
+        id: folio.reservation.id,
+        folioNo: folio.folioNo,
+        reservationNo: folio.reservation.reservationNo,
+        customerId: folio.reservation.customer.id,
+        guestName: customerLabel(folio.reservation.customer),
+        phone: folio.reservation.customer.phone,
+        locationId: folio.reservation.location?.id ?? null,
+        locationName: folio.reservation.location?.name ?? null,
+        roomNumber: folio.reservation.room.number,
+        status: "CHECKED_IN",
+        checkIn: folio.reservation.checkIn.toISOString(),
+        checkOut: folio.reservation.checkOut.toISOString(),
+        expectedAt: null,
+        reason: null,
+        total: money.total,
+        paid: money.paid,
+        balance: money.balance,
+      };
+    }).filter((row) => row.balance > 0.01);
+
+    const folioIds = creditFolios.map((folio) => folio.id);
+    const creditEntries = folioIds.length
+      ? await prisma.customerCreditEntry.groupBy({ by: ["folioId"], where: { tenantId: tid, folioId: { in: folioIds }, type: { in: ["CREDIT", "REPAYMENT"] } }, _sum: { amount: true } })
+      : [];
+    const creditByFolio = new Map(creditEntries.map((entry) => [entry.folioId, Number(entry._sum.amount ?? 0)]));
+    const checkedOutRoomRows = creditFolios.map((folio) => {
+      const outstanding = Math.max(0, round2(creditByFolio.get(folio.id) ?? Number(folio.creditAmount)));
+      const money = folioOutstanding(folio, tax);
+      return {
+        id: folio.reservation.id,
+        folioNo: folio.folioNo,
+        reservationNo: folio.reservation.reservationNo,
+        customerId: folio.reservation.customer.id,
+        guestName: customerLabel(folio.reservation.customer),
+        phone: folio.reservation.customer.phone,
+        locationId: folio.reservation.location?.id ?? null,
+        locationName: folio.reservation.location?.name ?? null,
+        roomNumber: folio.reservation.room.number,
+        status: "CHECKED_OUT_CREDIT",
+        checkIn: folio.reservation.checkIn.toISOString(),
+        checkOut: folio.reservation.checkOut.toISOString(),
+        expectedAt: folio.creditExpectedAt?.toISOString() ?? null,
+        reason: folio.creditReason,
+        total: money.total,
+        paid: money.paid,
+        balance: outstanding,
+      };
+    }).filter((row) => row.balance > 0.01);
+
+    const creditorRows = suppliers.map((supplier) => ({
+      id: supplier.id,
+      supplierName: supplier.name,
+      phone: supplier.phone,
+      email: supplier.email,
+      paymentTerms: supplier.paymentTerms,
+      balance: round2(Number(supplier.balance)),
+      updatedAt: supplier.updatedAt.toISOString(),
+    }));
+
+    const matches = (values: (string | number | null | undefined)[]) => !search || values.some((value) => String(value ?? "").toLowerCase().includes(search));
+    const posCredit = orderRows.filter((row) => row.kind === "POS_CREDIT" && matches([row.reference, row.customerName, row.phone, row.locationName, row.description]));
+    const serviceCredit = orderRows.filter((row) => row.kind === "SERVICE_CREDIT" && matches([row.reference, row.customerName, row.phone, row.locationName, row.description]));
+    const rooms = [...openRoomRows, ...checkedOutRoomRows].filter((row) => matches([row.folioNo, row.reservationNo, row.guestName, row.phone, row.roomNumber, row.locationName]));
+    const creditors = creditorRows.filter((row) => matches([row.supplierName, row.phone, row.email, row.paymentTerms]));
+    const sum = <T extends { balance: number }>(rows: T[]) => round2(rows.reduce((total, row) => total + row.balance, 0));
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      filters: { locationId: locationId ?? null, search },
+      cards: {
+        debtorsTotal: round2(sum(posCredit) + sum(serviceCredit) + sum(rooms)),
+        posCredit: sum(posCredit),
+        serviceCredit: sum(serviceCredit),
+        rooms: sum(rooms),
+        creditors: sum(creditors),
+        netExposure: round2(sum(posCredit) + sum(serviceCredit) + sum(rooms) - sum(creditors)),
+      },
+      posCredit,
+      serviceCredit,
+      rooms,
+      creditors,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 reportsRouter.get("/sales", async (req, res, next) => {
   try {
