@@ -101,11 +101,27 @@ export async function requestDishes(tenantId: string, requestId: string) {
   const items = await prisma.posOrderItem.findMany({ where: { dispatchRequestId: requestId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
   const variantRecipes = await Promise.all(items.map((item) => (item.variant ? prisma.menuItemVariant.findUnique({ where: { id: item.variant.id }, select: { recipeId: true } }) : null)));
   const perItem = await Promise.all(
-    items.map(async (item, i) => ({
-      item,
-      recipeId: variantRecipes[i]?.recipeId ?? item.menuItem?.recipeId ?? null,
-      requirements: await perSaleRequirements(prisma, tenantId, computeStockRequirements([item])),
-    })),
+    items.map(async (item, i) => {
+      const variantRecipeId = variantRecipes[i]?.recipeId ?? null;
+      const variantUsesProduct = Boolean(item.variant?.stockProductId && item.variant.stockProduct);
+      const variantUsesRecipe = Boolean(variantRecipeId);
+      const baseUsesRecipe = Boolean(item.menuItem?.recipeId);
+      const baseUsesProduct = Boolean(item.menuItem?.productId && item.menuItem.product);
+      return {
+        item,
+        recipeId: variantUsesRecipe ? variantRecipeId : variantUsesProduct ? null : item.menuItem?.recipeId ?? null,
+        stockSource: variantUsesProduct
+          ? `Variant stock setup: ${item.variant!.name} uses ${item.variant!.stockProduct!.name}`
+          : variantUsesRecipe
+            ? `Variant recipe: ${item.variant!.name}`
+            : baseUsesRecipe
+              ? "Menu item recipe"
+              : baseUsesProduct
+                ? `Menu item stock setup: ${item.menuItem!.product!.name}`
+                : null,
+        requirements: await perSaleRequirements(prisma, tenantId, computeStockRequirements([item])),
+      };
+    }),
   );
   const productIds = [...new Set(perItem.flatMap(({ requirements }) => [...requirements.keys()]))];
   const [products, stocks] = await Promise.all([
@@ -116,10 +132,11 @@ export async function requestDishes(tenantId: string, requestId: string) {
   ]);
   const unitById = new Map(products.map((p) => [p.id, p.unit]));
   const storeById = new Map(stocks.map((st) => [st.productId, Number(st.quantity)]));
-  return perItem.map(({ item, recipeId, requirements }) => ({
+  return perItem.map(({ item, recipeId, stockSource, requirements }) => ({
     name: `${item.menuItem?.name ?? "Item"}${item.variant ? ` (${item.variant.name})` : ""}`,
     quantity: item.quantity,
     recipeId,
+    stockSource,
     ingredients: [...requirements]
       .map(([productId, r]) => ({ productId, name: r.name, quantity: r.quantity, unit: unitById.get(productId) ?? "", storeQty: storeById.get(productId) ?? 0 }))
       .sort((a, b) => a.name.localeCompare(b.name)),
