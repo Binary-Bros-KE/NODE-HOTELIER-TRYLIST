@@ -3651,6 +3651,8 @@ model BusinessProfile {
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   logoUrl   String?
+  documentLogoUrl      String?
+  documentBrandingMode String  @default("NAME")
   shortName String?
 
   themeBaseColor   String @default("#1c74d1")

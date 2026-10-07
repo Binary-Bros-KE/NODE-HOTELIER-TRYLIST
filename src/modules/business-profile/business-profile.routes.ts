@@ -16,6 +16,7 @@ const businessTypes = ["RESTAURANT", "CAFE", "HOTEL", "MOTEL", "CLUB"] as const;
 const currencies = ["KES", "UGX", "TZS", "USD"] as const;
 const taxModes = ["INCLUSIVE", "EXCLUSIVE"] as const;
 const taxTreatments = ["STANDARD", "ZERO_RATED", "EXEMPT"] as const;
+const documentBrandingModes = ["NAME", "LOGO", "LOGO_AND_NAME"] as const;
 
 // A cleared field must be saved as null: an undefined value is skipped by the
 // update, so the old value would silently stay in the database.
@@ -27,6 +28,8 @@ const optionalRate = z.preprocess(blankToUndefined,z.coerce.number().min(0).max(
 
 const profileSchema = z.object({
   logoUrl: optionalText(2000),
+  documentLogoUrl: optionalText(2000),
+  documentBrandingMode: z.enum(documentBrandingModes).optional(),
   shortName: optionalText(24),
   businessName: z.string().trim().min(1).max(150),
   businessType: z.enum(businessTypes),
@@ -101,6 +104,20 @@ businessProfileRouter.post("/logo", requireAdmin, (req, res, next) => {
   });
 });
 
+businessProfileRouter.post("/document-logo", requireAdmin, (req, res, next) => {
+  logoUpload.single("logo")(req, res, (err: unknown) => {
+    if (err) {
+      if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+        res.status(413).json({ error: "Document logo must be under 5MB" });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : "Could not process the uploaded file" });
+      return;
+    }
+    void handleDocumentLogoUpload(req, res, next);
+  });
+});
+
 async function handleLogoUpload(req: Request, res: Response, next: NextFunction) {
   if (!req.file) { res.status(400).json({ error: "No logo file was provided" }); return; }
   const tid = tenantId(req);
@@ -116,6 +133,27 @@ async function handleLogoUpload(req: Request, res: Response, next: NextFunction)
     if (existing?.logoUrl?.startsWith("/uploads/logos/")) {
       const previousPath = path.resolve(process.cwd(), existing.logoUrl.slice(1));
       fs.unlink(previousPath, () => {}); // best-effort cleanup, never fail the request over this
+    }
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function handleDocumentLogoUpload(req: Request, res: Response, next: NextFunction) {
+  if (!req.file) { res.status(400).json({ error: "No document logo file was provided" }); return; }
+  const tid = tenantId(req);
+  try {
+    const existing = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { documentLogoUrl: true } });
+    const documentLogoUrl = `/uploads/logos/${req.file.filename}`;
+    const profile = await prisma.businessProfile.upsert({
+      where: { tenantId: tid },
+      create: { tenantId: tid, businessName: "My Business", businessType: "HOTEL", currency: "KES", documentLogoUrl, documentBrandingMode: "LOGO_AND_NAME" },
+      update: { documentLogoUrl, documentBrandingMode: "LOGO_AND_NAME" },
+    });
+    res.json({ profile });
+    if (existing?.documentLogoUrl?.startsWith("/uploads/logos/")) {
+      const previousPath = path.resolve(process.cwd(), existing.documentLogoUrl.slice(1));
+      fs.unlink(previousPath, () => {});
     }
   } catch (error) {
     next(error);
