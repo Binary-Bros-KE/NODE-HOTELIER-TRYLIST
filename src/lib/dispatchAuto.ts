@@ -135,6 +135,8 @@ export async function requestDishes(tenantId: string, requestId: string) {
   return perItem.map(({ item, recipeId, stockSource, requirements }) => ({
     name: `${item.menuItem?.name ?? "Item"}${item.variant ? ` (${item.variant.name})` : ""}`,
     quantity: item.quantity,
+    menuItemId: item.menuItemId,
+    variantId: item.variantId,
     recipeId,
     stockSource,
     ingredients: [...requirements]
