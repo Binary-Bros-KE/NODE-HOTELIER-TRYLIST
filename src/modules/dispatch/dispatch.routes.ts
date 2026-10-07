@@ -45,6 +45,17 @@ async function withStoreStock<T extends Prisma.StockDispatchRequestGetPayload<{ 
 dispatchRouter.get("/", handle(async (req, res) => {
   const tid = tenantId(req);
   const history = req.query.status === "history";
+  if (!history) {
+    const waiting = await prisma.stockDispatchRequest.findMany({
+      where: { tenantId: tid, status: "REQUESTED" },
+      select: { id: true },
+      orderBy: { requestedAt: "asc" },
+      take: 200,
+    });
+    for (const request of waiting) {
+      await prisma.$transaction((tx) => refreshOpenRequest(tx, tid, request.id));
+    }
+  }
   const requests = await prisma.stockDispatchRequest.findMany({
     where: { tenantId: tid, status: history ? { in: ["DISPATCHED", "REJECTED", "CANCELLED"] } : "REQUESTED" },
     include: requestInclude,
