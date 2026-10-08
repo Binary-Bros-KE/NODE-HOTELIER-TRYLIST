@@ -7,7 +7,7 @@ import { prisma } from "../../lib/prisma.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
 import { DispatchError, employeeName } from "../../lib/dispatch.js";
 import { InsufficientStockError, recordStockMovement } from "../../lib/stockLedger.js";
-import { refreshOpenRequest, requestDishes, rungUpByName } from "../../lib/dispatchAuto.js";
+import { dispatchSlipDishSections, refreshOpenRequest, requestDishes, rungUpByName } from "../../lib/dispatchAuto.js";
 
 // The store's side of a kitchen's ingredient request: see what the chef asked
 // for, dispatch it (a real store -> kitchen stock transfer) or reject it with a
@@ -66,8 +66,11 @@ dispatchRouter.get("/", handle(async (req, res) => {
 }));
 
 /** Adds each request's dishes (with their ingredients) and who rang the order up. */
-async function withDishes<T extends { id: string; orderId: string }>(tid: string, requests: T[]) {
-  return Promise.all(requests.map(async (r) => ({ ...r, dishes: await requestDishes(tid, r.id), rungUpBy: await rungUpByName(tid, r.orderId) })));
+async function withDishes<T extends { id: string; orderId: string; fromLocationId: string }>(tid: string, requests: T[]) {
+  return Promise.all(requests.map(async (r) => {
+    const sections = await dispatchSlipDishSections(tid, r);
+    return { ...r, dishes: await requestDishes(tid, r.id), existingDishes: sections.existingDishes, orderKind: sections.isUpdate ? "UPDATED_ORDER" : "NEW_ORDER", rungUpBy: await rungUpByName(tid, r.orderId) };
+  }));
 }
 
 /** Cheap poll target for a sidebar badge / tab count. */

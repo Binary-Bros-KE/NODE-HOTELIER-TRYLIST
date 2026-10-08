@@ -106,15 +106,7 @@ export async function rungUpByName(tenantId: string, orderId: string) {
   return e ? `${e.firstName} ${e.lastName}`.trim() : null;
 }
 
-/**
- * The dishes behind one request, in the order they were rung up: each dish with
- * the stock ingredients it takes for that line, what the store holds of each, and
- * the recipe behind it (so the storekeeper can correct it). What the storekeeper
- * reads on screen and on the printed slip.
- */
-export async function requestDishes(tenantId: string, requestId: string) {
-  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId }, select: { fromLocationId: true } });
-  const items = await prisma.posOrderItem.findMany({ where: { dispatchRequestId: requestId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
+async function dishesFromItems(tenantId: string, fromLocationId: string | null | undefined, items: Prisma.PosOrderItemGetPayload<{ include: typeof stockLineInclude }>[]) {
   const variantRecipes = await Promise.all(items.map((item) => (item.variant ? prisma.menuItemVariant.findUnique({ where: { id: item.variant.id }, select: { recipeId: true } }) : null)));
   const perItem = await Promise.all(
     items.map(async (item, i) => {
@@ -142,8 +134,8 @@ export async function requestDishes(tenantId: string, requestId: string) {
   const productIds = [...new Set(perItem.flatMap(({ requirements }) => [...requirements.keys()]))];
   const [products, stocks] = await Promise.all([
     prisma.product.findMany({ where: { tenantId, id: { in: productIds } }, select: { id: true, unit: true } }),
-    request
-      ? prisma.productStock.findMany({ where: { tenantId, locationId: request.fromLocationId, productId: { in: productIds } }, select: { productId: true, quantity: true } })
+    fromLocationId
+      ? prisma.productStock.findMany({ where: { tenantId, locationId: fromLocationId, productId: { in: productIds } }, select: { productId: true, quantity: true } })
       : Promise.resolve([] as { productId: string; quantity: unknown }[]),
   ]);
   const unitById = new Map(products.map((p) => [p.id, p.unit]));
@@ -162,6 +154,29 @@ export async function requestDishes(tenantId: string, requestId: string) {
   }));
 }
 
+/**
+ * The dishes behind one request, in the order they were rung up: each dish with
+ * the stock ingredients it takes for that line, what the store holds of each, and
+ * the recipe behind it (so the storekeeper can correct it). What the storekeeper
+ * reads on screen and on the printed slip.
+ */
+export async function requestDishes(tenantId: string, requestId: string) {
+  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId }, select: { fromLocationId: true } });
+  const items = await prisma.posOrderItem.findMany({ where: { dispatchRequestId: requestId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
+  return dishesFromItems(tenantId, request?.fromLocationId, items);
+}
+
+export async function dispatchSlipDishSections(tenantId: string, request: { id: string; orderId: string; fromLocationId: string }) {
+  const items = await prisma.posOrderItem.findMany({ where: { orderId: request.orderId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
+  const current = items.filter((item) => item.dispatchRequestId === request.id);
+  const existing = items.filter((item) => item.dispatchRequestId !== request.id);
+  const [existingDishes, requestedDishes] = await Promise.all([
+    dishesFromItems(tenantId, request.fromLocationId, existing),
+    dishesFromItems(tenantId, request.fromLocationId, current),
+  ]);
+  return { existingDishes, requestedDishes, isUpdate: existingDishes.length > 0 };
+}
+
 /** Everything a printer needs to draw the slip, so the printing device needs no permissions of its own. */
 export async function dispatchSlipFor(tenantId: string, requestId: string) {
   const request = await prisma.stockDispatchRequest.findFirst({
@@ -174,17 +189,21 @@ export async function dispatchSlipFor(tenantId: string, requestId: string) {
     },
   });
   if (!request) return null;
+  const sections = await dispatchSlipDishSections(tenantId, request);
   return {
     requestNo: request.requestNo,
     orderNumber: request.orderNumber,
     table: request.order.table?.label ?? null,
+    kind: sections.isUpdate ? "UPDATED_ORDER" : "NEW_ORDER",
     from: request.fromLocation.name,
     to: request.toLocation.name,
     requestedByName: request.requestedByName,
+    waiterName: request.requestedByName ?? await rungUpByName(tenantId, request.orderId),
     rungUpBy: await rungUpByName(tenantId, request.orderId),
     requestedAt: request.requestedAt,
     note: request.note,
-    dishes: await requestDishes(tenantId, requestId),
+    existingDishes: sections.existingDishes,
+    dishes: sections.requestedDishes,
     items: request.items.map((i) => ({ name: i.productName, quantity: Number(i.requestedQty), unit: i.product.unit })),
   };
 }
