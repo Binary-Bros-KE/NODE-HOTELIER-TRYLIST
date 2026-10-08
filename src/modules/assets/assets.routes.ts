@@ -221,19 +221,23 @@ const conditionSchema = z.object({
   note: optionalText(300),
 });
 
-/** Anyone can report an asset's condition (housekeeping notices a broken TV); every change is logged. */
+/** Changing an asset's condition, and the note on it, is supervisor/Super Admin only. */
 assetsRouter.patch("/:id/condition", async (req, res, next) => {
   const data = conditionSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid condition", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
+    const actor = await prisma.employee.findFirst({ where: { id: req.userId, tenantId: tid }, select: { isSupervisor: true, role: { select: { name: true } } } });
+    if (!(actor?.role?.name === "Super Admin" || actor?.isSupervisor)) { res.status(403).json({ error: "Only a supervisor or admin can change an asset's condition or note" }); return; }
     const asset = await prisma.asset.findFirst({ where: { id: req.params.id, tenantId: tid } });
     if (!asset) { res.status(404).json({ error: "Asset not found" }); return; }
     const { condition, note } = data.data;
     const affected = condition === "WORKING" ? null : data.data.affectedQuantity ?? null;
     if (affected != null && affected > Number(asset.quantity)) { res.status(400).json({ error: `Only ${Number(asset.quantity)} ${asset.name} on record` }); return; }
     await prisma.$transaction(async (tx) => {
-      await tx.asset.update({ where: { id: asset.id }, data: { condition, affectedQuantity: affected, conditionNote: condition === "WORKING" ? null : note ?? null, conditionUpdatedAt: new Date(), conditionUpdatedBy: req.userId, updatedBy: req.userId } });
+      // The note describes the current condition, whatever it is - including "working" (e.g. "due for
+      // service next month"). It used to be wiped the moment condition went back to WORKING.
+      await tx.asset.update({ where: { id: asset.id }, data: { condition, affectedQuantity: affected, conditionNote: note ?? null, conditionUpdatedAt: new Date(), conditionUpdatedBy: req.userId, updatedBy: req.userId } });
       await tx.assetConditionLog.create({ data: { tenantId: tid, assetId: asset.id, fromCondition: asset.condition, toCondition: condition, affectedQuantity: affected, note, changedBy: req.userId } });
     });
     const updated = await prisma.asset.findUniqueOrThrow({ where: { id: asset.id }, include: assetInclude });
