@@ -492,6 +492,7 @@ model Tenant {
   goodsReceipts              GoodsReceipt[]
   stockReceipts              StockReceipt[]
   stockTransfers             StockTransfer[]
+  stockRequests              StockRequest[]
   supplierPayments           SupplierPayment[]
   supplierBalanceEntries     SupplierBalanceEntry[]
   memberships                Membership[]
@@ -1063,6 +1064,13 @@ enum StockDispatchStatus {
   CANCELLED
 }
 
+enum StockRequestStatus {
+  REQUESTED
+  DISPATCHED
+  REJECTED
+  CANCELLED
+}
+
 // A kitchen's request for the ingredients of an order round, answered by the
 // store. Dispatching performs a real StockTransfer (store -> kitchen location),
 // so the ledger and both balances move; the order's lines point back here via
@@ -1108,6 +1116,51 @@ model StockDispatchItem {
   dispatchedQty Decimal?             @db.Decimal(12, 3)
 
   @@index([requestId])
+}
+
+// A department/location requisition to the store. This is different from the
+// POS kitchen dispatch request above: it can be raised by Reception,
+// Housekeeping, Sales, Services, Kitchen, or any other internal location
+// whenever they need stock from the store.
+model StockRequest {
+  id                String             @id @default(cuid())
+  tenantId          String
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  requestNo         String
+  fromLocationId    String
+  fromLocation      Location           @relation("StockRequestFrom", fields: [fromLocationId], references: [id], onDelete: Restrict)
+  toLocationId      String
+  toLocation        Location           @relation("StockRequestTo", fields: [toLocationId], references: [id], onDelete: Restrict)
+  status            StockRequestStatus @default(REQUESTED)
+  note              String?
+  requestedBy       String?
+  requestedByName   String?
+  requestedAt       DateTime           @default(now())
+  respondedBy       String?
+  respondedByName   String?
+  respondedAt       DateTime?
+  rejectReason      String?
+  transferId        String?
+  items             StockRequestItem[]
+
+  @@unique([tenantId, requestNo])
+  @@index([tenantId, status])
+  @@index([tenantId, fromLocationId])
+  @@index([tenantId, toLocationId])
+}
+
+model StockRequestItem {
+  id            String       @id @default(cuid())
+  requestId     String
+  request       StockRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
+  productName   String
+  requestedQty  Decimal      @db.Decimal(12, 3)
+  dispatchedQty Decimal?     @db.Decimal(12, 3)
+
+  @@index([requestId])
+  @@index([productId])
 }
 
 // Which till an add-on belongs to. Menu add-ons show only in the food POS,
@@ -2275,6 +2328,7 @@ model Product {
   goodsReceiptItems          GoodsReceiptItem[]
   stockTransferItems         StockTransferItem[]
   stockDispatchItems         StockDispatchItem[]
+  stockRequestItems          StockRequestItem[]
   variantIngredientOverrides MenuItemVariantIngredient[] @relation("VariantIngredientProduct")
   services                   Service[]                   @relation("ServiceProduct")
   serviceVariantsStocked     ServiceVariant[]            @relation("ServiceVariantStock")
@@ -2490,6 +2544,8 @@ model Location {
   stockReceipts          StockReceipt[]
   stockTransfersFrom     StockTransfer[]        @relation("StockTransferFrom")
   stockTransfersTo       StockTransfer[]        @relation("StockTransferTo")
+  stockRequestsFrom      StockRequest[]         @relation("StockRequestFrom")
+  stockRequestsTo        StockRequest[]         @relation("StockRequestTo")
   dispatchRequestsFrom   StockDispatchRequest[] @relation("DispatchFrom")
   dispatchRequestsTo     StockDispatchRequest[] @relation("DispatchTo")
   printJobs              PrintJob[]

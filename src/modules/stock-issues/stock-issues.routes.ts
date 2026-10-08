@@ -1,10 +1,12 @@
 import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { prisma } from "../../lib/prisma.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
-import { nextStockTransferNo } from "../../lib/sequence.js";
+import { employeeName } from "../../lib/dispatch.js";
+import { nextStockRequestNo, nextStockTransferNo } from "../../lib/sequence.js";
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
 import { performStockTransfer } from "../../lib/stockTransfer.js";
 
@@ -43,6 +45,223 @@ async function onHandAt(tid: string, locationId: string, productIds: string[]) {
   });
   return new Map(rows.map((row) => [row.productId, Number(row.quantity)]));
 }
+
+const stockRequestInclude = {
+  fromLocation: { select: { id: true, name: true, type: true } },
+  toLocation: { select: { id: true, name: true, type: true } },
+  items: {
+    include: {
+      product: { select: { id: true, unit: true, trackingMode: true } },
+    },
+    orderBy: { productName: "asc" as const },
+  },
+} as const satisfies Prisma.StockRequestInclude;
+
+type StockRequestWithItems = Prisma.StockRequestGetPayload<{ include: typeof stockRequestInclude }>;
+const paramOne = (value: string | string[] | undefined) => Array.isArray(value) ? value[0] : value;
+
+async function stockRequestDto(tid: string, request: StockRequestWithItems) {
+  const onHand = await onHandAt(tid, request.fromLocationId, request.items.map((i) => i.productId));
+  return {
+    id: request.id,
+    requestNo: request.requestNo,
+    status: request.status,
+    note: request.note,
+    requestedByName: request.requestedByName,
+    requestedAt: request.requestedAt,
+    respondedByName: request.respondedByName,
+    respondedAt: request.respondedAt,
+    rejectReason: request.rejectReason,
+    fromLocation: request.fromLocation,
+    toLocation: request.toLocation,
+    items: request.items.map((item) => ({
+      id: item.id,
+      productId: item.productId,
+      productName: item.productName,
+      unit: item.product.unit,
+      trackingMode: item.product.trackingMode,
+      requestedQty: Number(item.requestedQty),
+      dispatchedQty: item.dispatchedQty == null ? null : Number(item.dispatchedQty),
+      available: onHand.get(item.productId) ?? 0,
+    })),
+  };
+}
+
+stockIssuesRouter.get("/request-sheet", handle(async (req, res) => {
+  const tid = tenantId(req);
+  const query = parse(z.object({ fromLocationId: z.string().min(1) }), req.query, res);
+  if (!query) return;
+  await locationIn(tid, query.fromLocationId);
+  const products = await prisma.product.findMany({
+    where: { tenantId: tid, isActive: true, isExpenseItem: false },
+    select: { id: true, name: true, unit: true, trackingMode: true, category: { select: { name: true } } },
+    orderBy: [{ category: { name: "asc" } }, { name: "asc" }],
+  });
+  const onHand = await onHandAt(tid, query.fromLocationId, products.map((p) => p.id));
+  res.json({ products: products.map((p) => ({ ...p, categoryName: p.category?.name ?? "Uncategorised", onHand: onHand.get(p.id) ?? 0 })) });
+}));
+
+const stockRequestSchema = z.object({
+  fromLocationId: z.string().min(1),
+  toLocationId: z.string().min(1),
+  note: z.string().trim().max(500).optional(),
+  lines: z.array(z.object({ productId: z.string().min(1), quantity: z.number().positive() })).min(1),
+});
+
+stockIssuesRouter.post("/requests", handle(async (req, res) => {
+  const tid = tenantId(req);
+  const body = parse(stockRequestSchema, req.body, res);
+  if (!body) return;
+  if (body.fromLocationId === body.toLocationId) throw badRequest("Pick a different store and destination");
+  await locationIn(tid, body.fromLocationId);
+  await locationIn(tid, body.toLocationId);
+
+  const products = await prisma.product.findMany({
+    where: { tenantId: tid, id: { in: body.lines.map((l) => l.productId) }, isActive: true, isExpenseItem: false },
+    select: { id: true, name: true },
+  });
+  const byId = new Map(products.map((p) => [p.id, p]));
+  for (const line of body.lines) if (!byId.has(line.productId)) throw notFound("Product not found");
+
+  const requestNo = await nextStockRequestNo(tid);
+  const requesterName = await employeeName(prisma, tid, req.userId);
+  const created = await prisma.stockRequest.create({
+    data: {
+      tenantId: tid,
+      requestNo,
+      fromLocationId: body.fromLocationId,
+      toLocationId: body.toLocationId,
+      note: body.note ?? null,
+      requestedBy: req.userId ?? null,
+      requestedByName: requesterName,
+      items: { create: body.lines.map((line) => ({ productId: line.productId, productName: byId.get(line.productId)!.name, requestedQty: line.quantity })) },
+    },
+    include: stockRequestInclude,
+  });
+  res.status(201).json({ request: await stockRequestDto(tid, created as StockRequestWithItems) });
+}));
+
+stockIssuesRouter.get("/requests", handle(async (req, res) => {
+  const tid = tenantId(req);
+  const query = parse(z.object({
+    status: z.enum(["REQUESTED", "DISPATCHED", "REJECTED", "CANCELLED"]).optional(),
+    fromLocationId: z.string().min(1).optional(),
+    toLocationId: z.string().min(1).optional(),
+  }), req.query, res);
+  if (!query) return;
+  const requests = await prisma.stockRequest.findMany({
+    where: {
+      tenantId: tid,
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.fromLocationId ? { fromLocationId: query.fromLocationId } : {}),
+      ...(query.toLocationId ? { toLocationId: query.toLocationId } : {}),
+    },
+    include: stockRequestInclude,
+    orderBy: { requestedAt: "desc" },
+    take: 80,
+  });
+  res.json({ requests: await Promise.all(requests.map((r) => stockRequestDto(tid, r as StockRequestWithItems))) });
+}));
+
+const dispatchRequestSchema = z.object({
+  note: z.string().trim().max(500).optional(),
+  lines: z.array(z.object({ itemId: z.string().min(1), quantity: z.number().min(0) })).min(1),
+});
+
+stockIssuesRouter.post("/requests/:id/dispatch", requirePermission("STORE_DISPATCH"), handle(async (req, res) => {
+  const tid = tenantId(req);
+  const body = parse(dispatchRequestSchema, req.body, res);
+  if (!body) return;
+  const requestId = paramOne(req.params.id);
+  if (!requestId) throw notFound("Stock request not found");
+
+  const request = await prisma.stockRequest.findFirst({
+    where: { id: requestId, tenantId: tid },
+    include: stockRequestInclude,
+  });
+  if (!request) throw notFound("Stock request not found");
+  if (request.status !== "REQUESTED") throw badRequest("This request has already been answered");
+
+  const quantityByItem = new Map(body.lines.map((line) => [line.itemId, line.quantity]));
+  const chosen = (request.items as StockRequestWithItems["items"])
+    .map((item) => ({ item, quantity: quantityByItem.get(item.id) ?? Number(item.requestedQty) }))
+    .filter((line) => line.quantity > 0);
+  if (chosen.length === 0) throw badRequest("Enter a dispatch quantity for at least one item");
+  for (const line of chosen) {
+    const requested = Number(line.item.requestedQty);
+    if (line.quantity > requested) throw badRequest(`You cannot dispatch more ${line.item.productName} than requested`);
+  }
+
+  const transferNo = await nextStockTransferNo(tid);
+  const actorName = await employeeName(prisma, tid, req.userId);
+  const note = body.note ?? request.note ?? null;
+  const issuedOnly = chosen.filter((line) => line.item.product.trackingMode === "ISSUE_ONLY");
+  const kept = chosen.filter((line) => line.item.product.trackingMode !== "ISSUE_ONLY");
+
+  const transferId = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.stockRequest.updateMany({
+      where: { id: request.id, status: "REQUESTED" },
+      data: { status: "DISPATCHED", respondedAt: new Date(), respondedBy: req.userId ?? null, respondedByName: actorName },
+    });
+    if (!claimed.count) throw badRequest("This request has just been answered by someone else");
+
+    for (const line of issuedOnly) {
+      await recordStockMovement(tx, {
+        tenantId: tid,
+        productId: line.item.productId,
+        locationId: request.fromLocationId,
+        type: "ISSUE",
+        quantity: -line.quantity,
+        note: note ?? `Issued to ${request.toLocation.name}`,
+        sourceType: "STOCK_REQUEST",
+        sourceRefId: request.id,
+        performedBy: req.userId ?? null,
+        label: line.item.productName,
+      });
+    }
+
+    let createdTransferId: string | null = null;
+    if (kept.length > 0) {
+      const transfer = await performStockTransfer(tx, {
+        tenantId: tid,
+        transferNo,
+        fromLocationId: request.fromLocationId,
+        toLocationId: request.toLocationId,
+        items: kept.map((line) => ({ productId: line.item.productId, quantity: line.quantity, name: line.item.productName })),
+        note,
+        ledgerNote: note ?? `Stock request ${request.requestNo}`,
+        performedBy: req.userId,
+      });
+      createdTransferId = transfer.id;
+    }
+
+    await Promise.all((request.items as StockRequestWithItems["items"]).map((item) => tx.stockRequestItem.update({
+      where: { id: item.id },
+      data: { dispatchedQty: quantityByItem.get(item.id) ?? Number(item.requestedQty) },
+    })));
+    if (createdTransferId) await tx.stockRequest.update({ where: { id: request.id }, data: { transferId: createdTransferId } });
+    return createdTransferId;
+  });
+
+  const fresh = await prisma.stockRequest.findUniqueOrThrow({ where: { id: request.id }, include: stockRequestInclude });
+  res.json({ request: await stockRequestDto(tid, fresh as StockRequestWithItems), transferNo: transferId ? transferNo : null });
+}));
+
+stockIssuesRouter.post("/requests/:id/reject", requirePermission("STORE_DISPATCH"), handle(async (req, res) => {
+  const tid = tenantId(req);
+  const body = parse(z.object({ reason: z.string().trim().min(1).max(500) }), req.body, res);
+  if (!body) return;
+  const requestId = paramOne(req.params.id);
+  if (!requestId) throw notFound("Pending stock request not found");
+  const actorName = await employeeName(prisma, tid, req.userId);
+  const updated = await prisma.stockRequest.updateMany({
+    where: { id: requestId, tenantId: tid, status: "REQUESTED" },
+    data: { status: "REJECTED", rejectReason: body.reason, respondedAt: new Date(), respondedBy: req.userId ?? null, respondedByName: actorName },
+  });
+  if (!updated.count) throw notFound("Pending stock request not found");
+  const fresh = await prisma.stockRequest.findUniqueOrThrow({ where: { id: requestId }, include: stockRequestInclude });
+  res.json({ request: await stockRequestDto(tid, fresh as StockRequestWithItems) });
+}));
 
 // Products the storekeeper can hand out by hand: anything not tracked per sale.
 stockIssuesRouter.get("/issue-sheet", requirePermission("STORE_DISPATCH"), handle(async (req, res) => {
