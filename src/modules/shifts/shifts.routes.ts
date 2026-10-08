@@ -21,7 +21,7 @@ const tenantId = (req: { tenantId?: string }) => {
 // approval queue, so they should not block end-shift handover.
 const ACTIVE_ORDER_STATUSES = ["OPEN", "PREPARING", "READY", "SERVED"] as const;
 const shiftInclude = {
-  employee: { select: { id: true, firstName: true, lastName: true, jobTitle: true, supervisorId: true, isSupervisor: true } },
+  employee: { select: { id: true, firstName: true, lastName: true, jobTitle: true, supervisorId: true, isSupervisor: true, defaultLocation: { select: { id: true, name: true } } } },
   startApprover: { select: { id: true, firstName: true, lastName: true } },
   endApprover: { select: { id: true, firstName: true, lastName: true } },
 } as const;
@@ -76,7 +76,7 @@ async function assertCanView(tid: string, actorId: string | undefined, target: {
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 async function shiftSummary(tid: string, employeeId: string, from: Date, to: Date) {
-  const [tax, transactions, orders, folioLines, folioCredits, pending] = await Promise.all([
+  const [tax, transactions, orders, folioLines, folioCredits, pending, pendingTasks] = await Promise.all([
     prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { taxRate: true, taxMode: true, taxTreatment: true } }),
     prisma.transaction.findMany({
       where: {
@@ -155,6 +155,7 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
       select: { amount: true },
     }),
     prisma.posOrder.count({ where: { tenantId: tid, createdBy: employeeId, status: { in: [...ACTIVE_ORDER_STATUSES] } } }),
+    prisma.housekeepingTask.count({ where: { tenantId: tid, assignedToId: employeeId, status: "IN_PROGRESS" } }),
   ]);
   const byPaymentMethod = new Map<string, { paymentMethodId: string | null; name: string; total: number; count: number }>();
   const incomingTransactions = transactions.filter((t) => t.direction === "IN" && t.status === "COMPLETE");
@@ -376,6 +377,7 @@ async function shiftSummary(tid: string, employeeId: string, from: Date, to: Dat
     complimentaryCount: complimentarySales.length,
     creditSales,
     pendingOrders: pending,
+    pendingHousekeepingTasks: pendingTasks,
     byPaymentMethod: byPaymentMethodRows,
     byCategory,
     categorizedSales: categorized,
@@ -582,6 +584,8 @@ shiftsRouter.post("/end-request", async (req, res, next) => {
     const employee = await currentEmployee(tid, req.userId);
     const pendingOrders = await prisma.posOrder.count({ where: { tenantId: tid, createdBy: employee.id, status: { in: [...ACTIVE_ORDER_STATUSES] } } });
     if (pendingOrders > 0) { res.status(409).json({ error: `${pendingOrders} active sale${pendingOrders === 1 ? "" : "s"} must be completed first.` }); return; }
+    const pendingTasks = await prisma.housekeepingTask.count({ where: { tenantId: tid, assignedToId: employee.id, status: "IN_PROGRESS" } });
+    if (pendingTasks > 0) { res.status(409).json({ error: `${pendingTasks} housekeeping task${pendingTasks === 1 ? "" : "s"} still in progress must be completed first.` }); return; }
     const session = await prisma.shiftSession.findFirst({ where: { tenantId: tid, employeeId: employee.id, status: "ACTIVE" }, include: shiftInclude, orderBy: { approvedStartAt: "desc" } });
     if (!session?.approvedStartAt) { res.status(404).json({ error: "No active shift found" }); return; }
     const now = new Date();
@@ -620,6 +624,7 @@ shiftsRouter.post("/:id/end-approval", async (req, res, next) => {
     const approver = await assertCanApprove(tid, req.userId, session);
     const summary = await shiftSummary(tid, session.employeeId, session.approvedStartAt, session.requestedEndAt);
     if (summary.pendingOrders > 0) { res.status(409).json({ error: "This employee still has pending sales" }); return; }
+    if (summary.pendingHousekeepingTasks > 0) { res.status(409).json({ error: "This employee still has a housekeeping task in progress" }); return; }
     if (!varianceNeedsNote(data.data)) { res.status(400).json({ error: VARIANCE_NOTE_ERROR }); return; }
     const flagged = Math.abs(data.data.cashVariance ?? 0) >= 0.005;
     // Cleared = nothing wrong: no variance, no note stored.
@@ -663,6 +668,8 @@ shiftsRouter.post("/:id/force-end", async (req, res, next) => {
     if (session.employeeId === approver.id) { res.status(400).json({ error: "Use End shift on your own shift card" }); return; }
     const pendingOrders = await prisma.posOrder.count({ where: { tenantId: tid, createdBy: session.employeeId, status: { in: [...ACTIVE_ORDER_STATUSES] } } });
     if (pendingOrders > 0) { res.status(409).json({ error: `${pendingOrders} active sale${pendingOrders === 1 ? "" : "s"} must be completed first.` }); return; }
+    const pendingTasks = await prisma.housekeepingTask.count({ where: { tenantId: tid, assignedToId: session.employeeId, status: "IN_PROGRESS" } });
+    if (pendingTasks > 0) { res.status(409).json({ error: `${pendingTasks} housekeeping task${pendingTasks === 1 ? "" : "s"} still in progress must be completed first.` }); return; }
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
       const row = await tx.shiftSession.update({

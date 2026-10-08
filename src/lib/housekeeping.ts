@@ -155,6 +155,11 @@ export async function startTask(tx: Tx, task: HousekeepingTask, actor: HkActor) 
   assertCanWork(task, actor);
   if (task.status !== "PENDING") throw new HousekeepingError(`A ${task.status.toLowerCase().replace("_", " ")} task cannot be started`, 409);
   if (!task.assignedToId) throw new HousekeepingError("Assign this task to someone before it starts", 409);
+  // One task at a time: a task still in progress is exactly what then blocks ending the
+  // shift (see end-request/end-approval in shifts.routes.ts) - finish that one first. A
+  // task already in progress can still be completed; only starting another is blocked.
+  const otherInProgress = await tx.housekeepingTask.count({ where: { tenantId: task.tenantId, assignedToId: task.assignedToId, status: "IN_PROGRESS", id: { not: task.id } } });
+  if (otherInProgress > 0) throw new HousekeepingError(`${task.assignedToName ?? "This person"} already has a task in progress - complete it before starting another`, 409);
   const updated = await tx.housekeepingTask.update({ where: { id: task.id }, data: { status: "IN_PROGRESS", startedAt: new Date(), startedById: actor.id, updatedBy: actor.id } });
   if (task.roomId && task.type === "CLEANING") await tx.room.update({ where: { id: task.roomId }, data: { cleanliness: "INSPECTING" } });
   await logTaskEvent(tx, task, "STARTED", `Started by ${actor.name}`, actor);
