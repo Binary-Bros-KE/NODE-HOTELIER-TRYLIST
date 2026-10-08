@@ -1838,12 +1838,11 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
   const notReady = payable.find(({ order }) => !(order.status === "SERVED" || (order.status === "COMPLETED" && order.paymentStatus !== "PAID")));
   if (notReady) { res.status(409).json({ error: `Order #${notReady.order.orderNumber} must be served before this linked bill can be paid` }); return; }
   const groupRemaining = money2(payable.reduce((sum, row) => sum + row.remaining, 0));
-  if (parsed.data.amount > groupRemaining + 0.01) { res.status(400).json({ error: `Amount exceeds the remaining linked bill balance of ${groupRemaining.toFixed(2)}` }); return; }
+  if (Math.abs(parsed.data.amount - groupRemaining) > 0.01) { res.status(400).json({ error: `Linked bills must be cleared in full: ${groupRemaining.toFixed(2)}` }); return; }
   try {
     const data = parsed.data;
     let updatedOrders;
     if (data.method === "ROOM") {
-      if (Math.abs(data.amount - groupRemaining) > 0.01) throw Object.assign(new Error(`Charge the full remaining linked balance of ${groupRemaining.toFixed(2)} to the room`), { status: 400 });
       const reservation = await resolveBillableReservation(tid, data.reservationId);
       updatedOrders = await prisma.$transaction(async (tx) => {
         for (const row of payable) {
