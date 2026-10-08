@@ -932,7 +932,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       .sort((a, b) => b.total - a.total);
 
     const employeeName = new Map(employeesForBranch.map((e) => [e.id, `${e.firstName} ${e.lastName}`.trim()]));
-    const employeeBranch = new Map(employeesForBranch.map((e) => [e.id, e.defaultLocation?.name ?? "—"]));
+    const employeeBranch = new Map(employeesForBranch.map((e) => [e.id, e.defaultLocation?.name ?? "Works anywhere"]));
     const byEmployeeMap = new Map<string, { employeeId: string | null; name: string; branch: string; count: number; total: number }>();
     const addToEmployee = (employeeId: string | null | undefined, amount: number, count: number) => {
       const key = employeeId ?? "unattributed";

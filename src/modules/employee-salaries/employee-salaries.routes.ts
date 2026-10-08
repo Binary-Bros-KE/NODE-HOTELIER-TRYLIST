@@ -381,7 +381,7 @@ employeeSalariesRouter.get("/report", requirePermission("SALARY_MANAGE"), async 
       range: { from: from?.toISOString() ?? null, to: to?.toISOString() ?? null },
       totals,
       byEmployee: groupSalaries(rows, (r) => ({ key: r.employee.id, name: `${r.employee.firstName} ${r.employee.lastName}`.trim() })),
-      byLocation: groupSalaries(rows, (r) => ({ key: r.employee.defaultLocation?.id ?? "unassigned", name: r.employee.defaultLocation?.name ?? "Unassigned" })),
+      byLocation: groupSalaries(rows, (r) => ({ key: r.employee.defaultLocation?.id ?? "unassigned", name: r.employee.defaultLocation?.name ?? "Works anywhere" })),
       byDepartment: groupSalaries(rows, (r) => ({ key: r.employee.department?.id ?? "none", name: r.employee.department?.name ?? "No department" })),
       byMonth: groupSalaries(rows, (r) => ({ key: r.payPeriod.toISOString().slice(0, 7), name: `${MONTH_NAMES[r.payPeriod.getUTCMonth()]} ${r.payPeriod.getUTCFullYear()}` })).sort((a, b) => a.key.localeCompare(b.key)),
     });
