@@ -10,8 +10,9 @@ import { perSaleRequirements } from "./trackingMode.js";
  * chef must request the recipe's ingredients from the store, and the
  * storekeeper's dispatch (a real stock transfer store -> kitchen location) must
  * land before a ticket can be started. Order lines point at the request that
- * covers them (PosOrderItem.dispatchRequestId), so a round added later simply
- * has uncovered lines and needs its own request. There is no new order status.
+ * covers them (PosOrderItem.dispatchRequestId). When a waiter adds another
+ * round after store has already dispatched, the same request is reopened and
+ * only lines created after the previous response are requested again.
  */
 
 export class DispatchError extends Error {
@@ -73,7 +74,7 @@ type RequestableOrder = {
   status: string;
   locationId: string | null;
   location: { id: string; serveMode: string; requireStoreDispatch: boolean; dispatchFromLocationId: string | null } | null;
-  items: (OrderItemForStock & { id: string; dispatchRequestId: string | null })[];
+  items: (OrderItemForStock & { id: string; dispatchRequestId: string | null; createdAt?: Date })[];
 };
 
 /** Opens a request for every not-yet-covered line that needs stock. */
@@ -87,21 +88,49 @@ export async function createDispatchRequest(order: RequestableOrder, actorId: st
   if (!fromLocationId) throw new DispatchError("No store is set up to supply this kitchen. Choose one in Locations.", 409);
   if (fromLocationId === location.id) throw new DispatchError("The supplying store can't be the kitchen itself", 409);
 
-  const requirements = await perSaleRequirements(prisma, order.tenantId, computeStockRequirements(lines));
+  const latest = await prisma.stockDispatchRequest.findFirst({
+    where: { tenantId: order.tenantId, orderId: order.id },
+    orderBy: { requestedAt: "desc" },
+    select: { id: true, status: true, respondedAt: true },
+  });
+  const cutoff = latest?.respondedAt ?? null;
+  const alreadyPending = latest?.status === "REQUESTED"
+    ? order.items.filter((item) => item.dispatchRequestId === latest.id && (!cutoff || !item.createdAt || item.createdAt > cutoff) && needsStock(item))
+    : [];
+  const requestLines = [...alreadyPending, ...lines];
+
+  const requirements = await perSaleRequirements(prisma, order.tenantId, computeStockRequirements(requestLines));
   if (requirements.size === 0) throw new DispatchError("These lines are issued or counted at the kitchen, not requested from the store", 409);
-  const requestNo = await nextSequenceNo(order.tenantId, "dispatch", "DSP", 6);
   const requesterName = await employeeName(prisma, order.tenantId, actorId);
+  const requestNo = latest ? null : await nextSequenceNo(order.tenantId, "dispatch", "DSP", 6);
 
   return prisma.$transaction(async (tx) => {
-    const request = await tx.stockDispatchRequest.create({
-      data: {
-        tenantId: order.tenantId, requestNo, orderId: order.id, orderNumber: order.orderNumber,
-        fromLocationId, toLocationId: location.id, note: note ?? null,
-        requestedBy: actorId ?? null, requestedByName: requesterName,
-        items: { create: [...requirements].map(([productId, r]) => ({ productId, productName: r.name, requestedQty: r.quantity })) },
-      },
-      include: { items: true },
-    });
+    const request = latest
+      ? await tx.stockDispatchRequest.update({
+          where: { id: latest.id },
+          data: {
+            status: "REQUESTED",
+            requestedAt: new Date(),
+            requestedBy: actorId ?? null,
+            requestedByName: requesterName,
+            rejectReason: null,
+            note: note ?? null,
+            items: {
+              deleteMany: {},
+              create: [...requirements].map(([productId, r]) => ({ productId, productName: r.name, requestedQty: r.quantity })),
+            },
+          },
+          include: { items: true },
+        })
+      : await tx.stockDispatchRequest.create({
+          data: {
+            tenantId: order.tenantId, requestNo: requestNo!, orderId: order.id, orderNumber: order.orderNumber,
+            fromLocationId, toLocationId: location.id, note: note ?? null,
+            requestedBy: actorId ?? null, requestedByName: requesterName,
+            items: { create: [...requirements].map(([productId, r]) => ({ productId, productName: r.name, requestedQty: r.quantity })) },
+          },
+          include: { items: true },
+        });
     // Claim the lines conditionally: a second tap (or another chef) finds them taken and aborts.
     const claimed = await tx.posOrderItem.updateMany({ where: { orderId: order.id, id: { in: lines.map((l) => l.id) }, dispatchRequestId: null }, data: { dispatchRequestId: request.id } });
     if (claimed.count !== lines.length) throw new DispatchError("Ingredients for this order were just requested by someone else", 409);

@@ -69,9 +69,12 @@ export async function autoRequestDispatch(tenantId: string, orderId: string, act
  * whose lines are all gone is withdrawn.
  */
 export async function refreshOpenRequest(tx: Prisma.TransactionClient, tenantId: string, requestId: string) {
-  const request = await tx.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId, status: "REQUESTED" }, select: { id: true } });
+  const request = await tx.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId, status: "REQUESTED" }, select: { id: true, respondedAt: true } });
   if (!request) return;
-  const lines = await tx.posOrderItem.findMany({ where: { dispatchRequestId: requestId }, include: stockLineInclude });
+  const lines = await tx.posOrderItem.findMany({
+    where: { dispatchRequestId: requestId, ...(request.respondedAt ? { createdAt: { gt: request.respondedAt } } : {}) },
+    include: stockLineInclude,
+  });
   const requirements = await perSaleRequirements(tx, tenantId, computeStockRequirements(lines));
   if (requirements.size === 0) {
     await tx.stockDispatchRequest.update({ where: { id: requestId }, data: { status: "CANCELLED", respondedAt: new Date() } });
@@ -161,15 +164,19 @@ async function dishesFromItems(tenantId: string, fromLocationId: string | null |
  * reads on screen and on the printed slip.
  */
 export async function requestDishes(tenantId: string, requestId: string) {
-  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId }, select: { fromLocationId: true } });
-  const items = await prisma.posOrderItem.findMany({ where: { dispatchRequestId: requestId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
+  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId }, select: { fromLocationId: true, respondedAt: true } });
+  const items = await prisma.posOrderItem.findMany({
+    where: { dispatchRequestId: requestId, ...(request?.respondedAt ? { createdAt: { gt: request.respondedAt } } : {}) },
+    include: stockLineInclude,
+    orderBy: { createdAt: "asc" },
+  });
   return dishesFromItems(tenantId, request?.fromLocationId, items);
 }
 
-export async function dispatchSlipDishSections(tenantId: string, request: { id: string; orderId: string; fromLocationId: string }) {
+export async function dispatchSlipDishSections(tenantId: string, request: { id: string; orderId: string; fromLocationId: string; respondedAt?: Date | null }) {
   const items = await prisma.posOrderItem.findMany({ where: { orderId: request.orderId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
-  const current = items.filter((item) => item.dispatchRequestId === request.id);
-  const existing = items.filter((item) => item.dispatchRequestId !== request.id);
+  const current = items.filter((item) => item.dispatchRequestId === request.id && (!request.respondedAt || item.createdAt > request.respondedAt));
+  const existing = items.filter((item) => item.dispatchRequestId !== request.id || (request.respondedAt != null && item.createdAt <= request.respondedAt));
   const [existingDishes, requestedDishes] = await Promise.all([
     dishesFromItems(tenantId, request.fromLocationId, existing),
     dishesFromItems(tenantId, request.fromLocationId, current),
