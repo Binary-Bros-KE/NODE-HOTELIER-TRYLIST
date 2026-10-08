@@ -121,8 +121,24 @@ dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
   if (!request) throw new DispatchError("Dispatch request not found", 404);
   if (request.status !== "REQUESTED") throw new DispatchError(`This request is already ${request.status.toLowerCase()}`, 409);
 
-  const override = new Map((parsed.data.items ?? []).map((i) => [i.itemId, i.quantity]));
-  const lines = request.items.map((item) => ({ item, quantity: override.get(item.id) ?? Number(item.requestedQty) }));
+  const overrides = parsed.data.items ?? [];
+  const overrideByItem = new Map(overrides.map((i) => [i.itemId, i.quantity]));
+  const overrideByProduct = new Map(overrides.map((i) => [i.itemId, i.quantity]));
+  const stocks = await prisma.productStock.findMany({
+    where: { tenantId: tid, locationId: request.fromLocationId, productId: { in: request.items.map((item) => item.productId) } },
+    select: { productId: true, quantity: true },
+  });
+  const stockByProduct = new Map(stocks.map((stock) => [stock.productId, Number(stock.quantity)]));
+  const usedByProduct = new Map<string, number>();
+  const lines = request.items.map((item) => {
+    const explicit = overrideByItem.get(item.id) ?? overrideByProduct.get(item.productId);
+    const desired = explicit ?? Number(item.requestedQty);
+    const alreadyUsed = usedByProduct.get(item.productId) ?? 0;
+    const available = Math.max((stockByProduct.get(item.productId) ?? 0) - alreadyUsed, 0);
+    const quantity = explicit === undefined ? desired : Math.min(desired, available);
+    usedByProduct.set(item.productId, alreadyUsed + Math.max(quantity, 0));
+    return { item, quantity };
+  });
   const toSend = lines.filter((l) => l.quantity > 0);
   if (toSend.length === 0) throw new DispatchError("Dispatch at least one item, or reject the request instead");
 
