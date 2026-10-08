@@ -42,8 +42,9 @@ const createSchema = z.object({
   supervisorId: optionalId,
   isSupervisor: z.boolean().default(false),
   roleId: z.string().trim().min(1).nullable().optional(),
-  // Locations this employee is pinned to. Empty = works anywhere.
-  locationIds: z.array(z.string().trim().min(1)).default([]),
+  // Every employee must be pinned to at least one location - an "Unassigned" employee
+  // has nowhere to show up in per-location rosters (the shift dashboard, reports, ...).
+  locationIds: z.array(z.string().trim().min(1)).min(1, "Assign at least one location"),
   // The POS's pre-selected location for this employee — must be one of
   // locationIds, or null. Auto-derived when omitted (see resolveDefaultLocation).
   defaultLocationId: z.preprocess(blankToUndefined, z.string().trim().nullable().optional()),
@@ -147,7 +148,10 @@ function resolveDefaultLocation(explicit: string | null | undefined, assignedIds
     return explicit;
   }
   if (current && assignedIds.includes(current)) return current;
-  return assignedIds.length === 1 ? assignedIds[0] : null;
+  // locationIds is mandatory now, so this is just belt-and-suspenders: with two or more
+  // assigned and nothing chosen explicitly, the first one becomes the default rather than
+  // leaving it null (an employee with a location but no default still read as "Unassigned").
+  return assignedIds[0] ?? null;
 }
 
 async function assertDepartmentInTenant(departmentId: string | undefined, tenant: string) {
@@ -242,11 +246,15 @@ employeesRouter.patch("/:id", async (req, res, next) => {
     if (pin) await assertPinUnique(pin, tenantId(req), req.params.id);
     const existing = await prisma.employee.findFirst({
       where: { id: req.params.id, tenantId: tenantId(req) },
-      select: { id: true, defaultLocationId: true, hasSystemAccess: true, pin: true, locations: { select: { id: true } } },
+      select: { id: true, defaultLocationId: true, hasSystemAccess: true, pin: true, roleId: true, locations: { select: { id: true } } },
     });
     if (!existing) { res.status(404).json({ error: "Employee not found" }); return; }
     const nextAccess = hasSystemAccess ?? existing.hasSystemAccess;
     if (nextAccess && !pin && existing.pin == null) throw Object.assign(new Error("Set a PIN for someone who signs in, or turn off system access"), { status: 400 });
+    // The create route already refuses a role-less login user; this is the same rule, reachable from
+    // an edit too (someone clearing a role, or turning system access on for a role-less employee).
+    const nextRoleId = roleId !== undefined ? roleId : existing.roleId;
+    if (nextAccess && !nextRoleId) throw Object.assign(new Error("Choose a role for someone who signs in"), { status: 400 });
     const pinChange = !nextAccess ? { pin: null } : pin ? { pin: hashSecret(pin) } : {};
     // Keep the default location coherent with the assigned set whenever
     // either one is touched.
