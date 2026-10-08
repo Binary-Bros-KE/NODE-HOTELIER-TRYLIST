@@ -42,9 +42,11 @@ const createSchema = z.object({
   supervisorId: optionalId,
   isSupervisor: z.boolean().default(false),
   roleId: z.string().trim().min(1).nullable().optional(),
-  // Every employee must be pinned to at least one location - an "Unassigned" employee
-  // has nowhere to show up in per-location rosters (the shift dashboard, reports, ...).
-  locationIds: z.array(z.string().trim().min(1)).min(1, "Assign at least one location"),
+  // A relief/roaming employee with deliberately no fixed location. Checked against
+  // locationIds in the route handlers (not here - updateSchema makes every field
+  // optional, and an edit that touches neither must fall back to what's on record).
+  worksAnywhere: z.boolean().default(false),
+  locationIds: z.array(z.string().trim().min(1)).default([]),
   // The POS's pre-selected location for this employee — must be one of
   // locationIds, or null. Auto-derived when omitted (see resolveDefaultLocation).
   defaultLocationId: z.preprocess(blankToUndefined, z.string().trim().nullable().optional()),
@@ -102,6 +104,7 @@ const publicFields = {
   role: { select: { id: true, name: true, allowedSections: true } },
   locations: { select: { id: true, name: true } },
   defaultLocationId: true,
+  worksAnywhere: true,
   defaultLocation: { select: { id: true, name: true } },
   salaryType: true,
   salaryAmount: true,
@@ -210,6 +213,7 @@ employeesRouter.post("/", async (req, res, next) => {
   try {
     if (hasSystemAccess && !pin) throw Object.assign(new Error("Set a PIN for someone who signs in, or turn off system access"), { status: 400 });
     if (hasSystemAccess && !roleId) throw Object.assign(new Error("Choose a role for someone who signs in"), { status: 400 });
+    if (!employeeData.worksAnywhere && (!locationIds || locationIds.length === 0)) throw Object.assign(new Error("Assign at least one location, or mark them as working anywhere"), { status: 400 });
     await assertSupervisorInTenant(supervisorId, tenantId(req));
     await assertRoleInTenant(roleId, tenantId(req));
     await assertLocationsInTenant(locationIds, tenantId(req));
@@ -246,7 +250,7 @@ employeesRouter.patch("/:id", async (req, res, next) => {
     if (pin) await assertPinUnique(pin, tenantId(req), req.params.id);
     const existing = await prisma.employee.findFirst({
       where: { id: req.params.id, tenantId: tenantId(req) },
-      select: { id: true, defaultLocationId: true, hasSystemAccess: true, pin: true, roleId: true, locations: { select: { id: true } } },
+      select: { id: true, defaultLocationId: true, hasSystemAccess: true, pin: true, roleId: true, worksAnywhere: true, locations: { select: { id: true } } },
     });
     if (!existing) { res.status(404).json({ error: "Employee not found" }); return; }
     const nextAccess = hasSystemAccess ?? existing.hasSystemAccess;
@@ -255,6 +259,9 @@ employeesRouter.patch("/:id", async (req, res, next) => {
     // an edit too (someone clearing a role, or turning system access on for a role-less employee).
     const nextRoleId = roleId !== undefined ? roleId : existing.roleId;
     if (nextAccess && !nextRoleId) throw Object.assign(new Error("Choose a role for someone who signs in"), { status: 400 });
+    const nextWorksAnywhere = employeeData.worksAnywhere !== undefined ? employeeData.worksAnywhere : existing.worksAnywhere;
+    const nextLocationIds = locationIds ?? existing.locations.map((l) => l.id);
+    if (!nextWorksAnywhere && nextLocationIds.length === 0) throw Object.assign(new Error("Assign at least one location, or mark them as working anywhere"), { status: 400 });
     const pinChange = !nextAccess ? { pin: null } : pin ? { pin: hashSecret(pin) } : {};
     // Keep the default location coherent with the assigned set whenever
     // either one is touched.
