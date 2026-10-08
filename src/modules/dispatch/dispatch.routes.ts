@@ -123,7 +123,14 @@ dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
 
   const overrides = parsed.data.items ?? [];
   const overrideByItem = new Map(overrides.map((i) => [i.itemId, i.quantity]));
-  const overrideByProduct = new Map(overrides.map((i) => [i.itemId, i.quantity]));
+  // A storekeeper who had this request open while it quietly rebuilt in the background (a poll,
+  // or the order itself changing) would otherwise have every override silently ignored — the
+  // request then falls back to the full original ask for items they'd deliberately zeroed out.
+  // Fail loudly instead: tell them to reopen it rather than guess what they meant.
+  const knownItemIds = new Set(request.items.map((item) => item.id));
+  if (overrides.some((o) => !knownItemIds.has(o.itemId))) {
+    throw new DispatchError("This request has changed since you opened it. Close it and open it again.", 409, "REQUEST_STALE");
+  }
   const stocks = await prisma.productStock.findMany({
     where: { tenantId: tid, locationId: request.fromLocationId, productId: { in: request.items.map((item) => item.productId) } },
     select: { productId: true, quantity: true },
@@ -131,7 +138,7 @@ dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
   const stockByProduct = new Map(stocks.map((stock) => [stock.productId, Number(stock.quantity)]));
   const usedByProduct = new Map<string, number>();
   const lines = request.items.map((item) => {
-    const explicit = overrideByItem.get(item.id) ?? overrideByProduct.get(item.productId);
+    const explicit = overrideByItem.get(item.id);
     const desired = explicit ?? Number(item.requestedQty);
     const alreadyUsed = usedByProduct.get(item.productId) ?? 0;
     const available = Math.max((stockByProduct.get(item.productId) ?? 0) - alreadyUsed, 0);
@@ -156,7 +163,7 @@ dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
         sourceType: "STOCK_DISPATCH", sourceRefId: request.id, performedBy: req.userId ?? null, label: l.item.productName,
       });
     }
-    for (const l of lines) await tx.stockDispatchItem.update({ where: { id: l.item.id }, data: { dispatchedQty: l.quantity } });
+    for (const l of lines) await tx.stockDispatchItem.updateMany({ where: { id: l.item.id }, data: { dispatchedQty: l.quantity } });
   });
   const fresh = await prisma.stockDispatchRequest.findUniqueOrThrow({ where: { id: request.id }, include: requestInclude });
   res.json({ request: fresh });

@@ -78,8 +78,24 @@ export async function refreshOpenRequest(tx: Prisma.TransactionClient, tenantId:
     await tx.posOrderItem.updateMany({ where: { dispatchRequestId: requestId }, data: { dispatchRequestId: null } });
     return;
   }
-  await tx.stockDispatchItem.deleteMany({ where: { requestId } });
-  await tx.stockDispatchItem.createMany({ data: [...requirements].map(([productId, r]) => ({ requestId, productId, productName: r.name, requestedQty: r.quantity })) });
+  // Same id for a product whose requirement hasn't changed: the dispatch modal (and any open
+  // poll-driven refresh of this list) keeps referring to a row that still exists. Rebuilding every
+  // row on every poll made the item ids a storekeeper was editing go stale mid-review, so their
+  // overrides silently stopped matching anything and the request fell back to the full ask.
+  const existing = await tx.stockDispatchItem.findMany({ where: { requestId }, select: { id: true, productId: true, productName: true, requestedQty: true } });
+  const existingByProduct = new Map(existing.map((item) => [item.productId, item]));
+  const keptProductIds = new Set<string>();
+  for (const [productId, r] of requirements) {
+    keptProductIds.add(productId);
+    const current = existingByProduct.get(productId);
+    if (!current) {
+      await tx.stockDispatchItem.create({ data: { requestId, productId, productName: r.name, requestedQty: r.quantity } });
+    } else if (Math.abs(Number(current.requestedQty) - r.quantity) > 0.0005 || current.productName !== r.name) {
+      await tx.stockDispatchItem.update({ where: { id: current.id }, data: { requestedQty: r.quantity, productName: r.name } });
+    }
+  }
+  const staleIds = existing.filter((item) => !keptProductIds.has(item.productId)).map((item) => item.id);
+  if (staleIds.length) await tx.stockDispatchItem.deleteMany({ where: { id: { in: staleIds } } });
 }
 
 /** The employee who rang the order up, by name. */
