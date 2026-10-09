@@ -443,13 +443,14 @@ commercialDocumentsRouter.get("/", async (req, res) => {
 
 commercialDocumentsRouter.get("/options", async (req, res) => {
   const tid = tenantId(req);
-  const [customers, locations, paymentMethods, tax] = await Promise.all([
+  const [customers, locations, paymentMethods, tax, units] = await Promise.all([
     prisma.customer.findMany({ where: { tenantId: tid, status: { not: "BLOCKED" } }, orderBy: [{ firstName: "asc" }, { lastName: "asc" }] }),
     prisma.location.findMany({ where: { tenantId: tid, isActive: true }, orderBy: { name: "asc" } }),
     prisma.paymentMethod.findMany({ where: { tenantId: tid, isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] }),
     taxDefaults(tid),
+    prisma.unitOfMeasure.findMany({ where: { tenantId: tid }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
   ]);
-  res.json({ customers, locations, paymentMethods, tax });
+  res.json({ customers, locations, paymentMethods, tax, units });
 });
 
 commercialDocumentsRouter.get("/source-options", async (req, res) => {
