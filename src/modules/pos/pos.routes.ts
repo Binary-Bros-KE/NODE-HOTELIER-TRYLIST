@@ -16,6 +16,7 @@ import { DispatchError, dispatchRequired, employeeName, orderDispatchInfo, suppl
 import { currentMemberDiscount } from "../../lib/membership.js";
 import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js";
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
+import { renderDispatchPrint } from "../../lib/dispatchPrint.js";
 import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, resolveStockLocationId, settleServedAdditions } from "../../lib/orderStock.js";
 import { perSaleRequirements } from "../../lib/trackingMode.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
@@ -2819,6 +2820,8 @@ posRouter.post("/print-jobs/:id/nudge", async (req, res) => {
 
 posRouter.post("/print-jobs/:id/claim", async (req, res) => {
   const tid = tenantIdFor(req);
+  const printOptions = z.object({ columns: z.number().int().min(24).max(64).optional() }).safeParse(req.body ?? {});
+  if (!printOptions.success) { res.status(400).json({ error: "Invalid printer columns" }); return; }
   const claimed = await prisma.printJob.updateMany({
     where: { id: req.params.id, tenantId: tid, status: "PENDING" },
     data: { status: "CLAIMED", claimedBy: req.userId ?? null, claimedAt: new Date() },
@@ -2827,7 +2830,9 @@ posRouter.post("/print-jobs/:id/claim", async (req, res) => {
   const job = await prisma.printJob.findUniqueOrThrow({ where: { id: req.params.id }, select: { id: true, orderId: true, status: true, kind: true, dispatchRequestId: true } });
   // A dispatch slip travels with the claim, so the printing device needs no store permissions of its own.
   const slip = job.kind === "DISPATCH" && job.dispatchRequestId ? await dispatchSlipFor(tid, job.dispatchRequestId) : null;
-  res.status(200).json({ job, slip });
+  const profile = slip ? await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessName: true } }) : null;
+  const data = slip ? renderDispatchPrint(slip, printOptions.data.columns ?? 42, profile?.businessName ?? '').toString('base64') : null;
+  res.status(200).json({ job, slip, data });
 });
 
 posRouter.post("/print-jobs/:id/complete", async (req, res) => {
