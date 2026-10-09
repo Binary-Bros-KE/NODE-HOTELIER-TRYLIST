@@ -413,7 +413,7 @@ export async function withServedBy<T extends { createdBy: string | null; roomBil
 }
 
 /** Frees a table back to AVAILABLE if it has no other active order. Call from inside the same transaction that finalized the order. */
-async function releaseTableIfIdle(tx: Prisma.TransactionClient, tableId: string) {
+export async function releaseTableIfIdle(tx: Prisma.TransactionClient, tableId: string) {
   const stillActive = await tx.posOrder.findFirst({ where: { tableId, status: { in: ["OPEN", "PREPARING", "READY", "SERVED"] } } });
   if (!stillActive) await tx.table.updateMany({ where: { id: tableId }, data: { status: "AVAILABLE" } });
 }

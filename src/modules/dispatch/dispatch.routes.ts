@@ -8,6 +8,7 @@ import { requirePermission } from "../../middleware/tenantContext.js";
 import { DispatchError, employeeName } from "../../lib/dispatch.js";
 import { InsufficientStockError, recordStockMovement } from "../../lib/stockLedger.js";
 import { dispatchSlipDishSections, refreshOpenRequest, requestDishes, rungUpByName } from "../../lib/dispatchAuto.js";
+import { releaseTableIfIdle } from "../pos/pos.routes.js";
 
 // The store's side of a kitchen's ingredient request: see what the chef asked
 // for, dispatch it (a real store -> kitchen stock transfer) or reject it with a
@@ -176,7 +177,10 @@ dispatchRouter.post("/:id/reject", handle(async (req, res) => {
   const parsed = z.object({ reason: z.string().trim().min(3).max(300) }).safeParse(req.body);
   if (!parsed.success) throw new DispatchError("Give the kitchen a reason for rejecting this request");
   const tid = tenantId(req);
-  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: req.params.id as string, tenantId: tid }, select: { id: true, status: true } });
+  const request = await prisma.stockDispatchRequest.findFirst({
+    where: { id: req.params.id as string, tenantId: tid },
+    select: { id: true, status: true, order: { select: { id: true, status: true, tableId: true } } },
+  });
   if (!request) throw new DispatchError("Dispatch request not found", 404);
   const actorName = await employeeName(prisma, tid, req.userId);
   await prisma.$transaction(async (tx) => {
@@ -184,6 +188,27 @@ dispatchRouter.post("/:id/reject", handle(async (req, res) => {
     if (claimed.count === 0) throw new DispatchError(`This request is already ${request.status.toLowerCase()}`, 409);
     // Free the lines so the chef can request again (or the order can be cancelled).
     await tx.posOrderItem.updateMany({ where: { dispatchRequestId: request.id }, data: { dispatchRequestId: null } });
+    // The order can't be prepared without these ingredients - cancel it outright
+    // rather than leaving it stuck showing a stale "waiting on store" state in
+    // the kitchen queue and Active Orders. Nothing has been served or paid at
+    // this stage, so there's no stock or payment to reverse.
+    const order = request.order;
+    if (order && order.status !== "CANCELLED" && order.status !== "COMPLETED") {
+      await tx.posOrder.updateMany({
+        where: { id: order.id, tenantId: tid, status: order.status },
+        data: {
+          status: "CANCELLED",
+          cancelReason: `Rejected by store: ${parsed.data.reason}`,
+          cancelRequestedBy: req.userId ?? null,
+          cancelRequestedAt: new Date(),
+          cancelDecidedBy: req.userId ?? null,
+          cancelDecidedAt: new Date(),
+          cancelDecisionNote: "Auto-cancelled: store rejected the dispatch request",
+          statusBeforeCancel: order.status,
+        },
+      });
+      if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
+    }
   });
   res.json({ request: await prisma.stockDispatchRequest.findUniqueOrThrow({ where: { id: request.id }, include: requestInclude }) });
 }));
