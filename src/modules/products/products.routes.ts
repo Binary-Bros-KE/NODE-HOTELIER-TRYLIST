@@ -130,10 +130,14 @@ const tenantId = (req: { tenantId?: string }) => {
 };
 
 // The product's counting unit is stored as text for the form and linked to the Units table by name.
-async function unitIdFor(tid: string, unitName: string | null | undefined) {
-  if (!unitName) return null;
-  const unit = await prisma.unitOfMeasure.findFirst({ where: { tenantId: tid, name: { equals: unitName, mode: "insensitive" } }, select: { id: true } });
-  return unit?.id ?? null;
+/** Resolves a typed unit name to the catalog entry it matches (case-insensitively), and returns
+ * that entry's own exact spelling - so a product saved as "PC" against a catalog "pc" is stored
+ * as "pc" from then on, instead of drifting from the catalog in a way that breaks any UI picker
+ * that matches a select's value by exact string (every select on this unit does). */
+async function unitIdFor(tid: string, unitName: string | null | undefined): Promise<{ id: string | null; name: string | null }> {
+  if (!unitName) return { id: null, name: null };
+  const unit = await prisma.unitOfMeasure.findFirst({ where: { tenantId: tid, name: { equals: unitName, mode: "insensitive" } }, select: { id: true, name: true } });
+  return unit ? { id: unit.id, name: unit.name } : { id: null, name: unitName };
 }
 
 const productFields = {
@@ -287,9 +291,9 @@ productsRouter.post("/", async (req, res, next) => {
       const category = await prisma.category.findFirst({ where: { id: categoryId, tenantId: tid, scope: "STORE" } });
       if (!category) { res.status(400).json({ error: "Selected category was not found" }); return; }
     }
-    const unitId = await unitIdFor(tid, rest.unit);
+    const resolvedUnit = await unitIdFor(tid, rest.unit);
     const product = await prisma.$transaction(async (tx) => {
-      const created = await tx.product.create({ data: { tenantId: tid, categoryId, ...rest, unitId } });
+      const created = await tx.product.create({ data: { tenantId: tid, categoryId, ...rest, unit: resolvedUnit.name ?? rest.unit, unitId: resolvedUnit.id } });
       if (openingStock > 0 && receivingLocationId) {
         await recordStockMovement(tx, {
           tenantId: tid, productId: created.id, locationId: receivingLocationId,
@@ -318,8 +322,8 @@ productsRouter.patch("/:id", async (req, res, next) => {
       if (!category) { res.status(400).json({ error: "Selected category was not found" }); return; }
     }
     if (data.data.packUnitId) await assertPackUnit(data.data.packUnitId, tid);
-    const unitId = data.data.unit !== undefined ? await unitIdFor(tid, data.data.unit) : undefined;
-    const updated = await prisma.product.updateMany({ where: { id: req.params.id, tenantId: tid }, data: { ...data.data, ...(unitId !== undefined ? { unitId } : {}) } });
+    const resolvedUnit = data.data.unit !== undefined ? await unitIdFor(tid, data.data.unit) : undefined;
+    const updated = await prisma.product.updateMany({ where: { id: req.params.id, tenantId: tid }, data: { ...data.data, ...(resolvedUnit !== undefined ? { unit: resolvedUnit.name ?? data.data.unit, unitId: resolvedUnit.id } : {}) } });
     if (!updated.count) { res.status(404).json({ error: "Product not found" }); return; }
     const product = await prisma.product.findUniqueOrThrow({ where: { id: req.params.id }, select: productFields });
     res.json({ product: withTotal(product) });
