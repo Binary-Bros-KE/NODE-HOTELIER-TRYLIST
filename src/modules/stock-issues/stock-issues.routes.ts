@@ -141,6 +141,44 @@ stockIssuesRouter.post("/requests", handle(async (req, res) => {
   res.status(201).json({ request: await stockRequestDto(tid, created as StockRequestWithItems) });
 }));
 
+// A still-pending request is the raiser's own editable document — once the
+// store has answered it (dispatched/rejected), it's final history.
+stockIssuesRouter.patch("/requests/:id", handle(async (req, res) => {
+  const tid = tenantId(req);
+  const body = parse(stockRequestSchema, req.body, res);
+  if (!body) return;
+  if (body.fromLocationId === body.toLocationId) throw badRequest("Pick a different store and destination");
+  const requestId = paramOne(req.params.id);
+  if (!requestId) throw notFound("Stock request not found");
+
+  const existing = await prisma.stockRequest.findFirst({ where: { id: requestId, tenantId: tid } });
+  if (!existing) throw notFound("Stock request not found");
+  if (existing.status !== "REQUESTED") throw badRequest(`A ${existing.status.toLowerCase()} request can no longer be edited`);
+
+  await locationIn(tid, body.fromLocationId);
+  await locationIn(tid, body.toLocationId);
+  const products = await prisma.product.findMany({
+    where: { tenantId: tid, id: { in: body.lines.map((l) => l.productId) }, isActive: true, isExpenseItem: false },
+    select: { id: true, name: true },
+  });
+  const byId = new Map(products.map((p) => [p.id, p]));
+  for (const line of body.lines) if (!byId.has(line.productId)) throw notFound("Product not found");
+
+  await prisma.$transaction(async (tx) => {
+    await tx.stockRequestItem.deleteMany({ where: { requestId: existing.id } });
+    await tx.stockRequestItem.createMany({
+      data: body.lines.map((line) => ({ requestId: existing.id, productId: line.productId, productName: byId.get(line.productId)!.name, requestedQty: line.quantity })),
+    });
+    await tx.stockRequest.update({
+      where: { id: existing.id },
+      data: { fromLocationId: body.fromLocationId, toLocationId: body.toLocationId, note: body.note ?? null },
+    });
+  });
+
+  const fresh = await prisma.stockRequest.findUniqueOrThrow({ where: { id: existing.id }, include: stockRequestInclude });
+  res.json({ request: await stockRequestDto(tid, fresh as StockRequestWithItems) });
+}));
+
 stockIssuesRouter.get("/requests", handle(async (req, res) => {
   const tid = tenantId(req);
   const query = parse(z.object({
