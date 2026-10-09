@@ -750,10 +750,9 @@ posRouter.post("/orders", async (req, res) => {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     throw error;
   }
-  // Every order needs a named customer before it's posted — a walk-in sale
-  // (or a complimentary one) is not an exception, so this is checked after
-  // the room/complimentary resolution above, not before it.
-  if (!customerId) { res.status(400).json({ error: "Choose a customer before posting this order" }); return; }
+  // A complimentary order needs a named recipient before it's posted —
+  // every other sale (including a plain walk-in) is unaffected.
+  if (parsed.data.saleType === "COMPLIMENTARY" && !customerId) { res.status(400).json({ error: "Choose a customer before posting this complimentary order" }); return; }
 
   try {
     const createdOrders = await prisma.$transaction(async (tx) => {
@@ -2516,10 +2515,6 @@ posRouter.post("/retail-orders", async (req, res) => {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     throw error;
   }
-  // Every order needs a named customer before it's posted — walk-in sales
-  // aren't an exception, including a Bill to Room sale (its customer is the
-  // room's own guest, which the till resolves and sends as customerId).
-  if (!customerId) { res.status(400).json({ error: "Choose a customer before posting this order" }); return; }
   const tax = await taxSettingsFor(tid);
   // Retail lines carry the tenant's default tax treatment as their snapshot,
   // the same way a menu line carries its own — keeps receipts and the tax
@@ -2677,9 +2672,6 @@ posRouter.post("/service-orders", async (req, res) => {
   const effectiveLocationId = location?.id ?? null;
   try {
     const customerId = await resolveCustomerId(tid, parsed.data.customerId);
-    // A running tab needs a named customer before it's started — same rule
-    // as every other sale.
-    if (!customerId) { res.status(400).json({ error: "Choose a customer before starting this service" }); return; }
     const tax = await taxSettingsFor(tid);
     const fallbackTax = { taxRate: tax?.taxRate ?? null, taxMode: tax?.taxMode ?? null, taxTreatment: tax?.taxTreatment ?? null };
     const order = await prisma.$transaction(async (tx) => {
