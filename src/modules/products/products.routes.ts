@@ -355,7 +355,15 @@ productsRouter.get("/:id/movements", async (req, res) => {
     },
     orderBy: { occurredAt: "desc" },
   });
-  res.json({ product: withTotal(product), movements });
+  // A goods-received movement only carries its receipt's id; name the purchase
+  // (PO + supplier) it came from so nobody has to look a GRN up.
+  const receiptIds = [...new Set(movements.filter((m) => m.sourceType === "GOODS_RECEIVED" && m.sourceRefId).map((m) => m.sourceRefId as string))];
+  const receipts = receiptIds.length ? await prisma.goodsReceipt.findMany({
+    where: { tenantId: tenantId(req), id: { in: receiptIds } },
+    select: { id: true, receiptNo: true, purchase: { select: { id: true, purchaseNo: true, supplier: { select: { name: true } } } } },
+  }) : [];
+  const byReceipt = new Map(receipts.map((r) => [r.id, { purchaseId: r.purchase.id, purchaseNo: r.purchase.purchaseNo, supplierName: r.purchase.supplier?.name ?? null, receiptNo: r.receiptNo }]));
+  res.json({ product: withTotal(product), movements: movements.map((m) => ({ ...m, purchase: (m.sourceRefId && byReceipt.get(m.sourceRefId)) || null })) });
 });
 
 /** Hand-entered stock movement at a single location — the Products tab's

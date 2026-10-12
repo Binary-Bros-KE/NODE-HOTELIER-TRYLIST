@@ -155,7 +155,7 @@ dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
 
   const actorName = await employeeName(prisma, tid, req.userId);
   await prisma.$transaction(async (tx) => {
-    // Claim first: a conditional update so two storekeepers (or a chef cancelling) can't both act.
+    // Claim first: a conditional update so two storekeepers can't both act.
     const claimed = await tx.stockDispatchRequest.updateMany({ where: { id: request.id, status: "REQUESTED" }, data: { status: "DISPATCHED", respondedAt: new Date(), respondedBy: req.userId ?? null, respondedByName: actorName } });
     if (claimed.count === 0) throw new DispatchError("This request was just handled by someone else", 409);
     // The store consumes what it sends right here (guarded: it can't send more than it holds).
@@ -207,6 +207,8 @@ dispatchRouter.post("/:id/reject", handle(async (req, res) => {
           statusBeforeCancel: order.status,
         },
       });
+      // Nothing else on a cancelled order should keep waiting at the store.
+      await tx.stockDispatchRequest.updateMany({ where: { orderId: order.id, status: "REQUESTED" }, data: { status: "CANCELLED", respondedAt: new Date(), respondedBy: req.userId ?? null, respondedByName: actorName } });
       if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
     }
   });

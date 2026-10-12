@@ -94,7 +94,8 @@ const purchaseInclude = {
     include: {
       location: { select: { id: true, name: true } },
       createdByEmployee: { select: { id: true, firstName: true, lastName: true } },
-      items: { select: { id: true, productId: true, quantity: true, unitCost: true, note: true } },
+      // The Receiving history panel names and sizes each received line.
+      items: { select: { id: true, productId: true, quantity: true, unitCost: true, note: true, product: { select: { id: true, name: true, unit: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } } } } } },
     },
     orderBy: { receivedAt: "desc" },
   },
@@ -261,6 +262,8 @@ purchasesRouter.get("/", async (req, res, next) => {
         { purchaseNo: { contains: search, mode: "insensitive" } },
         { reference: { contains: search, mode: "insensitive" } },
         { supplier: { name: { contains: search, mode: "insensitive" } } },
+        // A GRN number (as shown on a stock movement) finds the purchase it was received against.
+        { goodsReceipts: { some: { receiptNo: { contains: search, mode: "insensitive" } } } },
       ] } : {}),
     };
     const purchases = await prisma.purchase.findMany({ where, include: purchaseInclude, orderBy: { createdAt: "desc" } });

@@ -95,7 +95,7 @@ kitchenRouter.get("/orders", handle(async (req, res) => {
  * alone once it's moved past PREPARING. */
 kitchenRouter.get("/orders/updated", handle(async (req, res) => {
   const orders = await prisma.posOrder.findMany({
-    where: { tenantId: tenantId(req), channel: "FOOD", status: { notIn: ["CANCELLED", "COMPLETED"] }, items: { some: { addedAfterSend: true } }, ...(await locationScope(req)) },
+    where: { tenantId: tenantId(req), channel: "FOOD", status: { notIn: ["CANCELLED", "COMPLETED", "PENDING_CANCELLATION"] }, items: { some: { addedAfterSend: true } }, ...(await locationScope(req)) },
     include: orderInclude,
     orderBy: { updatedAt: "desc" },
   });
@@ -162,21 +162,6 @@ kitchenRouter.post("/orders/:id/request-dispatch", handle(async (req, res) => {
   const order = await loadTicket(req, ["OPEN", "PREPARING", "READY", "SERVED"]);
   const request = await createDispatchRequest({ ...order, tenantId: tenantId(req) }, req.userId, typeof req.body?.note === "string" ? req.body.note.slice(0, 300) : undefined);
   res.status(201).json({ request, order: withDispatch(await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude })) });
-}));
-
-/** Withdraws a still-waiting request (asked by mistake); its lines become requestable again. */
-kitchenRouter.post("/orders/:id/cancel-dispatch", handle(async (req, res) => {
-  const order = await loadTicket(req, ["OPEN", "PREPARING", "READY", "SERVED"]);
-  await prisma.$transaction(async (tx) => {
-    const waiting = await tx.stockDispatchRequest.findMany({ where: { orderId: order.id, tenantId: tenantId(req), status: "REQUESTED" }, select: { id: true } });
-    if (waiting.length === 0) throw new DispatchError("There is no waiting request to cancel", 409);
-    const ids = waiting.map((w) => w.id);
-    // Conditional on still REQUESTED: a store that dispatched in the meantime wins.
-    const cancelled = await tx.stockDispatchRequest.updateMany({ where: { id: { in: ids }, status: "REQUESTED" }, data: { status: "CANCELLED", respondedAt: new Date(), respondedBy: req.userId ?? null } });
-    if (cancelled.count !== ids.length) throw new DispatchError("The store already dispatched this request", 409);
-    await tx.posOrderItem.updateMany({ where: { dispatchRequestId: { in: ids } }, data: { dispatchRequestId: null } });
-  });
-  res.json({ order: withDispatch(await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude })) });
 }));
 
 /** Product-backed menu and recipe snapshot used by the kitchen side panel. */
