@@ -61,9 +61,18 @@ async function loadTicket(req: Request, status: string[]) {
   return order;
 }
 
-/** Only the chef who claimed a ticket can finish or release it. */
-async function assertPreparer(order: { preparingBy: string | null }, userId: string | undefined) {
+async function isSuperAdmin(tid: string, userId: string | undefined) {
+  if (!userId) return false;
+  const employee = await prisma.employee.findFirst({ where: { id: userId, tenantId: tid, status: "ACTIVE" }, select: { role: { select: { name: true } } } });
+  return employee?.role?.name === "Super Admin";
+}
+
+/** Only the chef who claimed a ticket can finish or release it - or a Super
+ * Admin, so a ticket isn't stuck (and the bill with it) when that chef has
+ * left for the day. */
+async function assertPreparer(order: { preparingBy: string | null }, userId: string | undefined, tid: string) {
   if (order.preparingBy && order.preparingBy === userId) return;
+  if (order.preparingBy && (await isSuperAdmin(tid, userId))) return;
   if (!order.preparingBy) throw new DispatchError("Nobody has claimed this order yet. Claim it first.", 409, "NOT_CLAIMED");
   const who = await prisma.employee.findUnique({ where: { id: order.preparingBy }, select: { firstName: true, lastName: true } });
   throw new DispatchError(`Claimed by ${who ? `${who.firstName} ${who.lastName}`.trim() : "another chef"}. Only they can finish or release it.`, 403, "CLAIMED_BY_OTHER");
@@ -138,11 +147,11 @@ kitchenRouter.patch("/orders/:id/start", handle(async (req, res) => {
  * that's the point the ingredients are truly gone, not before. */
 kitchenRouter.patch("/orders/:id/ready", handle(async (req, res) => {
   const order = await loadTicket(req, ["PREPARING"]);
-  await assertPreparer(order, req.userId);
+  await assertPreparer(order, req.userId, tenantId(req));
   // A round added mid-prep needs its own dispatch before the ticket can finish.
   const dispatch = orderDispatchInfo(order);
   if (!dispatch.clear) throw new DispatchError(dispatch.state === "WAITING" ? "Waiting for the store to dispatch the added items" : "Request the added items from the store first", 409, "DISPATCH_REQUIRED");
-  const claimed = await prisma.posOrder.updateMany({ where: { id: order.id, tenantId: tenantId(req), status: "PREPARING", preparingBy: req.userId }, data: { status: "READY", readyAt: new Date(), readyBy: req.userId ?? null } });
+  const claimed = await prisma.posOrder.updateMany({ where: { id: order.id, tenantId: tenantId(req), status: "PREPARING", preparingBy: order.preparingBy }, data: { status: "READY", readyAt: new Date(), readyBy: req.userId ?? null } });
   if (!claimed.count) throw new DispatchError("This ticket is no longer being prepared", 409);
   const fresh = await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
   res.json({ notification: { type: "ORDER_READY", message: `Order #${fresh.orderNumber} is ready to serve` }, order: withDispatch(fresh) });
@@ -151,8 +160,8 @@ kitchenRouter.patch("/orders/:id/ready", handle(async (req, res) => {
 /** Puts a ticket the chef claimed back in the queue for someone else to take. */
 kitchenRouter.patch("/orders/:id/release", handle(async (req, res) => {
   const order = await loadTicket(req, ["PREPARING"]);
-  await assertPreparer(order, req.userId);
-  const released = await prisma.posOrder.updateMany({ where: { id: order.id, tenantId: tenantId(req), status: "PREPARING", preparingBy: req.userId }, data: { status: "OPEN", preparingBy: null, preparingAt: null } });
+  await assertPreparer(order, req.userId, tenantId(req));
+  const released = await prisma.posOrder.updateMany({ where: { id: order.id, tenantId: tenantId(req), status: "PREPARING", preparingBy: order.preparingBy }, data: { status: "OPEN", preparingBy: null, preparingAt: null } });
   if (!released.count) throw new DispatchError("This ticket is no longer being prepared", 409);
   res.json({ order: withDispatch(await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude })) });
 }));
