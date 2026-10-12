@@ -267,12 +267,27 @@ productsRouter.get("/:id", async (req, res) => {
   res.json({ product: withTotal(product) });
 });
 
+/** Product names are unique per tenant, ignoring case and extra spaces -
+ * "Smirnoff vodka 375ml" next to "Smirnoff Vodka 375ml" split one item's
+ * stock and purchases in two. Returns a ready 409 message, or null. */
+async function duplicateNameError(tid: string, name: string, exceptId?: string) {
+  const [clash] = await prisma.$queryRaw<{ name: string; isActive: boolean }[]>`
+    SELECT name, "isActive" FROM "Product"
+    WHERE "tenantId" = ${tid} AND id <> ${exceptId ?? ""}
+      AND lower(regexp_replace(trim(name), '[[:space:]]+', ' ', 'g')) = lower(regexp_replace(trim(${name}), '[[:space:]]+', ' ', 'g'))
+    LIMIT 1`;
+  if (!clash) return null;
+  return `A product named "${clash.name}" already exists${clash.isActive ? "" : " (inactive - reactivate it instead)"}`;
+}
+
 productsRouter.post("/", async (req, res, next) => {
   const data = createSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid product", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   const { openingStock, locationId, categoryId, ...rest } = data.data;
   try {
+    const nameClash = await duplicateNameError(tid, rest.name);
+    if (nameClash) { res.status(409).json({ error: nameClash }); return; }
     let receivingLocationId = locationId;
     if (openingStock > 0 && !receivingLocationId) {
       const locations = await prisma.location.findMany({ where: { tenantId: tid }, select: { id: true } });
@@ -317,6 +332,10 @@ productsRouter.patch("/:id", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid product", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
+    if (data.data.name !== undefined) {
+      const nameClash = await duplicateNameError(tid, data.data.name, req.params.id);
+      if (nameClash) { res.status(409).json({ error: nameClash }); return; }
+    }
     if (data.data.categoryId) {
       const category = await prisma.category.findFirst({ where: { id: data.data.categoryId, tenantId: tid } });
       if (!category) { res.status(400).json({ error: "Selected category was not found" }); return; }
@@ -339,7 +358,7 @@ productsRouter.delete("/:id", async (req, res, next) => {
     if (!deleted.count) { res.status(404).json({ error: "Product not found" }); return; }
     res.status(204).send();
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") { res.status(409).json({ error: "This product is used in a recipe and can't be deleted — deactivate it instead" }); return; }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") { res.status(409).json({ error: "This product has history (purchases, stock requests, recipes or orders) and can't be deleted — deactivate it instead" }); return; }
     next(error);
   }
 });
