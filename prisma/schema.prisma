@@ -2511,6 +2511,10 @@ model Location {
   // Queue the store's dispatch slip to the store's printer the moment an order
   // is posted (true), or leave printing to the storekeeper's Print button (false).
   dispatchAutoPrint      Boolean                @default(true)
+  // COUNTER-mode locations: print an order ticket on this location's default
+  // printer whenever a waiter posts an order or changes one (added, changed or
+  // removed items, a cancellation) - what the barman works from. Not a receipt.
+  orderTicketAutoPrint   Boolean                @default(false)
   dispatchFromLocationId String?
   // Free-text blocks a document can print above/below its body, specific to
   // this location (e.g. a branch's own thank-you note or return policy).
@@ -3008,6 +3012,8 @@ model Payment {
 enum PrintJobKind {
   RECEIPT
   DISPATCH
+  // What a waiter just posted to (or changed on) a COUNTER-mode order, for the barman.
+  ORDER_TICKET
 }
 
 enum PrintJobStatus {
@@ -3081,6 +3087,9 @@ model PrintJob {
   kind              PrintJobKind   @default(RECEIPT)
   // For DISPATCH jobs: the request whose slip is printed (locationId is then the store).
   dispatchRequestId String?
+  // For ORDER_TICKET jobs: what changed on the order at that moment (see lib/orderTicket.ts),
+  // frozen so a later edit or a reprint can't change what this ticket said.
+  ticket            Json?
   // Plain id, no relation — same convention as PosOrder.createdBy.
   requestedBy       String?
   claimedBy         String?

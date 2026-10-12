@@ -17,6 +17,8 @@ import { currentMemberDiscount } from "../../lib/membership.js";
 import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js";
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
 import { renderDispatchPrint } from "../../lib/dispatchPrint.js";
+import { queueOrderTicket, renderOrderTicketPrint } from "../../lib/orderTicket.js";
+import type { OrderTicket } from "../../lib/orderTicket.js";
 import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, resolveStockLocationId, settleServedAdditions } from "../../lib/orderStock.js";
 import { perSaleRequirements } from "../../lib/trackingMode.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
@@ -800,6 +802,8 @@ posRouter.post("/orders", async (req, res) => {
     // Store-dispatch locations: the ingredients are requested from the store right now,
     // so the chef just sees "waiting for store approval".
     await Promise.all(createdOrders.map((order) => autoRequestDispatch(tid, order.id, req.userId)));
+    // Counter locations: the barman gets a ticket of what was just posted.
+    await Promise.all(createdOrders.map((order) => queueOrderTicket({ tenantId: tid, order, event: "NEW", after: order.items, by: req.userId })));
     const primary = createdOrders.find((order) => order.locationId === effectiveLocationId) ?? createdOrders[0];
     res.status(201).json({ order: withFinancials(primary, tax), linkedOrders: createdOrders.map((order) => withFinancials(order, tax)) });
   } catch (error) {
@@ -948,6 +952,7 @@ posRouter.post("/orders/:id/items", async (req, res) => {
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
     await autoRequestDispatch(tid, order.id, req.userId);
+    await queueOrderTicket({ tenantId: tid, order: updated, event: "UPDATED", before: order.items, after: updated.items, by: req.userId });
     res.status(201).json({ order: withFinancials(updated, tax) });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
@@ -1088,6 +1093,7 @@ posRouter.patch("/orders/:id/items/:itemId", async (req, res) => {
       if (existing.dispatchRequestId && existing.dispatchRequest?.status === "REQUESTED") await refreshOpenRequest(tx, tid, existing.dispatchRequestId);
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
+    await queueOrderTicket({ tenantId: tid, order: updated, event: "UPDATED", before: order.items, after: updated.items, by: req.userId });
     res.status(200).json({ order: withFinancials(updated, tax) });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
@@ -1126,6 +1132,7 @@ posRouter.delete("/orders/:id/items/:itemId", async (req, res) => {
       if (existing.dispatchRequestId && existing.dispatchRequest?.status === "REQUESTED") await refreshOpenRequest(tx, tid, existing.dispatchRequestId);
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
+    await queueOrderTicket({ tenantId: tid, order: updated, event: "UPDATED", before: order.items, after: updated.items, by: req.userId });
     res.status(200).json({ order: withFinancials(updated, tax) });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
@@ -1524,6 +1531,8 @@ posRouter.post("/orders/:id/cancel/approve", requirePermission("POS_APPROVE_CANC
       if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
+    // Not yet handed over: tell the counter to stop. A served order's return is nothing for it to act on.
+    if (!order.servedAt) await queueOrderTicket({ tenantId: tid, order, event: "CANCELLED", after: order.items, by: req.userId });
     const tax = await taxSettingsFor(tid);
     res.status(200).json({ order: withFinancials(updated, tax) });
   } catch (error) {
@@ -2827,12 +2836,17 @@ posRouter.post("/print-jobs/:id/claim", async (req, res) => {
     data: { status: "CLAIMED", claimedBy: req.userId ?? null, claimedAt: new Date() },
   });
   if (!claimed.count) { res.status(409).json({ error: "Already claimed by another device, or not found" }); return; }
-  const job = await prisma.printJob.findUniqueOrThrow({ where: { id: req.params.id }, select: { id: true, orderId: true, status: true, kind: true, dispatchRequestId: true } });
+  const job = await prisma.printJob.findUniqueOrThrow({ where: { id: req.params.id }, select: { id: true, orderId: true, status: true, kind: true, dispatchRequestId: true, ticket: true } });
   // A dispatch slip travels with the claim, so the printing device needs no store permissions of its own.
   const slip = job.kind === "DISPATCH" && job.dispatchRequestId ? await dispatchSlipFor(tid, job.dispatchRequestId) : null;
-  const profile = slip ? await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessName: true } }) : null;
-  const data = slip ? renderDispatchPrint(slip, printOptions.data.columns ?? 42, profile?.businessName ?? '').toString('base64') : null;
-  res.status(200).json({ job, slip, data });
+  const ticket = job.kind === "ORDER_TICKET" && job.ticket ? (job.ticket as unknown as OrderTicket) : null;
+  const profile = slip || ticket ? await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessName: true } }) : null;
+  const columns = printOptions.data.columns ?? 42;
+  const data = slip ? renderDispatchPrint(slip, columns, profile?.businessName ?? '').toString('base64')
+    : ticket ? renderOrderTicketPrint(ticket, columns, profile?.businessName ?? '').toString('base64')
+    : null;
+  const { ticket: _ticket, ...jobOut } = job;
+  res.status(200).json({ job: jobOut, slip, data });
 });
 
 posRouter.post("/print-jobs/:id/complete", async (req, res) => {
