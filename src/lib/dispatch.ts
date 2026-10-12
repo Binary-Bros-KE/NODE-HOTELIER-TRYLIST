@@ -88,11 +88,20 @@ export async function createDispatchRequest(order: RequestableOrder, actorId: st
   if (!fromLocationId) throw new DispatchError("No store is set up to supply this kitchen. Choose one in Locations.", 409);
   if (fromLocationId === location.id) throw new DispatchError("The supplying store can't be the kitchen itself", 409);
 
-  const latest = await prisma.stockDispatchRequest.findFirst({
+  const found = await prisma.stockDispatchRequest.findFirst({
     where: { tenantId: order.tenantId, orderId: order.id },
     orderBy: { requestedAt: "desc" },
     select: { id: true, status: true, respondedAt: true },
   });
+  // Re-asking after a cancelled/rejected request reuses that record, but its
+  // respondedAt must go: refreshOpenRequest treats it as the cutoff for "new
+  // round" lines, and the re-claimed lines are older than it - so the request
+  // was withdrawn again the moment the store list loaded (order #145). If the
+  // same record also carried an earlier, dispatched round (lines still linked),
+  // there is no cutoff that splits the two, so open a fresh request instead.
+  const closedWithoutStock = found && (found.status === "CANCELLED" || found.status === "REJECTED");
+  const freshNeeded = closedWithoutStock && (await prisma.posOrderItem.count({ where: { dispatchRequestId: found.id } })) > 0;
+  const latest = freshNeeded ? null : found;
   const cutoff = latest?.respondedAt ?? null;
   const alreadyPending = latest?.status === "REQUESTED"
     ? order.items.filter((item) => item.dispatchRequestId === latest.id && (!cutoff || !item.createdAt || item.createdAt > cutoff) && needsStock(item))
@@ -115,6 +124,7 @@ export async function createDispatchRequest(order: RequestableOrder, actorId: st
             requestedByName: requesterName,
             rejectReason: null,
             note: note ?? null,
+            ...(closedWithoutStock ? { respondedAt: null, respondedBy: null, respondedByName: null } : {}),
             items: {
               deleteMany: {},
               create: [...requirements].map(([productId, r]) => ({ productId, productName: r.name, requestedQty: r.quantity })),
