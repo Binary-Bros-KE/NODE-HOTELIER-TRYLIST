@@ -2088,7 +2088,7 @@ posRouter.post("/orders/:id/share", async (req, res) => {
   res.status(200).json({ token, url: `${base}/r/${token}` });
 });
 
-const printerFields = { id: true, name: true, isActive: true, isDefault: true, locationId: true, location: { select: { id: true, name: true } } } as const;
+const printerFields = { id: true, name: true, isActive: true, isDefault: true, hostSeenAt: true, locationId: true, location: { select: { id: true, name: true } } } as const;
 
 posRouter.get("/printers", async (req, res) => {
   const printers = await prisma.printer.findMany({ where: { tenantId: tenantIdFor(req) }, select: printerFields, orderBy: [{ location: { name: "asc" } }, { name: "asc" }] });
@@ -2804,6 +2804,13 @@ posRouter.get("/print-jobs/pending", async (req, res) => {
   const tid = tenantIdFor(req);
   const query = z.object({ printerId: z.string().cuid() }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "A printerId is required" }); return; }
+  // Record that a computer is printing for this printer (Printer Settings warns
+  // when none is). Written at most every 30s, not on every 3s poll.
+  const now = new Date();
+  await prisma.printer.updateMany({
+    where: { id: query.data.printerId, tenantId: tid, OR: [{ hostSeenAt: null }, { hostSeenAt: { lt: new Date(now.getTime() - 30_000) } }] },
+    data: { hostSeenAt: now },
+  });
   const jobs = await prisma.printJob.findMany({
     where: { tenantId: tid, printerId: query.data.printerId, status: "PENDING" },
     select: { id: true, orderId: true, kind: true, createdAt: true, nudgedAt: true },

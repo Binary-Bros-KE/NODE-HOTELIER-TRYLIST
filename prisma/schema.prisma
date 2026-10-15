@@ -3044,6 +3044,9 @@ model Printer {
   isActive   Boolean    @default(true)
   // The location's default printer - receives store dispatch slips.
   isDefault  Boolean    @default(false)
+  // Last time a computer polled for this printer's jobs ("This computer prints
+  // for"). Stale or null = nobody is picking up jobs queued from phones.
+  hostSeenAt DateTime?
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
   jobs       PrintJob[]
