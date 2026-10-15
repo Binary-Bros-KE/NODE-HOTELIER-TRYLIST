@@ -9,6 +9,11 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   CORS_ORIGIN: z.string().min(1).default("http://localhost:5173"),
   APP_DOMAIN: z.string().trim().min(1).optional(),
+  // Parent of every public tenant website: <slug>.SITE_DOMAIN (e.g.
+  // site.hoteliermanagement.app). Deliberately a level below APP_DOMAIN so
+  // one wildcard cert covers all sites and website hosts can never collide
+  // with a staff-app tenant subdomain ("site" is a reserved slug).
+  SITE_DOMAIN: z.string().trim().min(1).optional(),
   // Bootstrap credentials for the first platform admin account, consumed
   // only by `npm run seed:platform-admin` (see that script). The running
   // app never reads these — platform admins authenticate against

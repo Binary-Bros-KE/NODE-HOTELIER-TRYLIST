@@ -7,7 +7,7 @@ import { prisma } from "../../lib/prisma.js";
 import { env } from "../../config/env.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { verifySecret } from "../../lib/hash.js";
-import { provisionTenantBootstrap, MODULE_KEYS, MODULE_GROUP_KEYS, type ModuleGroups } from "../../lib/tenantBootstrap.js";
+import { provisionTenantBootstrap, isEnabledFor, MODULE_KEYS, MODULE_GROUP_KEYS, type ModuleGroups } from "../../lib/tenantBootstrap.js";
 import { platformAuth } from "./platform.auth.js";
 import { adminsRouter } from "./admins.routes.js";
 import { plansRouter } from "../plans/plans.routes.js";
@@ -94,6 +94,8 @@ const RESERVED_SLUGS = new Set([
   "www", "api", "server", "admin", "platform", "app", "dashboard",
   "mail", "ftp", "cdn", "assets", "static", "status", "staging", "dev",
   "docs", "blog", "help", "support", "hotelier",
+  // Public tenant websites live under <slug>.site.APP_DOMAIN (SITE_DOMAIN).
+  "site",
 ]);
 
 const slugSchema = z.string().trim().toLowerCase().min(3).max(63)
@@ -118,16 +120,15 @@ const createTenantSchema = z.object({
   // How long the trial period runs before nextDueDate hits — left unset
   // means no due date is scheduled yet (handled manually later).
   trialDays: z.coerce.number().int().min(1).max(3650).optional(),
-  modules: z.object({ rooms: z.boolean(), sales: z.boolean(), services: z.boolean() })
+  modules: z.object({ rooms: z.boolean(), sales: z.boolean(), services: z.boolean(), website: z.boolean().optional() })
     .refine((m) => m.rooms || m.sales || m.services, { message: "Enable at least one module", path: ["rooms"] }),
 });
 
-const modulesSchema = z.object({ rooms: z.boolean(), sales: z.boolean(), services: z.boolean() })
+// website is optional: omitted = leave the tenant's website module as it is.
+const modulesSchema = z.object({ rooms: z.boolean(), sales: z.boolean(), services: z.boolean(), website: z.boolean().optional() })
   .refine((m) => m.rooms || m.sales || m.services, { message: "Enable at least one module", path: ["rooms"] });
 
-const GROUPED_KEY_SET = new Set<string>([...MODULE_GROUP_KEYS.rooms, ...MODULE_GROUP_KEYS.sales, ...MODULE_GROUP_KEYS.services]);
-
-/** Derives the three admin-facing toggles from a tenant's enabled
+/** Derives the admin-facing toggles from a tenant's enabled
  * TenantModule keys — one representative key per group is enough since
  * they're only ever flipped together (see MODULE_GROUP_KEYS). */
 function moduleGroupsFrom(enabledKeys: string[]): ModuleGroups {
@@ -136,6 +137,7 @@ function moduleGroupsFrom(enabledKeys: string[]): ModuleGroups {
     rooms: MODULE_GROUP_KEYS.rooms.some((k) => enabled.has(k)),
     sales: MODULE_GROUP_KEYS.sales.some((k) => enabled.has(k)),
     services: MODULE_GROUP_KEYS.services.some((k) => enabled.has(k)),
+    website: MODULE_GROUP_KEYS.website.some((k) => enabled.has(k)),
   };
 }
 
@@ -318,7 +320,7 @@ platformRouter.get("/tenants/:id", async (req, res) => {
   });
 });
 
-/** The only way to flip Room Management / Sales / Services after creation —
+/** The only way to flip Room Management / Sales / Services / Website after creation —
  * everything else a tenant has (Products, Store, HR, Reports, Customers,
  * Accounting) is common infrastructure and never toggled. Self-healing: also
  * upserts the common keys to enabled, so a tenant provisioned before a given
@@ -327,16 +329,16 @@ platformRouter.get("/tenants/:id", async (req, res) => {
 platformRouter.patch("/tenants/:id/modules", async (req, res) => {
   const parsed = modulesSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid modules", details: parsed.error.flatten() }); return; }
-  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.id }, select: { id: true } });
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, tenantModules: { where: { moduleKey: "WEBSITE" }, select: { isEnabled: true } } },
+  });
   if (!tenant) { res.status(404).json({ error: "Tenant not found" }); return; }
+  const groups: ModuleGroups = { ...parsed.data, website: parsed.data.website ?? tenant.tenantModules[0]?.isEnabled ?? false };
 
   await prisma.$transaction(async (tx) => {
     for (const moduleKey of MODULE_KEYS) {
-      const isEnabled = GROUPED_KEY_SET.has(moduleKey)
-        ? (MODULE_GROUP_KEYS.rooms as readonly string[]).includes(moduleKey) ? parsed.data.rooms
-          : (MODULE_GROUP_KEYS.sales as readonly string[]).includes(moduleKey) ? parsed.data.sales
-          : parsed.data.services
-        : true;
+      const isEnabled = isEnabledFor(moduleKey, groups);
       await tx.tenantModule.upsert({
         where: { tenantId_moduleKey: { tenantId: tenant.id, moduleKey } },
         update: { isEnabled },

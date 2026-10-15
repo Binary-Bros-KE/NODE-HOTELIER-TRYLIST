@@ -28,7 +28,8 @@ async function main() {
     const missing = MODULE_KEYS.filter((k) => !have.has(k));
     if (missing.length === 0) continue;
     await prisma.tenantModule.createMany({
-      data: missing.map((moduleKey) => ({ tenantId: tenant.id, moduleKey, isEnabled: true })),
+      // WEBSITE is an opt-in add-on, never something a tenant "always had".
+      data: missing.map((moduleKey) => ({ tenantId: tenant.id, moduleKey, isEnabled: moduleKey !== "WEBSITE" })),
     });
     console.log(`${tenant.name}: added ${missing.join(", ")}`);
     created += missing.length;

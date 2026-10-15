@@ -9,25 +9,30 @@ import { hashSecret } from "./hash.js";
 export const MODULE_KEYS = [
   "PRODUCTS", "STORE", "POS", "KITCHEN", "ROOMS", "RESERVATIONS",
   "HOUSEKEEPING", "HR", "REPORTS", "CUSTOMERS", "SERVICE_CENTER", "ACCOUNTING",
+  "WEBSITE",
 ] as const;
 
-// The platform admin only ever offers three toggles when creating or editing
+// The platform admin only ever offers these toggles when creating or editing
 // a tenant — everything else (Products/Store catalog, Team, Reports,
 // Customers, Finance) is common infrastructure every property needs
 // regardless of which "kind" of business it runs, so it's always on and
-// never exposed as a checkbox.
+// never exposed as a checkbox. `website` is an add-on rather than a kind of
+// business: it's off unless asked for, and never counts toward the "at
+// least one module" rule.
 export const MODULE_GROUP_KEYS = {
   rooms: ["ROOMS", "RESERVATIONS", "HOUSEKEEPING"],
   sales: ["POS", "KITCHEN"],
   services: ["SERVICE_CENTER"],
+  website: ["WEBSITE"],
 } as const;
-export type ModuleGroups = { rooms: boolean; sales: boolean; services: boolean };
-const GROUPED_KEYS = new Set<string>([...MODULE_GROUP_KEYS.rooms, ...MODULE_GROUP_KEYS.sales, ...MODULE_GROUP_KEYS.services]);
+export type ModuleGroups = { rooms: boolean; sales: boolean; services: boolean; website?: boolean };
+const GROUPED_KEYS = new Set<string>([...MODULE_GROUP_KEYS.rooms, ...MODULE_GROUP_KEYS.sales, ...MODULE_GROUP_KEYS.services, ...MODULE_GROUP_KEYS.website]);
 
-function isEnabledFor(moduleKey: (typeof MODULE_KEYS)[number], modules: ModuleGroups): boolean {
+export function isEnabledFor(moduleKey: (typeof MODULE_KEYS)[number], modules: ModuleGroups): boolean {
   if (!GROUPED_KEYS.has(moduleKey)) return true; // common — always on
   if ((MODULE_GROUP_KEYS.rooms as readonly string[]).includes(moduleKey)) return modules.rooms;
   if ((MODULE_GROUP_KEYS.sales as readonly string[]).includes(moduleKey)) return modules.sales;
+  if ((MODULE_GROUP_KEYS.website as readonly string[]).includes(moduleKey)) return modules.website ?? false;
   return modules.services;
 }
 

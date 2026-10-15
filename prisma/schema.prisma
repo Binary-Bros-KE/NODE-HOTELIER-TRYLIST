@@ -20,6 +20,7 @@ enum ModuleKey {
   ACCOUNTING
   REPORTS
   SERVICE_CENTER
+  WEBSITE
 }
 
 enum AppointmentStatus {
@@ -500,7 +501,7 @@ model Tenant {
   membershipVisits           MembershipVisit[]
   membershipPayments         MembershipPayment[]
   appointments               Appointment[]
-  shiftTemplates            ShiftTemplate[]
+  shiftTemplates             ShiftTemplate[]
   shiftRotations             EmployeeShiftRotation[]
   shiftOverrides             EmployeeShiftOverride[]
   attendanceRecords          AttendanceRecord[]
@@ -521,6 +522,11 @@ model Tenant {
   commercialDocuments        CommercialDocument[]
   commercialDocumentLines    CommercialDocumentLine[]
   commercialDocumentPayments CommercialDocumentPayment[]
+  website                    TenantWebsite?
+  websiteDomains             TenantDomain[]
+  websitePages               WebsitePage[]
+  websiteMedia               WebsiteMedia[]
+  websiteInquiries           WebsiteInquiry[]
 }
 
 enum CustomerType {
@@ -632,6 +638,7 @@ model Customer {
   serviceGroup        ServiceCustomerGroup? @relation(fields: [serviceGroupId], references: [id], onDelete: SetNull)
   memberships         Membership[]
   appointments        Appointment[]
+  websiteInquiries    WebsiteInquiry[]
   commercialDocuments CommercialDocument[]
 
   @@unique([tenantId, customerNo])
@@ -732,6 +739,10 @@ model RoomType {
   baseRate            Decimal                  @db.Decimal(12, 2)
   priceUnitId         String?
   amenities           String[]                 @default([])
+  // Public website: opt-in per room type. imageUrls[0] is the cover photo.
+  showOnWebsite       Boolean                  @default(false)
+  websiteDescription  String?
+  imageUrls           String[]                 @default([])
   // Null inherits the tenant's BusinessProfile default (same convention as
   // MenuItem/Service/Product) — rate variants never carry their own tax.
   taxRate             Decimal?                 @db.Decimal(5, 2)
@@ -862,43 +873,49 @@ model ServiceVariantIngredient {
 }
 
 model Service {
-  id              String           @id @default(cuid())
-  tenantId        String
-  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  name            String
-  categoryId      String
-  category        ServiceCategory  @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  unitId          String
-  unit            UnitOfMeasure    @relation(fields: [unitId], references: [id], onDelete: Restrict)
-  price           Decimal          @db.Decimal(12, 2)
+  id                 String           @id @default(cuid())
+  tenantId           String
+  tenant             Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name               String
+  categoryId         String
+  category           ServiceCategory  @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  unitId             String
+  unit               UnitOfMeasure    @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  price              Decimal          @db.Decimal(12, 2)
   // What it costs the business to deliver one unit (labour, materials not
   // tracked as stock...). Optional: null = not costed (reports treat it as 0).
-  cost            Decimal?         @db.Decimal(12, 2)
+  cost               Decimal?         @db.Decimal(12, 2)
   // Per-service tax override, same convention as MenuItem: all null = inherit
   // the tenant's BusinessProfile default (rate + mode + treatment).
-  taxRate         Decimal?         @db.Decimal(5, 2)
-  taxMode         TaxMode?
-  taxTreatment    TaxTreatment?
+  taxRate            Decimal?         @db.Decimal(5, 2)
+  taxMode            TaxMode?
+  taxTreatment       TaxTreatment?
   // How long one unit takes (a 60 minute massage, an hour in the pool). Optional;
   // a variant's own duration wins. Drives the active-service timer.
-  durationMinutes Int?
+  durationMinutes    Int?
   // Stock consumed per unit sold: one product (qty per unit) or a recipe, the same
   // options a menu item has (a bottle of lotion per massage). Both null = none.
-  productId       String?
-  product         Product?         @relation("ServiceProduct", fields: [productId], references: [id], onDelete: SetNull)
-  stockQtyPerUnit Decimal?         @db.Decimal(12, 3)
-  recipeId        String?
-  recipe          Recipe?          @relation("ServiceRecipe", fields: [recipeId], references: [id], onDelete: SetNull)
-  variants        ServiceVariant[]
-  description     String?
-  isActive        Boolean          @default(true)
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  productId          String?
+  product            Product?         @relation("ServiceProduct", fields: [productId], references: [id], onDelete: SetNull)
+  stockQtyPerUnit    Decimal?         @db.Decimal(12, 3)
+  recipeId           String?
+  recipe             Recipe?          @relation("ServiceRecipe", fields: [recipeId], references: [id], onDelete: SetNull)
+  variants           ServiceVariant[]
+  description        String?
+  isActive           Boolean          @default(true)
+  // Public website: showOnWebsite lists it; bookableOnline also lets guests
+  // book an appointment for it (needs durationMinutes on it or its variants).
+  showOnWebsite      Boolean          @default(false)
+  bookableOnline     Boolean          @default(false)
+  websiteDescription String?
+  imageUrl           String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
   // Empty = unallocated = sellable at every location (the default) —
   // identical convention to MenuItem.locations.
-  locations       Location[]
-  orderItems      PosOrderItem[]
-  appointments    Appointment[]    @relation("AppointmentService")
+  locations          Location[]
+  orderItems         PosOrderItem[]
+  appointments       Appointment[]    @relation("AppointmentService")
 
   @@unique([tenantId, name])
   @@index([tenantId, categoryId])
@@ -1040,17 +1057,17 @@ model RoomConsumableUsage {
 }
 
 model RoomConsumableUsageItem {
-  id         String              @id @default(cuid())
-  usageId    String
-  usage      RoomConsumableUsage @relation(fields: [usageId], references: [id], onDelete: Cascade)
-  productId  String
-  product    Product             @relation(fields: [productId], references: [id], onDelete: Restrict)
+  id           String              @id @default(cuid())
+  usageId      String
+  usage        RoomConsumableUsage @relation(fields: [usageId], references: [id], onDelete: Cascade)
+  productId    String
+  product      Product             @relation(fields: [productId], references: [id], onDelete: Restrict)
   // Replaced: what came off the shelf into the room. usedQuantity is what left the
   // room (used by a guest, expired, damaged) and is not a stock movement.
-  quantity   Decimal             @db.Decimal(12, 3)
-  usedQuantity Decimal           @default(0) @db.Decimal(12, 3)
-  movementId String?
-  movement   InventoryMovement?  @relation(fields: [movementId], references: [id], onDelete: SetNull)
+  quantity     Decimal             @db.Decimal(12, 3)
+  usedQuantity Decimal             @default(0) @db.Decimal(12, 3)
+  movementId   String?
+  movement     InventoryMovement?  @relation(fields: [movementId], references: [id], onDelete: SetNull)
 
   @@index([usageId])
   @@index([productId])
@@ -1123,25 +1140,25 @@ model StockDispatchItem {
 // Housekeeping, Sales, Services, Kitchen, or any other internal location
 // whenever they need stock from the store.
 model StockRequest {
-  id                String             @id @default(cuid())
-  tenantId          String
-  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  requestNo         String
-  fromLocationId    String
-  fromLocation      Location           @relation("StockRequestFrom", fields: [fromLocationId], references: [id], onDelete: Restrict)
-  toLocationId      String
-  toLocation        Location           @relation("StockRequestTo", fields: [toLocationId], references: [id], onDelete: Restrict)
-  status            StockRequestStatus @default(REQUESTED)
-  note              String?
-  requestedBy       String?
-  requestedByName   String?
-  requestedAt       DateTime           @default(now())
-  respondedBy       String?
-  respondedByName   String?
-  respondedAt       DateTime?
-  rejectReason      String?
-  transferId        String?
-  items             StockRequestItem[]
+  id              String             @id @default(cuid())
+  tenantId        String
+  tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  requestNo       String
+  fromLocationId  String
+  fromLocation    Location           @relation("StockRequestFrom", fields: [fromLocationId], references: [id], onDelete: Restrict)
+  toLocationId    String
+  toLocation      Location           @relation("StockRequestTo", fields: [toLocationId], references: [id], onDelete: Restrict)
+  status          StockRequestStatus @default(REQUESTED)
+  note            String?
+  requestedBy     String?
+  requestedByName String?
+  requestedAt     DateTime           @default(now())
+  respondedBy     String?
+  respondedByName String?
+  respondedAt     DateTime?
+  rejectReason    String?
+  transferId      String?
+  items           StockRequestItem[]
 
   @@unique([tenantId, requestNo])
   @@index([tenantId, status])
@@ -1277,6 +1294,10 @@ model Reservation {
   discountValue       Decimal               @default(0) @db.Decimal(12, 2)
   discountBasis       RoomDiscountBasis     @default(TOTAL)
   discountReason      String?
+  // Website bookings: manageToken is the secret in the guest's "manage my
+  // booking" link; holdExpiresAt releases an unpaid online hold.
+  manageToken         String?               @unique
+  holdExpiresAt       DateTime?
 
   @@unique([tenantId, reservationNo])
   @@index([groupId])
@@ -1737,39 +1758,39 @@ enum AssetMovementType {
 // only ever changes through an AssetMovement, never a direct edit, mirroring
 // how Product's stock is never PATCHed directly either.
 model Asset {
-  id                String          @id @default(cuid())
-  tenantId          String
-  tenant            Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  assetNo           String
-  categoryId        String?
-  category          Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  name              String
-  description       String?
+  id                         String              @id @default(cuid())
+  tenantId                   String
+  tenant                     Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assetNo                    String
+  categoryId                 String?
+  category                   Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  name                       String
+  description                String?
   // Any unit from the tenant's Units of Measure - it is up to the user to pick one that makes sense.
-  unitId            String
-  unitRef           UnitOfMeasure   @relation("AssetUnit", fields: [unitId], references: [id], onDelete: Restrict)
-  quantity          Decimal         @default(0) @db.Decimal(12, 3)
-  unitCost          Decimal?        @db.Decimal(12, 2)
-  locationId        String?
-  location          Location?       @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  roomId            String?
-  room              Room?           @relation(fields: [roomId], references: [id], onDelete: SetNull)
-  condition         AssetCondition  @default(WORKING)
-  conditionNote     String?
-  affectedQuantity  Decimal?        @db.Decimal(12, 3)
-  conditionUpdatedAt DateTime?
-  conditionUpdatedBy String?
-  conditionUpdatedByEmployee Employee? @relation("AssetConditionBy", fields: [conditionUpdatedBy], references: [id], onDelete: SetNull)
-  conditionLogs     AssetConditionLog[]
-  isActive          Boolean         @default(true)
-  notes             String?
-  createdBy         String?
-  createdByEmployee Employee?       @relation("AssetCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
-  updatedBy         String?
-  updatedByEmployee Employee?       @relation("AssetUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
-  movements         AssetMovement[]
+  unitId                     String
+  unitRef                    UnitOfMeasure       @relation("AssetUnit", fields: [unitId], references: [id], onDelete: Restrict)
+  quantity                   Decimal             @default(0) @db.Decimal(12, 3)
+  unitCost                   Decimal?            @db.Decimal(12, 2)
+  locationId                 String?
+  location                   Location?           @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  roomId                     String?
+  room                       Room?               @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  condition                  AssetCondition      @default(WORKING)
+  conditionNote              String?
+  affectedQuantity           Decimal?            @db.Decimal(12, 3)
+  conditionUpdatedAt         DateTime?
+  conditionUpdatedBy         String?
+  conditionUpdatedByEmployee Employee?           @relation("AssetConditionBy", fields: [conditionUpdatedBy], references: [id], onDelete: SetNull)
+  conditionLogs              AssetConditionLog[]
+  isActive                   Boolean             @default(true)
+  notes                      String?
+  createdBy                  String?
+  createdByEmployee          Employee?           @relation("AssetCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  updatedBy                  String?
+  updatedByEmployee          Employee?           @relation("AssetUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
+  createdAt                  DateTime            @default(now())
+  updatedAt                  DateTime            @updatedAt
+  movements                  AssetMovement[]
 
   @@unique([tenantId, assetNo])
   @@index([tenantId, categoryId])
@@ -2258,23 +2279,23 @@ model Product {
   photoUrl    String?
 
   // Classification
-  unit          String  @default("each")
+  unit              String            @default("each")
   // The counting unit, as a real Units of Measure row (kg, Piece, PKT...).
   // unit above is the legacy text and is kept in step until every product is linked.
-  unitId        String?
-  unitRef       UnitOfMeasure? @relation("ProductUnit", fields: [unitId], references: [id], onDelete: Restrict)
+  unitId            String?
+  unitRef           UnitOfMeasure?    @relation("ProductUnit", fields: [unitId], references: [id], onDelete: Restrict)
   // Which operations this product belongs to (Bar, Store, Restaurant...). A
   // product can carry several, e.g. a soda is both BAR and RESTAURANT. Stock
   // never decides this, so a zero-stock product is still in its section.
-  tags          LocationType[] @default([])
-  isPerishable  Boolean @default(false)
-  trackingMode  StockTrackingMode @default(PER_SALE)
+  tags              LocationType[]    @default([])
+  isPerishable      Boolean           @default(false)
+  trackingMode      StockTrackingMode @default(PER_SALE)
   // Bought and recorded as an expense when goods are received (cooking gas, wipes):
   // never stocked, no stock movements, costed to an expense category instead.
-  isExpenseItem       Boolean  @default(false)
-  expenseCategoryId   String?
-  expenseCategory     ExpenseCategory? @relation(fields: [expenseCategoryId], references: [id], onDelete: SetNull)
-  shelfLifeDays Int?
+  isExpenseItem     Boolean           @default(false)
+  expenseCategoryId String?
+  expenseCategory   ExpenseCategory?  @relation(fields: [expenseCategoryId], references: [id], onDelete: SetNull)
+  shelfLifeDays     Int?
 
   // Pack / container tracking (bar bottles, kegs, cases). When packSize +
   // packUnitId are set the product's stock, recipe quantities and POS
@@ -2559,6 +2580,7 @@ model Location {
   roomConsumableUsages   RoomConsumableUsage[]
   mpesaConfig            LocationMpesaConfig?
   mpesaStkRequests       MpesaStkRequest[]
+  websiteBookingSites    TenantWebsite[]        @relation("WebsiteBookingLocation")
 
   @@unique([tenantId, name])
 }
@@ -2613,6 +2635,7 @@ enum MpesaStkPurpose {
   FOLIO_SETTLEMENT
   GROUP_CHECKOUT
   MEMBERSHIP_PAYMENT
+  WEBSITE_BOOKING
 }
 
 enum MpesaStkStatus {
@@ -2628,25 +2651,25 @@ enum MpesaStkStatus {
 // convention Transaction.sourceRefId already uses, so later phases (folio
 // deposits, group checkout...) reuse this table with no schema change.
 model MpesaStkRequest {
-  id                  String          @id @default(cuid())
-  tenantId            String
-  tenant              Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  locationId          String
-  location            Location        @relation(fields: [locationId], references: [id], onDelete: Restrict)
-  purpose             MpesaStkPurpose
-  purposeRefId        String
-  phoneNumber         String
-  amount              Decimal         @db.Decimal(12, 2)
-  merchantRequestId   String?
-  checkoutRequestId   String?         @unique
-  status              MpesaStkStatus  @default(PENDING)
-  resultCode          Int?
-  resultDesc          String?
-  mpesaReceiptNumber  String?
-  initiatedBy         String?
-  employee            Employee?       @relation(fields: [initiatedBy], references: [id], onDelete: SetNull)
-  createdAt           DateTime        @default(now())
-  updatedAt           DateTime        @updatedAt
+  id                 String          @id @default(cuid())
+  tenantId           String
+  tenant             Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  locationId         String
+  location           Location        @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  purpose            MpesaStkPurpose
+  purposeRefId       String
+  phoneNumber        String
+  amount             Decimal         @db.Decimal(12, 2)
+  merchantRequestId  String?
+  checkoutRequestId  String?         @unique
+  status             MpesaStkStatus  @default(PENDING)
+  resultCode         Int?
+  resultDesc         String?
+  mpesaReceiptNumber String?
+  initiatedBy        String?
+  employee           Employee?       @relation(fields: [initiatedBy], references: [id], onDelete: SetNull)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
 
   @@index([tenantId, purpose, purposeRefId])
   @@index([tenantId, status])
@@ -2658,18 +2681,21 @@ model MpesaStkRequest {
 // RESTAURANT categories are copied in on migration; MenuItem is repointed
 // here in a later phase.
 model MenuCategory {
-  id          String     @id @default(cuid())
-  tenantId    String
-  tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  name        String
-  description String?
-  imageUrl    String?
-  sortOrder   Int        @default(0)
-  isActive    Boolean    @default(true)
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-  menuItems   MenuItem[]
-  addons      Addon[]
+  id            String     @id @default(cuid())
+  tenantId      String
+  tenant        Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  imageUrl      String?
+  sortOrder     Int        @default(0)
+  isActive      Boolean    @default(true)
+  // Public website menu: opt-in per category; every active item in it is
+  // listed unless that item sets hideFromWebsite.
+  showOnWebsite Boolean    @default(false)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  menuItems     MenuItem[]
+  addons        Addon[]
 
   @@unique([tenantId, name])
   @@index([tenantId, isActive, sortOrder])
@@ -2712,6 +2738,8 @@ model MenuItem {
   // currently sellable (e.g. temporarily sold out).
   isActive             Boolean                       @default(true)
   isAvailable          Boolean                       @default(true)
+  // Opt-out from the public website menu (see MenuCategory.showOnWebsite).
+  hideFromWebsite      Boolean                       @default(false)
   sortOrder            Int                           @default(0)
   createdAt            DateTime                      @default(now())
   updatedAt            DateTime                      @updatedAt
@@ -2788,87 +2816,87 @@ model MenuItemVariant {
 }
 
 model PosOrder {
-  id                         String                  @id @default(cuid())
-  tenantId                   String
-  reservationId              String?
+  id                          String                  @id @default(cuid())
+  tenantId                    String
+  reservationId               String?
   // Who this order is actually for — independent of tableId (which is just
   // informational: how many people are at that table) and independent of
   // whether/how it eventually gets paid. Set at creation when known, or
   // derived from the reservation's own guest if billed to a room at
   // settlement time.
-  customerId                 String?
-  tableId                    String?
-  locationId                 String?
+  customerId                  String?
+  tableId                     String?
+  locationId                  String?
   // Orders created from one mixed-location bill share this token. Each
   // child order still follows its own location workflow, while settlement UI
   // can later treat the group as one bill.
-  billGroupId                String?
+  billGroupId                 String?
   // The employee who rang this order up. Plain id, no relation — same
   // convention as cancelRequestedBy/cancelDecidedBy below — so a waiter's
   // order list can be scoped to their own (GET /orders restricts to
   // createdBy unless the caller holds POS_VIEW_ALL_ORDERS or an approval
   // capability). Null on anything created before this field existed.
-  createdBy                  String?
-  orderNumber                Int
-  status                     PosOrderStatus          @default(OPEN)
-  channel                    PosOrderChannel         @default(FOOD)
-  saleType                   PosOrderSaleType        @default(SALE)
-  complimentarySessionId     String?
-  complimentarySession       ComplimentarySession?   @relation(fields: [complimentarySessionId], references: [id], onDelete: SetNull)
-  complimentaryOrderRole     ComplimentaryOrderRole?
-  complimentaryReason        String?
-  complimentaryRecipientName String?
-  discount                   Decimal                 @default(0) @db.Decimal(12, 2)
-  notes                      String?
+  createdBy                   String?
+  orderNumber                 Int
+  status                      PosOrderStatus          @default(OPEN)
+  channel                     PosOrderChannel         @default(FOOD)
+  saleType                    PosOrderSaleType        @default(SALE)
+  complimentarySessionId      String?
+  complimentarySession        ComplimentarySession?   @relation(fields: [complimentarySessionId], references: [id], onDelete: SetNull)
+  complimentaryOrderRole      ComplimentaryOrderRole?
+  complimentaryReason         String?
+  complimentaryRecipientName  String?
+  discount                    Decimal                 @default(0) @db.Decimal(12, 2)
+  notes                       String?
   // Who moved the ticket through the kitchen, and when it was claimed.
-  preparingAt                DateTime?
-  preparingBy                String?
-  readyAt                    DateTime?
-  readyBy                    String?
-  servedAt                   DateTime?
+  preparingAt                 DateTime?
+  preparingBy                 String?
+  readyAt                     DateTime?
+  readyBy                     String?
+  servedAt                    DateTime?
   // Cancellation approval trail. A cancel request records the reason, who
   // asked, and the status to fall back to if an admin rejects it; the
   // decision fields are filled when an admin approves or rejects.
-  cancelReason               String?
-  cancelRequestedBy          String?
-  cancelRequestedAt          DateTime?
-  cancelDecidedBy            String?
-  cancelDecidedAt            DateTime?
-  cancelDecisionNote         String?
-  statusBeforeCancel         PosOrderStatus?
+  cancelReason                String?
+  cancelRequestedBy           String?
+  cancelRequestedAt           DateTime?
+  cancelDecidedBy             String?
+  cancelDecidedAt             DateTime?
+  cancelDecisionNote          String?
+  statusBeforeCancel          PosOrderStatus?
   // Money state, kept apart from `status`: an order can be COMPLETED and
   // still UNPAID/PARTIAL when finished on credit.
-  paymentStatus              PosPaymentStatus        @default(UNPAID)
-  creditReason               String?
-  creditExpectedAt           DateTime?
-  billedToRoomAt             DateTime?
+  paymentStatus               PosPaymentStatus        @default(UNPAID)
+  creditReason                String?
+  creditExpectedAt            DateTime?
+  billedToRoomAt              DateTime?
   // When the sale was completed (paid in full, put on credit, or billed to a room) - fixed at that
   // moment and never touched again. Reports place a sale in its business day by this, NOT by
   // updatedAt, which moves whenever the order is edited or a debt on it is paid off later.
-  completedAt                DateTime?
-  billedToRoomBy             String?
-  roomBillSettledAt          DateTime?
-  roomBillSettledBy          String?
-  roomBillSettlementLocation String?
-  roomBillSettlementMethod   String?
+  completedAt                 DateTime?
+  billedToRoomBy              String?
+  roomBillSettledAt           DateTime?
+  roomBillSettledBy           String?
+  roomBillSettlementLocation  String?
+  roomBillSettlementMethod    String?
   roomBillSettlementReference String?
   // Opaque token for a public, no-auth receipt page. Minted on first Share,
   // reused thereafter. Globally unique so the public route needs no tenant.
-  shareToken                 String?                 @unique
-  createdAt                  DateTime                @default(now())
-  updatedAt                  DateTime                @updatedAt
-  tenant                     Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  reservation                Reservation?            @relation(fields: [reservationId], references: [id], onDelete: SetNull)
-  customer                   Customer?               @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  table                      Table?                  @relation(fields: [tableId], references: [id], onDelete: SetNull)
-  location                   Location?               @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  items                      PosOrderItem[]
-  dispatchRequests           StockDispatchRequest[]
-  payments                   Payment[]
-  creditEntries              CustomerCreditEntry[]
-  returnRequests             PosOrderReturnRequest[]
-  printJobs                  PrintJob[]
-  appointment                Appointment?
+  shareToken                  String?                 @unique
+  createdAt                   DateTime                @default(now())
+  updatedAt                   DateTime                @updatedAt
+  tenant                      Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reservation                 Reservation?            @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+  customer                    Customer?               @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  table                       Table?                  @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  location                    Location?               @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  items                       PosOrderItem[]
+  dispatchRequests            StockDispatchRequest[]
+  payments                    Payment[]
+  creditEntries               CustomerCreditEntry[]
+  returnRequests              PosOrderReturnRequest[]
+  printJobs                   PrintJob[]
+  appointment                 Appointment?
 
   @@unique([tenantId, orderNumber])
   @@index([tenantId, status, createdAt])
@@ -3058,20 +3086,20 @@ model Printer {
 // A record of an order that was reverted (deleted from the sales). Kept so the
 // Approvals tab can show what was taken off the books, by whom, and what stock came back.
 model PosOrderRevert {
-  id            String   @id @default(cuid())
-  tenantId      String
-  orderNumber   Int
-  locationName  String?
-  tableLabel    String?
-  orderStatus   String
-  total         Decimal  @db.Decimal(12, 2)
-  items         Json
-  dispatchNos   String[] @default([])
-  createdById   String?
-  createdByName String?
-  revertedById  String?
+  id             String   @id @default(cuid())
+  tenantId       String
+  orderNumber    Int
+  locationName   String?
+  tableLabel     String?
+  orderStatus    String
+  total          Decimal  @db.Decimal(12, 2)
+  items          Json
+  dispatchNos    String[] @default([])
+  createdById    String?
+  createdByName  String?
+  revertedById   String?
   revertedByName String?
-  revertedAt    DateTime @default(now())
+  revertedAt     DateTime @default(now())
 
   @@index([tenantId, revertedAt])
 }
@@ -3441,9 +3469,9 @@ model Employee {
 
   // System / till login. Staff with no system access (gatemen, cleaners) have
   // no PIN and can't sign in, but are still recorded for attendance and payroll.
-  employeeCode     String
-  hasSystemAccess  Boolean @default(true)
-  pin              String?
+  employeeCode    String
+  hasSystemAccess Boolean @default(true)
+  pin             String?
 
   // Emergency contact
   emergencyContactName  String?
@@ -3722,10 +3750,10 @@ model BusinessProfile {
   tenantId String @unique
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  logoUrl   String?
+  logoUrl              String?
   documentLogoUrl      String?
   documentBrandingMode String  @default("NAME")
-  shortName String?
+  shortName            String?
 
   themeBaseColor   String @default("#1c74d1")
   themeAccentColor String @default("#43a047")
@@ -3799,37 +3827,37 @@ model PlatformSession {
 }
 
 model Membership {
-  id              String              @id @default(cuid())
-  tenantId        String
-  customerId      String
+  id                 String              @id @default(cuid())
+  tenantId           String
+  customerId         String
   // The catalog plan it was sold from (null = a one-off). The name/price/
   // duration/discount below are always the snapshot actually sold, so editing
   // a plan never changes a member already on it.
-  planId          String?
-  plan            MembershipPlan?     @relation(fields: [planId], references: [id], onDelete: SetNull)
-  planName        String
-  planPrice       Decimal             @default(0) @db.Decimal(12, 2)
-  durationDays    Int                 @default(30)
-  discountPercent Decimal             @default(0) @db.Decimal(5, 2)
-  visitLimit      Int?
-  discountOnProducts Boolean          @default(false)
-  visits          MembershipVisit[]
-  startsAt        DateTime
-  endsAt          DateTime
-  status          MembershipStatus    @default(ACTIVE)
+  planId             String?
+  plan               MembershipPlan?     @relation(fields: [planId], references: [id], onDelete: SetNull)
+  planName           String
+  planPrice          Decimal             @default(0) @db.Decimal(12, 2)
+  durationDays       Int                 @default(30)
+  discountPercent    Decimal             @default(0) @db.Decimal(5, 2)
+  visitLimit         Int?
+  discountOnProducts Boolean             @default(false)
+  visits             MembershipVisit[]
+  startsAt           DateTime
+  endsAt             DateTime
+  status             MembershipStatus    @default(ACTIVE)
   // Set the moment a membership is paused, cleared on resume - lets a resume
   // push endsAt out by exactly how long it was paused, so paused days are
   // never silently eaten out of a member's paid-for term.
-  pausedAt        DateTime?
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer        Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  payments        MembershipPayment[]
-  appointments    Appointment[]
+  pausedAt           DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer           Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  payments           MembershipPayment[]
+  appointments       Appointment[]
   // Where the membership was registered. Set when it is created; payments carry their own location too.
-  locationId      String?
-  location        Location?           @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  locationId         String?
+  location           Location?           @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, customerId, status])
   @@index([tenantId, locationId])
@@ -3851,22 +3879,25 @@ model MembershipVisit {
 }
 
 model MembershipPlan {
-  id              String       @id @default(cuid())
-  tenantId        String
-  name            String
-  price           Decimal      @default(0) @db.Decimal(12, 2)
-  durationDays    Int          @default(30)
-  discountPercent Decimal      @default(0) @db.Decimal(5, 2)
-  description     String?
+  id                 String       @id @default(cuid())
+  tenantId           String
+  name               String
+  price              Decimal      @default(0) @db.Decimal(12, 2)
+  durationDays       Int          @default(30)
+  discountPercent    Decimal      @default(0) @db.Decimal(5, 2)
+  description        String?
   // Max visits per membership term (null = unlimited). Frozen onto each membership sold.
-  visitLimit      Int?
+  visitLimit         Int?
   // Whether the % discount also applies to retail product sales, not just services.
-  discountOnProducts Boolean   @default(false)
-  isActive        Boolean      @default(true)
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
-  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  memberships     Membership[]
+  discountOnProducts Boolean      @default(false)
+  isActive           Boolean      @default(true)
+  // Public website: opt-in; highlights are the bullet points on the plan card.
+  showOnWebsite      Boolean      @default(false)
+  highlights         String[]     @default([])
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  tenant             Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberships        Membership[]
 
   @@unique([tenantId, name])
   @@index([tenantId, isActive])
@@ -3925,6 +3956,13 @@ model Appointment {
   // Once set, the appointment is finalized — see the routes for what that blocks.
   orderId          String?           @unique
   notes            String?
+  source           AppointmentSource @default(STAFF)
+  // Website bookings: bookingRef is the guest-facing reference, manageToken
+  // the secret in their "manage my booking" link, holdExpiresAt releases an
+  // unpaid online hold.
+  bookingRef       String?
+  manageToken      String?           @unique
+  holdExpiresAt    DateTime?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -3937,7 +3975,219 @@ model Appointment {
   location         Location?         @relation(fields: [locationId], references: [id], onDelete: SetNull)
   order            PosOrder?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
+  @@unique([tenantId, bookingRef])
   @@index([tenantId, startsAt, status])
   @@index([tenantId, providerId, startsAt])
   @@index([tenantId, serviceId])
+}
+
+enum AppointmentSource {
+  STAFF
+  WEBSITE
+}
+
+// ─── Public website module ────────────────────────────────────────────────
+// A tenant with the WEBSITE module gets a public site at
+// <slug>.SITE_DOMAIN, plus any custom domains (TenantDomain). Its look comes
+// from a WebsiteTheme; its content from WebsitePage section blocks and the
+// showOnWebsite flags on rooms/menu/services/plans. Contact details are read
+// from BusinessProfile, never duplicated here.
+
+enum WebsiteStatus {
+  DRAFT
+  PUBLISHED
+  SUSPENDED
+}
+
+enum WebsiteBookingConfirmation {
+  AUTO // confirmed the moment it's made (and paid, if payment is required)
+  MANUAL // lands as pending until staff confirm it
+}
+
+enum WebsiteDomainStatus {
+  PENDING_DNS
+  VERIFYING
+  ACTIVE
+  FAILED
+}
+
+enum WebsitePageKind {
+  HOME // exactly one per tenant, slug "home"
+  STANDARD // free-form page built from section blocks
+  SYSTEM // rooms, menu, services... — data-driven, sections only add intro/extra blocks
+}
+
+enum WebsiteInquiryKind {
+  GENERAL
+  EVENT
+  ROOM
+  SERVICE
+  MEMBERSHIP
+}
+
+enum WebsiteInquiryStatus {
+  NEW
+  CONTACTED
+  CLOSED
+  SPAM
+}
+
+// Platform-wide catalog — not tenant-scoped. key is also the theme's folder
+// name in the WEBSITE app (src/themes/<key>).
+model WebsiteTheme {
+  key             String          @id
+  name            String
+  description     String?
+  version         String          @default("1.0.0")
+  previewImageUrl String?
+  // Section block types this theme can render — the platform editor only
+  // offers these.
+  sectionTypes    String[]        @default([])
+  isActive        Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  websites        TenantWebsite[]
+}
+
+model TenantWebsite {
+  id          String        @id @default(cuid())
+  tenantId    String        @unique
+  themeKey    String
+  status      WebsiteStatus @default(DRAFT)
+  publishedAt DateTime?
+
+  // Branding — null inherits BusinessProfile (themeBaseColor, themeAccentColor,
+  // themeFont, logoUrl, businessName).
+  primaryColor String?
+  accentColor  String?
+  fontFamily   String?
+  logoUrl      String?
+  faviconUrl   String?
+  siteTitle    String?
+  tagline      String?
+
+  // SEO defaults, overridable per page.
+  seoTitle       String?
+  seoDescription String?
+  ogImageUrl     String?
+  analyticsId    String?
+
+  // Extra contact bits BusinessProfile doesn't have.
+  whatsappNumber String?
+  mapEmbedUrl    String?
+  latitude       Decimal? @db.Decimal(9, 6)
+  longitude      Decimal? @db.Decimal(9, 6)
+  // { facebook, instagram, x, tiktok, youtube, tripadvisor, ... } → URL
+  socialLinks    Json     @default("{}")
+
+  // Feature flags — each one also needs its underlying module enabled
+  // (ROOMS / POS / SERVICE_CENTER); the public API checks both.
+  featureRoomBooking  Boolean @default(false)
+  featureMenu         Boolean @default(false)
+  featureAppointments Boolean @default(false)
+  featureMemberships  Boolean @default(false)
+  featureInquiries    Boolean @default(true)
+
+  // Online booking rules.
+  bookingConfirmation WebsiteBookingConfirmation @default(MANUAL)
+  requirePayment      Boolean                    @default(false)
+  // Share of the total collected online when requirePayment is on (100 = full).
+  depositPercent      Decimal                    @default(100) @db.Decimal(5, 2)
+  // How long an unpaid online booking holds its slot/room.
+  holdMinutes         Int                        @default(30)
+  // Which selling point web bookings are filed under (null = none).
+  bookingLocationId   String?
+
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  theme           WebsiteTheme @relation(fields: [themeKey], references: [key], onDelete: Restrict)
+  bookingLocation Location?    @relation("WebsiteBookingLocation", fields: [bookingLocationId], references: [id], onDelete: SetNull)
+
+  @@index([themeKey])
+}
+
+// A custom domain (www.omegahotel.co.ke) pointed at the tenant's site. The
+// <slug>.SITE_DOMAIN subdomain is implicit and never stored here.
+model TenantDomain {
+  id                String              @id @default(cuid())
+  tenantId          String
+  hostname          String              @unique // lowercase, no scheme/port
+  isPrimary         Boolean             @default(false)
+  status            WebsiteDomainStatus @default(PENDING_DNS)
+  // Expected in a TXT record at _hotelier-verify.<hostname>.
+  verificationToken String              @default(uuid())
+  verifiedAt        DateTime?
+  lastCheckedAt     DateTime?
+  lastError         String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  tenant            Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+model WebsitePage {
+  id             String          @id @default(cuid())
+  tenantId       String
+  slug           String // "home", "about", "rooms"... — URL path segment
+  title          String
+  kind           WebsitePageKind @default(STANDARD)
+  // Ordered section blocks: [{ id, type: "hero", props: {...} }, ...]. type
+  // must be one of the theme's sectionTypes. sections is what's live;
+  // draftSections is the unpublished working copy (null = no pending edits).
+  sections       Json            @default("[]")
+  draftSections  Json?
+  seoTitle       String?
+  seoDescription String?
+  ogImageUrl     String?
+  showInNav      Boolean         @default(true)
+  sortOrder      Int             @default(0)
+  isPublished    Boolean         @default(false)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, isPublished, sortOrder])
+}
+
+model WebsiteMedia {
+  id        String   @id @default(cuid())
+  tenantId  String
+  url       String
+  fileName  String
+  mimeType  String
+  sizeBytes Int
+  width     Int?
+  height    Int?
+  altText   String?
+  tags      String[] @default([])
+  createdAt DateTime @default(now())
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+}
+
+// Contact-form / event / "tell me more" leads from the public site.
+model WebsiteInquiry {
+  id         String               @id @default(cuid())
+  tenantId   String
+  kind       WebsiteInquiryKind   @default(GENERAL)
+  status     WebsiteInquiryStatus @default(NEW)
+  name       String
+  email      String?
+  phone      String?
+  subject    String?
+  message    String
+  // Kind-specific extras: event date + headcount, the plan/service asked about...
+  details    Json?
+  sourcePage String?
+  customerId String?
+  createdAt  DateTime             @default(now())
+  updatedAt  DateTime             @updatedAt
+  tenant     Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer   Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status, createdAt])
 }
