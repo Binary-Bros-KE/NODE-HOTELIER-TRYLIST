@@ -98,8 +98,9 @@ const RESERVED_SLUGS = new Set([
   "www", "api", "server", "admin", "platform", "app", "dashboard",
   "mail", "ftp", "cdn", "assets", "static", "status", "staging", "dev",
   "docs", "blog", "help", "support", "hotelier",
-  // Public tenant websites live under <slug>.site.APP_DOMAIN (SITE_DOMAIN).
-  "site",
+  // Public tenant websites live under <slug>.site.APP_DOMAIN (SITE_DOMAIN);
+  // clients' own domains CNAME to sites.APP_DOMAIN.
+  "site", "sites",
 ]);
 
 const slugSchema = z.string().trim().toLowerCase().min(3).max(63)
