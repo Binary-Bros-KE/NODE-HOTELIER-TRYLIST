@@ -14,11 +14,18 @@ import { platformRouter } from "./modules/platform/platform.routes.js";
 import { publicReceiptsRouter } from "./modules/public-receipts/public-receipts.routes.js";
 import { downloadsRouter } from "./modules/downloads/downloads.routes.js";
 import { mpesaCallbackRouter } from "./modules/mpesa/mpesa-callback.routes.js";
+import { publicSiteRouter } from "./modules/public-site/public-site.routes.js";
 
 export function createApp(): Application {
   const app = express();
 
   app.use(helmet());
+
+  // Public tenant websites — mounted ahead of the CORS policy below, which
+  // only admits APP_DOMAIN hosts and would reject a tenant's custom domain.
+  // Open to any origin, never with credentials: nothing here is session-based.
+  app.use("/public/site", cors({ origin: true, credentials: false }), express.json({ limit: "32kb" }), publicSiteRouter);
+
   app.use(
     cors({
       // In production every tenant (and the platform admin app) is served

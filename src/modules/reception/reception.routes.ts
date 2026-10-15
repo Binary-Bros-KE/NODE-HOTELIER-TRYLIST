@@ -15,6 +15,7 @@ import { createRoomTask } from "../../lib/housekeeping.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 import { nairobiParts } from "../../lib/shifts.js";
+import { roomIsAvailable } from "../../lib/roomAvailability.js";
 
 export const receptionRouter = Router();
 
@@ -30,7 +31,6 @@ const optionalText = (max: number) => z.preprocess(blankToUndefined, z.string().
 
 const RESERVATION_SOURCES = ["WALK_IN", "PHONE", "WEBSITE", "BOOKING_ENGINE", "TRAVEL_AGENT", "OTA", "CORPORATE", "OTHER"] as const;
 const CANCELLATION_REASONS = ["CHANGED_MIND", "NO_SHOW", "FOUND_ALTERNATIVE", "DUPLICATE_BOOKING", "HOTEL_CANCELLED", "OTHER"] as const;
-const OPEN_RESERVATION_STATUSES = ["PENDING", "CONFIRMED", "CHECKED_IN"] as const;
 const MEAL_PLANS = ["ROOM_ONLY", "BED_AND_BREAKFAST", "HALF_BOARD", "FULL_BOARD"] as const;
 
 const CUSTOMER_TYPES = ["PERSONAL", "BUSINESS"] as const;
@@ -281,10 +281,6 @@ receptionRouter.delete("/customers/:id", async (req, res) => { const customer = 
 // Full Room/RoomType CRUD lives in rooms.routes.ts (mounted at /rooms) — this
 // is read-only, kept here only for the reservation form's room picker.
 receptionRouter.get("/rooms", async (req, res) => res.json({ rooms: await prisma.room.findMany({ where: { tenantId: tenantId(req) }, include: { roomType: true }, orderBy: { number: "asc" } }) }));
-
-async function roomIsAvailable(scope: { tenantId: string; roomId: string; checkIn: Date; checkOut: Date; excludeId?: string }) {
-  return !(await prisma.reservation.findFirst({ where: { tenantId: scope.tenantId, roomId: scope.roomId, status: { in: [...OPEN_RESERVATION_STATUSES] }, checkIn: { lt: scope.checkOut }, checkOut: { gt: scope.checkIn }, ...(scope.excludeId ? { id: { not: scope.excludeId } } : {}) } }));
-}
 
 const reservationInclude = {
   customer: true,
