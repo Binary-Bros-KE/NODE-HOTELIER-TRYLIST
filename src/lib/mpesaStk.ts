@@ -2,6 +2,7 @@ import { prisma } from "./prisma.js";
 import { nextTransactionNo } from "./sequence.js";
 import { taxSettingsFor, orderInclude, applyOrderPayment } from "../modules/pos/pos.routes.js";
 import { computeOrderFinancials } from "./orderTotals.js";
+import { recordBookingPayment } from "../modules/public-site/bookings.js";
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
@@ -18,6 +19,22 @@ export async function applyStkResult(requestId: string, outcome: StkOutcome): Pr
   if (outcome.resultCode !== 0) {
     const status = outcome.resultCode === 1032 ? "CANCELLED" : outcome.resultCode === 1037 || outcome.resultCode === 1019 ? "TIMEOUT" : "FAILED";
     await prisma.mpesaStkRequest.update({ where: { id: row.id }, data: { status, resultCode: outcome.resultCode, resultDesc: outcome.resultDesc } });
+    return;
+  }
+
+  if (row.purpose === "WEBSITE_BOOKING") {
+    try {
+      await prisma.$transaction(async (tx) => {
+        await recordBookingPayment(tx, row, outcome.mpesaReceiptNumber);
+        await tx.mpesaStkRequest.update({ where: { id: row.id }, data: { status: "SUCCESS", resultCode: 0, resultDesc: outcome.resultDesc, mpesaReceiptNumber: outcome.mpesaReceiptNumber } });
+      });
+    } catch (error) {
+      // Same rule as the POS: the money arrived — keep the receipt visible for manual settlement.
+      await prisma.mpesaStkRequest.update({
+        where: { id: row.id },
+        data: { status: "SUCCESS", resultCode: 0, resultDesc: `Paid but could not auto-apply: ${error instanceof Error ? error.message : "unknown error"}`, mpesaReceiptNumber: outcome.mpesaReceiptNumber },
+      });
+    }
     return;
   }
 

@@ -5,6 +5,8 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { freeRoomsByType } from "../../lib/roomAvailability.js";
 import { nairobiParts } from "../../lib/shifts.js";
+import { bookingRules } from "./bookings.js";
+import { publicBookingsRouter } from "./bookings.routes.js";
 import { normaliseHost, requireFeature, requireSite, siteFeatures, tenantIdForHost } from "./site.js";
 
 /**
@@ -79,6 +81,7 @@ publicSiteRouter.get("/resolve", async (req, res) => {
       },
       social: w.socialLinks,
       features: siteFeatures(site),
+      booking: bookingRules(site),
       nav: pages,
       preview: site.preview,
     },
@@ -253,3 +256,6 @@ publicSiteRouter.get("/memberships", requireFeature("memberships"), async (req, 
   cacheable(res);
   res.json({ plans: plans.map((p) => ({ ...p, price: Number(p.price), discountPercent: Number(p.discountPercent) })) });
 });
+
+// Bookings, appointment requests, enquiries and "manage my booking".
+publicSiteRouter.use(publicBookingsRouter);

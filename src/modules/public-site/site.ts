@@ -25,6 +25,8 @@ export type PublicSite = {
   modules: Set<ModuleKey>;
   /** A platform admin's preview: unpublished site, draft page content, never cached. */
   preview: boolean;
+  /** The booking location has active M-Pesa credentials, so online deposits can be taken. */
+  paymentReady: boolean;
 };
 
 // ─── Draft previews ───────────────────────────────────────────────────────
@@ -108,6 +110,10 @@ async function loadSite(host: string, previewFor: string | null = null): Promise
     },
   });
   if (!tenant?.website || (tenant.website.status !== "PUBLISHED" && !preview)) return null;
+  const bookingLocationId = tenant.website.bookingLocationId;
+  const paymentReady = bookingLocationId
+    ? (await prisma.locationMpesaConfig.count({ where: { tenantId: tenant.id, locationId: bookingLocationId, isActive: true } })) > 0
+    : false;
   return {
     tenantId: tenant.id,
     slug: tenant.slug,
@@ -117,6 +123,7 @@ async function loadSite(host: string, previewFor: string | null = null): Promise
     profile: tenant.businessProfile,
     modules: new Set(tenant.tenantModules.map((m) => m.moduleKey)),
     preview,
+    paymentReady,
   };
 }
 

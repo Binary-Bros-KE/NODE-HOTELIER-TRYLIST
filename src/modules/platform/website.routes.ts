@@ -33,7 +33,7 @@ function invalid(res: Response, label: string, error: z.ZodError) {
 // others are built-in pages whose WebsitePage row only adds intro/extra blocks.
 const SYSTEM_SLUGS = ["rooms", "dining", "services", "memberships", "contact"] as const;
 // Paths the WEBSITE app itself uses — never a page slug.
-const RESERVED_SLUGS = new Set(["site-preview", "api", "uploads", "_next", "sitemap.xml", "robots.txt"]);
+const RESERVED_SLUGS = new Set(["site-preview", "api", "uploads", "_next", "sitemap.xml", "robots.txt", "book", "booking"]);
 
 function kindForSlug(slug: string): "HOME" | "SYSTEM" | "STANDARD" {
   if (slug === "home") return "HOME";
@@ -89,6 +89,7 @@ const settingsSchema = z.object({
   bookingConfirmation: z.enum(["AUTO", "MANUAL"]).default("MANUAL"),
   requirePayment: z.boolean().default(false),
   depositPercent: z.coerce.number().min(1).max(100).default(100),
+  depositMinimum: z.coerce.number().min(0).max(10_000_000).default(0),
   holdMinutes: z.coerce.number().int().min(5).max(24 * 60).default(30),
   bookingLocationId: z.preprocess(blankToNull, z.string().trim().min(1).nullable()).default(null),
 });
@@ -427,6 +428,29 @@ websiteAdminRouter.delete("/media/:mediaId", async (req, res) => {
   await prisma.websiteMedia.delete({ where: { id: media.id } });
   const file = path.resolve(process.cwd(), media.url.replace(/^\//, ""));
   if (file.startsWith(MEDIA_ROOT + path.sep)) await fs.promises.rm(file, { force: true });
+  res.status(204).send();
+});
+
+// ─── Enquiries ────────────────────────────────────────────────────────────
+// Read here until hotel staff get their own inbox (see the plan's
+// communications item).
+
+websiteAdminRouter.get("/inquiries", async (req, res) => {
+  const status = z.enum(["NEW", "CONTACTED", "CLOSED", "SPAM"]).optional().safeParse(req.query.status || undefined);
+  res.json({
+    inquiries: await prisma.websiteInquiry.findMany({
+      where: { tenantId: tid(req), ...(status.success && status.data ? { status: status.data } : {}) },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    }),
+  });
+});
+
+websiteAdminRouter.patch("/inquiries/:inquiryId", async (req, res) => {
+  const parsed = z.object({ status: z.enum(["NEW", "CONTACTED", "CLOSED", "SPAM"]) }).safeParse(req.body);
+  if (!parsed.success) { invalid(res, "status", parsed.error); return; }
+  const updated = await prisma.websiteInquiry.updateMany({ where: { id: pid(req, "inquiryId"), tenantId: tid(req) }, data: parsed.data });
+  if (!updated.count) { res.status(404).json({ error: "Enquiry not found" }); return; }
   res.status(204).send();
 });
 

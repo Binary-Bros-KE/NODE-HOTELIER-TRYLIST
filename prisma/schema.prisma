@@ -4093,6 +4093,9 @@ model TenantWebsite {
   requirePayment      Boolean                    @default(false)
   // Share of the total collected online when requirePayment is on (100 = full).
   depositPercent      Decimal                    @default(100) @db.Decimal(5, 2)
+  // Floor for the deposit, in the tenant's currency: the guest pays the larger
+  // of depositPercent of the stay and this, never more than the stay itself.
+  depositMinimum      Decimal                    @default(0) @db.Decimal(12, 2)
   // How long an unpaid online booking holds its slot/room.
   holdMinutes         Int                        @default(30)
   // Which selling point web bookings are filed under (null = none).

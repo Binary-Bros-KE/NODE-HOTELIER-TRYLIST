@@ -596,6 +596,24 @@ receptionRouter.patch("/reservations/:id/check-in", async (req, res) => {
   res.json({ reservation });
 });
 
+/** Pending → Confirmed: staff accept a booking request (online or phone). Also
+ * ends any online payment hold, so an accepted booking is never auto-released.
+ * (Guest notification on acceptance hooks in here — see the communications
+ * item in the website plan.) */
+receptionRouter.patch("/reservations/:id/confirm", async (req, res) => {
+  const tid = tenantId(req);
+  const current = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid } });
+  if (!current) { res.status(404).json({ error: "Reservation not found" }); return; }
+  if (current.status !== "PENDING") { res.status(409).json({ error: "Only a pending reservation can be confirmed" }); return; }
+  const actor = await resolveActor(tid, req);
+  const reservation = await prisma.$transaction(async (tx) => {
+    await tx.reservation.update({ where: { id: current.id }, data: { status: "CONFIRMED", holdExpiresAt: null, updatedBy: req.userId } });
+    await logActivity(tx, tid, current.id, "UPDATED", "Reservation confirmed", actor);
+    return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
+  });
+  res.json({ reservation });
+});
+
 receptionRouter.patch("/reservations/:id/cancel", async (req, res) => {
   const data = cancelSchema.safeParse(req.body);
   if (!data.success) { invalid(res, "cancellation", data.error.flatten()); return; }
