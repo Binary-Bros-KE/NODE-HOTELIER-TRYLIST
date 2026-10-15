@@ -10,6 +10,7 @@ import { verifySecret } from "../../lib/hash.js";
 import { provisionTenantBootstrap, isEnabledFor, MODULE_KEYS, MODULE_GROUP_KEYS, type ModuleGroups } from "../../lib/tenantBootstrap.js";
 import { platformAuth } from "./platform.auth.js";
 import { adminsRouter } from "./admins.routes.js";
+import { websiteAdminRouter } from "./website.routes.js";
 import { plansRouter } from "../plans/plans.routes.js";
 
 // Tenant creation and license management for TANZ staff — a standalone
@@ -80,6 +81,9 @@ platformRouter.use("/plans", plansRouter);
 
 // Platform admin accounts — see admins.routes.ts.
 platformRouter.use("/admins", adminsRouter);
+
+// A tenant's public website — see website.routes.ts.
+platformRouter.use("/tenants/:tenantId/website", websiteAdminRouter);
 
 // Slugs that must never be handed to a real tenant — they either collide
 // with a real hostname this system already answers on (the platform admin

@@ -20,9 +20,9 @@ export const publicSiteRouter = Router();
 
 const money = (value: Prisma.Decimal | null | undefined) => (value == null ? null : Number(value));
 
-/** Short shared caching for content that's fine a minute stale. */
+/** Short shared caching for content that's fine a minute stale — never for a preview. */
 function cacheable(res: Response): void {
-  res.setHeader("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+  res.setHeader("Cache-Control", res.req.site?.preview ? "no-store" : "public, max-age=60, stale-while-revalidate=300");
 }
 
 // Caddy's on-demand TLS "ask" endpoint: 200 = issue a certificate for this
@@ -41,7 +41,7 @@ publicSiteRouter.get("/resolve", async (req, res) => {
   const site = req.site!;
   const { website: w, profile: p } = site;
   const pages = await prisma.websitePage.findMany({
-    where: { tenantId: site.tenantId, isPublished: true, showInNav: true },
+    where: { tenantId: site.tenantId, showInNav: true, ...(site.preview ? {} : { isPublished: true }) },
     orderBy: [{ sortOrder: "asc" }, { title: "asc" }],
     select: { slug: true, title: true, kind: true },
   });
@@ -80,18 +80,22 @@ publicSiteRouter.get("/resolve", async (req, res) => {
       social: w.socialLinks,
       features: siteFeatures(site),
       nav: pages,
+      preview: site.preview,
     },
   });
 });
 
 publicSiteRouter.get("/pages/:slug", async (req, res) => {
+  const site = req.site!;
   const page = await prisma.websitePage.findFirst({
-    where: { tenantId: req.site!.tenantId, slug: req.params.slug.toLowerCase(), isPublished: true },
-    select: { slug: true, title: true, kind: true, sections: true, seoTitle: true, seoDescription: true, ogImageUrl: true },
+    where: { tenantId: site.tenantId, slug: req.params.slug.toLowerCase(), ...(site.preview ? {} : { isPublished: true }) },
+    select: { slug: true, title: true, kind: true, sections: true, draftSections: true, seoTitle: true, seoDescription: true, ogImageUrl: true },
   });
   if (!page) { res.status(404).json({ error: "Page not found" }); return; }
+  const { draftSections, ...live } = page;
   cacheable(res);
-  res.json({ page });
+  // A preview shows the working copy when there is one.
+  res.json({ page: site.preview && draftSections != null ? { ...live, sections: draftSections } : live });
 });
 
 // ─── Rooms ────────────────────────────────────────────────────────────────

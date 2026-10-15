@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import type { BusinessProfile, ModuleKey, TenantWebsite } from "@prisma/client";
 
@@ -22,7 +23,38 @@ export type PublicSite = {
   website: TenantWebsite;
   profile: BusinessProfile | null;
   modules: Set<ModuleKey>;
+  /** A platform admin's preview: unpublished site, draft page content, never cached. */
+  preview: boolean;
 };
+
+// ─── Draft previews ───────────────────────────────────────────────────────
+// The platform admin hands out a signed, expiring link; the WEBSITE app turns
+// it into a cookie and forwards it as x-site-preview. A valid token for the
+// host's own tenant lets that request see an unpublished site and draft pages.
+
+const PREVIEW_TTL_MS = 24 * 60 * 60 * 1000;
+
+function previewSignature(payload: string): Buffer {
+  return createHmac("sha256", env.SECRETS_ENCRYPTION_KEY).update(`site-preview:${payload}`).digest();
+}
+
+export function createPreviewToken(tenantId: string, now = Date.now()): string {
+  const payload = `${tenantId}.${now + PREVIEW_TTL_MS}`;
+  return `${Buffer.from(payload).toString("base64url")}.${previewSignature(payload).toString("base64url")}`;
+}
+
+/** The tenant a preview token was issued for, or null if it's forged or expired. */
+export function previewTenantId(token: string | undefined): string | null {
+  if (!token || token.length > 300) return null;
+  const [encoded, signature] = token.split(".");
+  if (!encoded || !signature) return null;
+  const payload = Buffer.from(encoded, "base64url").toString();
+  const expected = previewSignature(payload);
+  const given = Buffer.from(signature, "base64url");
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  const [tenantId, expires] = payload.split(".");
+  return tenantId && Number(expires) > Date.now() ? tenantId : null;
+}
 
 /** Lowercase, no port, no trailing dot; null for anything that isn't a plausible hostname. */
 export function normaliseHost(raw: string | undefined): string | null {
@@ -61,9 +93,10 @@ export async function tenantIdForHost(host: string): Promise<string | null> {
   return domain?.tenantId ?? null;
 }
 
-async function loadSite(host: string): Promise<PublicSite | null> {
+async function loadSite(host: string, previewFor: string | null = null): Promise<PublicSite | null> {
   const tenantId = await tenantIdForHost(host);
   if (!tenantId) return null;
+  const preview = previewFor === tenantId;
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
     select: {
@@ -74,7 +107,7 @@ async function loadSite(host: string): Promise<PublicSite | null> {
       websiteDomains: { where: { status: "ACTIVE", isPrimary: true }, select: { hostname: true }, take: 1 },
     },
   });
-  if (!tenant?.website || tenant.website.status !== "PUBLISHED") return null;
+  if (!tenant?.website || (tenant.website.status !== "PUBLISHED" && !preview)) return null;
   return {
     tenantId: tenant.id,
     slug: tenant.slug,
@@ -83,6 +116,7 @@ async function loadSite(host: string): Promise<PublicSite | null> {
     website: tenant.website,
     profile: tenant.businessProfile,
     modules: new Set(tenant.tenantModules.map((m) => m.moduleKey)),
+    preview,
   };
 }
 
@@ -112,7 +146,9 @@ export function invalidateSiteCache(): void {
 export async function requireSite(req: Request, res: Response, next: NextFunction): Promise<void> {
   const host = normaliseHost(req.header("x-site-host") ?? (typeof req.query.host === "string" ? req.query.host : undefined));
   if (!host) { res.status(400).json({ error: "Missing site host" }); return; }
-  const site = await siteForHost(host);
+  // Previews skip the cache entirely — they must show the latest drafts.
+  const previewFor = previewTenantId(req.header("x-site-preview"));
+  const site = previewFor ? await loadSite(host, previewFor) : await siteForHost(host);
   if (!site) { res.status(404).json({ error: "Site not found" }); return; }
   req.site = site;
   next();
