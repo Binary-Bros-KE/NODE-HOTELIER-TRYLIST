@@ -91,28 +91,21 @@ const createSchema = productObjectSchema
   .transform((data) => (data.sellsDirectly ? data : { ...data, sellingPrice: null }));
 const updateSchema = partialNoDefaults(productObjectSchema.omit({ openingStock: true, locationId: true })).superRefine(requireSellingPriceWhenDirect);
 
-// A hand-entered movement at one location, for when stock changes outside
-// the Purchases/Goods-Receipt flow: an opening balance for a product that
-// wasn't given one at creation (OPENING_STOCK), stock bought in off-book
-// (PURCHASE), stock physically handed back in (RETURN — same direction the
-// rest of the codebase already uses it, e.g. the POS return-restore path in
-// pos.routes.ts), stock written off as broken/spoiled/lost (DAMAGE_LOSS), or
-// a plain count correction (ADJUSTMENT, signed either way). Every one of
-// these is a positive add to stock except DAMAGE_LOSS, which the UI always
-// asks for as a positive "how much was lost" and this route negates.
-// Location-to-location moves use /transfer instead.
-const MANUAL_MOVEMENT_TYPES = ["OPENING_STOCK", "PURCHASE", "RETURN", "DAMAGE_LOSS", "ADJUSTMENT"] as const;
-const POSITIVE_ONLY_TYPES = ["OPENING_STOCK", "PURCHASE", "RETURN"] as const;
+// A hand-entered stock change at one location, outside the Purchases/
+// Goods-Receipt flow: INCREASE or DECREASE by an amount, or OVERRIDE the
+// count to what was physically counted. All are recorded as ADJUSTMENT
+// movements. Location-to-location moves use /transfer instead.
+const STOCK_CHANGE_MODES = ["OVERRIDE", "INCREASE", "DECREASE"] as const;
 const movementSchema = z.object({
-  type: z.enum(MANUAL_MOVEMENT_TYPES),
+  mode: z.enum(STOCK_CHANGE_MODES),
   locationId: z.string().trim().min(1),
-  quantity: z.coerce.number().finite().refine((value) => value !== 0, "Quantity cannot be zero"),
+  quantity: z.coerce.number().finite().min(0, "Quantity cannot be negative"),
   unitCost: z.coerce.number().min(0).optional(),
   note: z.string().trim().max(500).optional(),
   occurredAt: z.coerce.date().optional(),
 }).superRefine((value, context) => {
-  if ((POSITIVE_ONLY_TYPES as readonly string[]).includes(value.type) && value.quantity < 0) {
-    context.addIssue({ code: "custom", message: "Quantity must be positive for this movement type", path: ["quantity"] });
+  if (value.mode !== "OVERRIDE" && value.quantity === 0) {
+    context.addIssue({ code: "custom", message: "Quantity cannot be zero", path: ["quantity"] });
   }
 });
 
@@ -385,12 +378,11 @@ productsRouter.get("/:id/movements", async (req, res) => {
   res.json({ product: withTotal(product), movements: movements.map((m) => ({ ...m, purchase: (m.sourceRefId && byReceipt.get(m.sourceRefId)) || null })) });
 });
 
-/** Hand-entered stock movement at a single location — the Products tab's
- * "Adjust stock" action, for anything outside the Purchases/Goods-Receipt
- * flow: OPENING_STOCK, PURCHASE, RETURN, a write-off for breakage/spoilage/
- * loss (DAMAGE_LOSS), or a plain count correction (ADJUSTMENT). To move
- * stock between two locations, use /transfer. Every path here goes through
- * the stock ledger. */
+/** Hand-entered stock change at a single location — the Products tab's
+ * "Add or remove stock" action. OVERRIDE sets the count to the given number,
+ * working out the difference from the live balance inside the transaction.
+ * To move stock between two locations, use /transfer. Every path here goes
+ * through the stock ledger. */
 productsRouter.post("/:id/movements", async (req, res, next) => {
   const data = movementSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid stock movement", details: data.error.flatten() }); return; }
@@ -399,15 +391,27 @@ productsRouter.post("/:id/movements", async (req, res, next) => {
   if (!product) { res.status(404).json({ error: "Product not found" }); return; }
   const location = await assertLocationInTenant(data.data.locationId, tid).catch(() => null);
   if (!location) { res.status(400).json({ error: "Choose a location from this property" }); return; }
-  const { type, locationId, unitCost, note, occurredAt } = data.data;
-  const signedQuantity = type === "DAMAGE_LOSS" ? -Math.abs(data.data.quantity) : data.data.quantity;
+  const { mode, locationId, quantity, unitCost, note, occurredAt } = data.data;
 
   try {
-    const movement = await prisma.$transaction((tx) => recordStockMovement(tx, {
-      tenantId: tid, productId: product.id, locationId, type, quantity: signedQuantity,
-      unitCost: unitCost ?? null, note: note ?? null, occurredAt,
-      sourceType: "MANUAL", performedBy: req.userId ?? null, label: product.name,
-    }));
+    const movement = await prisma.$transaction(async (tx) => {
+      let change = mode === "DECREASE" ? -quantity : quantity;
+      if (mode === "OVERRIDE") {
+        const stock = await tx.productStock.findUnique({
+          where: { tenantId_productId_locationId: { tenantId: tid, productId: product.id, locationId } },
+          select: { quantity: true },
+        });
+        // Rounded so e.g. 9.3 - 9.1 doesn't store float noise in the ledger.
+        change = Math.round((quantity - Number(stock?.quantity ?? 0)) * 1e6) / 1e6;
+      }
+      if (change === 0) return null;
+      return recordStockMovement(tx, {
+        tenantId: tid, productId: product.id, locationId, type: "ADJUSTMENT", quantity: change,
+        unitCost: unitCost ?? null, note: note ?? null, occurredAt,
+        sourceType: "MANUAL", performedBy: req.userId ?? null, label: product.name,
+      });
+    });
+    if (!movement) { res.status(400).json({ error: `${product.name} at ${location.name} is already at that count` }); return; }
     const updatedProduct = await prisma.product.findUniqueOrThrow({ where: { id: product.id }, select: productFields });
     res.status(201).json({ movement, product: withTotal(updatedProduct) });
   } catch (error) {
