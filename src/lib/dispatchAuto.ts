@@ -78,6 +78,17 @@ export async function refreshOpenRequest(tx: Prisma.TransactionClient, tenantId:
   });
   const requirements = await perSaleRequirements(tx, tenantId, computeStockRequirements(lines));
   if (requirements.size === 0) {
+    if (request.respondedAt) {
+      // A reopened request (an earlier round was already dispatched) whose new
+      // round is gone: only that round is withdrawn. The dispatched lines stay
+      // linked and the request goes back to DISPATCHED - cancelling it and
+      // unlinking everything left order #268 looking never-requested, so it
+      // could never be served.
+      await tx.stockDispatchRequest.update({ where: { id: requestId }, data: { status: "DISPATCHED" } });
+      await tx.posOrderItem.updateMany({ where: { dispatchRequestId: requestId, createdAt: { gt: request.respondedAt } }, data: { dispatchRequestId: null } });
+      await tx.stockDispatchItem.deleteMany({ where: { requestId, dispatchedQty: null } });
+      return;
+    }
     await tx.stockDispatchRequest.update({ where: { id: requestId }, data: { status: "CANCELLED", respondedAt: new Date() } });
     await tx.posOrderItem.updateMany({ where: { dispatchRequestId: requestId }, data: { dispatchRequestId: null } });
     return;
