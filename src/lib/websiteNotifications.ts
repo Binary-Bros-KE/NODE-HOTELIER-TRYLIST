@@ -190,15 +190,29 @@ export async function inquiryReceived(inquiryId: string): Promise<void> {
   const q = await prisma.websiteInquiry.findUnique({ where: { id: inquiryId } });
   if (!q) return;
   const h = await hotel(q.tenantId);
-  if (!h.email) return;
-  const mail = renderEmail({
-    hotelName: h.name, brandColor: h.brand, eyebrow: `New enquiry · ${q.kind.toLowerCase()}`,
-    heading: q.subject ?? `Message from ${q.name}`,
-    intro: q.message.split(/\n\s*\n/),
-    rows: [{ label: "From", value: q.name }, ...(q.phone ? [{ label: "Phone", value: q.phone }] : []), ...(q.email ? [{ label: "Email", value: q.email }] : [])],
-    footer: q.email ? "Reply to this email to answer them directly." : "They left no email — please call them back.",
-  });
-  sendMail({ to: h.email, fromName: `${h.name} website`, replyTo: q.email, subject: `New website enquiry from ${q.name}`, ...mail });
+  if (h.email) {
+    const mail = renderEmail({
+      hotelName: h.name, brandColor: h.brand, eyebrow: `New enquiry · ${q.kind.toLowerCase()}`,
+      heading: q.subject ?? `Message from ${q.name}`,
+      intro: q.message.split(/\n\s*\n/),
+      rows: [{ label: "From", value: q.name }, ...(q.phone ? [{ label: "Phone", value: q.phone }] : []), ...(q.email ? [{ label: "Email", value: q.email }] : [])],
+      footer: q.email ? "Reply to this email to answer them directly." : "They left no email — please call them back.",
+    });
+    sendMail({ to: h.email, fromName: `${h.name} website`, replyTo: q.email, subject: `New website enquiry from ${q.name}`, ...mail });
+  }
+
+  // Acknowledge the sender, so they know it arrived and what happens next.
+  if (q.email) {
+    const ack = renderEmail({
+      hotelName: h.name, brandColor: h.brand, eyebrow: "Message received",
+      heading: `Thank you, ${q.name.split(/\s+/)[0]}`,
+      intro: ["We've received your message and our team will get back to you shortly — usually within a day.", "For anything urgent, please call us. A copy of your message is below."],
+      rows: [{ label: "Your message", value: q.message.length > 600 ? `${q.message.slice(0, 600)}…` : q.message }],
+      button: h.siteUrl ? { label: "Visit our website", url: h.siteUrl } : undefined,
+      footer: contactLine(h),
+    });
+    sendMail({ to: q.email, fromName: h.name, replyTo: h.email, subject: `We've received your message — ${h.name}`, ...ack });
+  }
 }
 
 export async function guestCancelled(manageToken: string): Promise<void> {

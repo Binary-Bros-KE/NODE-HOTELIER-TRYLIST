@@ -4096,6 +4096,9 @@ model TenantWebsite {
   // Floor for the deposit, in the tenant's currency: the guest pays the larger
   // of depositPercent of the stay and this, never more than the stay itself.
   depositMinimum      Decimal                    @default(0) @db.Decimal(12, 2)
+  // Old addresses sent elsewhere with a 301: [{ "from": "/accomodation", "to": "/rooms" }].
+  // A "from" ending in "/*" matches everything under it ("/restaurant-menu/*").
+  redirects           Json                       @default("[]")
   // How long an unpaid online booking holds its slot/room.
   holdMinutes         Int                        @default(30)
   // Which selling point web bookings are filed under (null = none).

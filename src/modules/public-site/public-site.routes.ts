@@ -81,6 +81,7 @@ publicSiteRouter.get("/resolve", async (req, res) => {
         longitude: money(w.longitude),
       },
       social: w.socialLinks,
+      redirects: w.redirects,
       features: siteFeatures(site),
       booking: bookingRules(site),
       // Public by design: the widget needs it in the browser.

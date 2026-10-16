@@ -62,7 +62,14 @@ const mapEmbed = z.preprocess(
   blankToNull,
   z.string().trim().url().max(2000).refine((v) => /^https:\/\/(www\.)?google\.com\/maps\/embed/.test(v), "Paste the src of Google Maps' “Embed a map” code").nullable(),
 );
-const SOCIAL_NETWORKS = ["facebook", "instagram", "tiktok", "x", "youtube", "tripadvisor", "linkedin"] as const;
+const SOCIAL_NETWORKS = ["facebook", "instagram", "tiktok", "x", "youtube", "tripadvisor", "google", "linkedin"] as const;
+
+// Paths only (no //host tricks); "to" may also be a full https URL.
+const redirectPath = z.string().trim().max(300).regex(/^\/(?!\/)[^\s?#]*$/, "Start with / — e.g. /accomodation");
+const redirectRule = z.object({
+  from: redirectPath,
+  to: z.union([redirectPath, z.string().trim().url().max(500).refine((v) => v.startsWith("https://"), "Use https://")]),
+});
 
 const settingsSchema = z.object({
   themeKey: z.string().trim().min(1).max(40).default("aurora"),
@@ -93,6 +100,7 @@ const settingsSchema = z.object({
   depositMinimum: z.coerce.number().min(0).max(10_000_000).default(0),
   holdMinutes: z.coerce.number().int().min(5).max(24 * 60).default(30),
   bookingLocationId: z.preprocess(blankToNull, z.string().trim().min(1).nullable()).default(null),
+  redirects: z.array(redirectRule).max(200).default([]),
 });
 const settingsUpdateSchema = partialNoDefaults(settingsSchema);
 
