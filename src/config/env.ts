@@ -14,6 +14,12 @@ const envSchema = z.object({
   // one wildcard cert covers all sites and website hosts can never collide
   // with a staff-app tenant subdomain ("site" is a reserved slug).
   SITE_DOMAIN: z.string().trim().min(1).optional(),
+  // Clients' own domains CNAME here (Cloudflare for SaaS), and the API
+  // registers them with Cloudflare. Written by the website setup script;
+  // without them, a verified domain goes live on its TXT check alone.
+  SITE_CNAME_TARGET: z.string().trim().min(1).optional(),
+  CLOUDFLARE_API_TOKEN: z.string().trim().min(1).optional(),
+  CLOUDFLARE_ZONE_ID: z.string().trim().min(1).optional(),
   // Bootstrap credentials for the first platform admin account, consumed
   // only by `npm run seed:platform-admin` (see that script). The running
   // app never reads these — platform admins authenticate against

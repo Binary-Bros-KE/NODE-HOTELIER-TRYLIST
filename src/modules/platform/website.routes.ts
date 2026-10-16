@@ -8,6 +8,7 @@ import multer from "multer";
 import { z } from "zod";
 
 import { env } from "../../config/env.js";
+import { cloudflareConfigured, customHostnameLive, customHostnameWaiting, ensureCustomHostname, removeCustomHostname } from "../../lib/cloudflare.js";
 import { prisma } from "../../lib/prisma.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { createPreviewToken, invalidateSiteCache, normaliseHost } from "../public-site/site.js";
@@ -128,6 +129,8 @@ websiteAdminRouter.get("/", async (req, res) => {
     previewUrl: siteUrl ? `${siteUrl}/site-preview?token=${encodeURIComponent(createPreviewToken(tenant.id))}` : null,
     systemSlugs: SYSTEM_SLUGS,
     siteDomain: env.SITE_DOMAIN ?? null,
+    // Where clients point their own domain (CNAME); null = not set up on this server.
+    cnameTarget: env.SITE_CNAME_TARGET ?? null,
   });
 });
 
@@ -313,31 +316,49 @@ websiteAdminRouter.post("/domains", async (req, res) => {
   res.status(201).json({ domain, txtRecord: { name: `${VERIFY_PREFIX}.${domain.hostname}`, value: domain.verificationToken } });
 });
 
-/** Checks the TXT record proving the client controls the domain. On success
- * the domain goes ACTIVE (Caddy may now issue its certificate) and becomes
- * primary if the site has none yet. */
+/**
+ * Step 1: the TXT record proves the client controls the domain.
+ * Step 2 (when Cloudflare for SaaS is configured): the domain is registered
+ * with Cloudflare, which needs the client's CNAME and then issues the
+ * certificate. Only then is it ACTIVE (until then VERIFYING, with the reason
+ * in lastError). The first ACTIVE domain becomes primary. Press again to
+ * re-check — each call is idempotent.
+ */
 websiteAdminRouter.post("/domains/:domainId/verify", async (req, res) => {
   const domain = await prisma.tenantDomain.findFirst({ where: { id: pid(req, "domainId"), tenantId: tid(req) } });
   if (!domain) { res.status(404).json({ error: "Domain not found" }); return; }
-  let found = false;
+  let owned = false;
   let lastError: string | null = null;
   try {
     const records = await resolveTxt(`${VERIFY_PREFIX}.${domain.hostname}`);
-    found = records.some((chunks) => chunks.join("").trim() === domain.verificationToken);
-    if (!found) lastError = "TXT record found, but its value doesn't match";
+    owned = records.some((chunks) => chunks.join("").trim() === domain.verificationToken);
+    if (!owned) lastError = "TXT record found, but its value doesn't match";
   } catch (error) {
     const code = (error as { code?: string }).code;
     lastError = code === "ENOTFOUND" || code === "ENODATA" ? "TXT record not found yet — DNS changes can take up to an hour" : `DNS lookup failed (${code ?? "unknown error"})`;
   }
-  const hasPrimary = found && (await prisma.tenantDomain.count({ where: { tenantId: domain.tenantId, isPrimary: true, status: "ACTIVE" } })) > 0;
+
+  let live = owned;
+  if (owned && cloudflareConfigured()) {
+    try {
+      const hostname = await ensureCustomHostname(domain.hostname);
+      live = customHostnameLive(hostname);
+      if (!live) lastError = customHostnameWaiting(hostname);
+    } catch (error) {
+      live = false;
+      lastError = `Couldn't register the domain with Cloudflare: ${error instanceof Error ? error.message : "unknown error"}`;
+    }
+  }
+
+  const hasPrimary = live && (await prisma.tenantDomain.count({ where: { tenantId: domain.tenantId, isPrimary: true, status: "ACTIVE" } })) > 0;
   const updated = await prisma.tenantDomain.update({
     where: { id: domain.id },
-    data: found
-      ? { status: "ACTIVE", verifiedAt: new Date(), lastCheckedAt: new Date(), lastError: null, ...(hasPrimary ? {} : { isPrimary: true }) }
-      : { status: domain.status === "ACTIVE" ? "ACTIVE" : "FAILED", lastCheckedAt: new Date(), lastError },
+    data: live
+      ? { status: "ACTIVE", verifiedAt: domain.verifiedAt ?? new Date(), lastCheckedAt: new Date(), lastError: null, ...(hasPrimary ? {} : { isPrimary: true }) }
+      : { status: domain.status === "ACTIVE" ? "ACTIVE" : owned ? "VERIFYING" : "FAILED", lastCheckedAt: new Date(), lastError },
   });
   invalidateSiteCache();
-  res.json({ domain: updated, verified: found });
+  res.json({ domain: updated, verified: live });
 });
 
 websiteAdminRouter.post("/domains/:domainId/primary", async (req, res) => {
@@ -353,8 +374,17 @@ websiteAdminRouter.post("/domains/:domainId/primary", async (req, res) => {
 });
 
 websiteAdminRouter.delete("/domains/:domainId", async (req, res) => {
-  const deleted = await prisma.tenantDomain.deleteMany({ where: { id: pid(req, "domainId"), tenantId: tid(req) } });
-  if (!deleted.count) { res.status(404).json({ error: "Domain not found" }); return; }
+  const domain = await prisma.tenantDomain.findFirst({ where: { id: pid(req, "domainId"), tenantId: tid(req) } });
+  if (!domain) { res.status(404).json({ error: "Domain not found" }); return; }
+  if (cloudflareConfigured()) {
+    try {
+      await removeCustomHostname(domain.hostname);
+    } catch (error) {
+      res.status(502).json({ error: `Couldn't remove the domain from Cloudflare: ${error instanceof Error ? error.message : "unknown error"}` });
+      return;
+    }
+  }
+  await prisma.tenantDomain.delete({ where: { id: domain.id } });
   invalidateSiteCache();
   res.status(204).send();
 });
