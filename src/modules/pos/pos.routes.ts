@@ -15,7 +15,7 @@ import { computeStockRequirements, addonStockInclude, addonStockSelect, serviceS
 import { DispatchError, dispatchRequired, employeeName, orderDispatchInfo, supplyingStoreId, untrackedProductIds } from "../../lib/dispatch.js";
 import { currentMemberDiscount } from "../../lib/membership.js";
 import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js";
-import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
+import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest, repairWithdrawnDispatch } from "../../lib/dispatchAuto.js";
 import { renderDispatchPrint } from "../../lib/dispatchPrint.js";
 import { queueOrderTicket, renderOrderTicketPrint } from "../../lib/orderTicket.js";
 import type { OrderTicket } from "../../lib/orderTicket.js";
@@ -1197,7 +1197,7 @@ async function assertStockAvailable(
 
 posRouter.patch("/orders/:id/serve", async (req, res) => {
   const tid = tenantIdFor(req);
-  const activeOrder = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid, status: "READY" }, include: orderInclude });
+  let activeOrder = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid, status: "READY" }, include: orderInclude });
   if (!activeOrder) { res.status(404).json({ error: "Ready order not found" }); return; }
 
   const serveMode = activeOrder.location?.serveMode ?? "KITCHEN";
@@ -1215,7 +1215,11 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
     return;
   }
 
-  const dispatch = orderDispatchInfo(activeOrder, await untrackedProductIds(prisma, tid, activeOrder.items));
+  let dispatch = orderDispatchInfo(activeOrder, await untrackedProductIds(prisma, tid, activeOrder.items));
+  if (!dispatch.clear && dispatch.state === "NEEDS_REQUEST" && await repairWithdrawnDispatch(tid, activeOrder.id)) {
+    activeOrder = await prisma.posOrder.findFirstOrThrow({ where: { id: activeOrder.id, tenantId: tid }, include: orderInclude });
+    dispatch = orderDispatchInfo(activeOrder, await untrackedProductIds(prisma, tid, activeOrder.items));
+  }
   if (!dispatch.clear) {
     res.status(409).json({ error: dispatch.state === "WAITING" ? "The kitchen is still waiting for the store to dispatch the added items" : "The added items haven't been requested from the store yet", code: "DISPATCH_REQUIRED" });
     return;

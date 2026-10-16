@@ -226,3 +226,35 @@ export async function dispatchSlipFor(tenantId: string, requestId: string) {
     items: request.items.map((i) => ({ name: i.productName, quantity: Number(i.requestedQty), unit: i.product.unit })),
   };
 }
+
+/**
+ * Repairs an order left blocked by the old refreshOpenRequest bug: removing a
+ * round added after the store had dispatched cancelled the whole request and
+ * unlinked every line, so the order looked never-requested and could not be
+ * served. The stock ledger is the proof: a CANCELLED request with STOCK_DISPATCH
+ * movements was in fact dispatched. Its lines that existed by the time the
+ * stock left the store are linked back and the request returns to DISPATCHED.
+ * Returns true when anything was repaired.
+ */
+export async function repairWithdrawnDispatch(tenantId: string, orderId: string): Promise<boolean> {
+  const cancelled = await prisma.stockDispatchRequest.findMany({ where: { tenantId, orderId, status: "CANCELLED" }, select: { id: true } });
+  let repaired = false;
+  for (const request of cancelled) {
+    const lastIssue = await prisma.inventoryMovement.findFirst({
+      where: { tenantId, sourceType: "STOCK_DISPATCH", sourceRefId: request.id },
+      orderBy: { occurredAt: "desc" },
+      select: { occurredAt: true },
+    });
+    if (!lastIssue) continue; // never dispatched - a genuine withdrawal
+    await prisma.$transaction(async (tx) => {
+      await tx.posOrderItem.updateMany({
+        where: { orderId, dispatchRequestId: null, createdAt: { lte: lastIssue.occurredAt } },
+        data: { dispatchRequestId: request.id },
+      });
+      await tx.stockDispatchRequest.update({ where: { id: request.id }, data: { status: "DISPATCHED", respondedAt: lastIssue.occurredAt } });
+      await tx.stockDispatchItem.deleteMany({ where: { requestId: request.id, dispatchedQty: null } });
+    });
+    repaired = true;
+  }
+  return repaired;
+}
