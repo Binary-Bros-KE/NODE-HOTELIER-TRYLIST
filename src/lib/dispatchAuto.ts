@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { prisma } from "./prisma.js";
-import { createDispatchRequest, dispatchRequired, lineNeedsDispatch } from "./dispatch.js";
+import { createDispatchRequest, dispatchRequired, lineNeedsDispatch, untrackedProductIds } from "./dispatch.js";
 import { addonStockInclude, computeStockRequirements, variantStockSelect } from "./stockRequirements.js";
 import { perSaleRequirements } from "./trackingMode.js";
 
@@ -51,7 +51,8 @@ export async function autoRequestDispatch(tenantId: string, orderId: string, act
       },
     });
     if (!order || !dispatchRequired(order.location)) return null;
-    if (!order.items.some(lineNeedsDispatch)) return null;
+    const untracked = await untrackedProductIds(prisma, tenantId, order.items);
+    if (!order.items.some((item) => lineNeedsDispatch(item, untracked))) return null;
     const request = await createDispatchRequest({ ...order, tenantId }, actorId, "Sent to the store automatically when the order was posted");
     if (order.location?.dispatchAutoPrint) {
       await queueDispatchSlip(prisma, { tenantId, requestId: request.id, orderId, storeLocationId: request.fromLocationId, requestedBy: actorId });

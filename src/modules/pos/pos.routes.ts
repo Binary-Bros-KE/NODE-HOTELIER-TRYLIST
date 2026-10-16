@@ -12,7 +12,7 @@ import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedg
 import { recordMenuLedger, menuLedgerLinesFromItems } from "../../lib/menuLedger.js";
 import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
 import { computeStockRequirements, addonStockInclude, addonStockSelect, serviceStockSelect, serviceVariantStockSelect, variantStockInclude, variantStockSelect, type OrderItemForStock } from "../../lib/stockRequirements.js";
-import { DispatchError, dispatchRequired, employeeName, orderDispatchInfo, supplyingStoreId } from "../../lib/dispatch.js";
+import { DispatchError, dispatchRequired, employeeName, orderDispatchInfo, supplyingStoreId, untrackedProductIds } from "../../lib/dispatch.js";
 import { currentMemberDiscount } from "../../lib/membership.js";
 import { resolveServiceLines, serviceLineSchema } from "../../lib/serviceSale.js";
 import { autoRequestDispatch, dispatchSlipFor, refreshOpenRequest } from "../../lib/dispatchAuto.js";
@@ -1215,7 +1215,7 @@ posRouter.patch("/orders/:id/serve", async (req, res) => {
     return;
   }
 
-  const dispatch = orderDispatchInfo(activeOrder);
+  const dispatch = orderDispatchInfo(activeOrder, await untrackedProductIds(prisma, tid, activeOrder.items));
   if (!dispatch.clear) {
     res.status(409).json({ error: dispatch.state === "WAITING" ? "The kitchen is still waiting for the store to dispatch the added items" : "The added items haven't been requested from the store yet", code: "DISPATCH_REQUIRED" });
     return;

@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { prisma } from "./prisma.js";
-import { DispatchError, dispatchRequired, orderDispatchInfo } from "./dispatch.js";
+import { DispatchError, dispatchRequired, orderDispatchInfo, untrackedProductIds } from "./dispatch.js";
 import { recordStockMovement, InsufficientStockError } from "./stockLedger.js";
 import { computeStockRequirements, type OrderItemForStock } from "./stockRequirements.js";
 import { perSaleRequirements } from "./trackingMode.js";
@@ -72,7 +72,7 @@ export async function settleServedAdditions(tx: Prisma.TransactionClient, tid: s
   if (order.status !== "SERVED" || !isUndeductedAdditionOrder(order)) return;
   const flagged = order.items.filter((item) => item.addedAfterSend);
   if (flagged.length === 0) return;
-  const info = orderDispatchInfo({ location: order.location, items: order.items });
+  const info = orderDispatchInfo({ location: order.location, items: order.items }, await untrackedProductIds(tx, tid, order.items));
   if (!info.clear) {
     throw new DispatchError(info.state === "WAITING" ? "Waiting for the store to dispatch the added items" : "Request the added items from the store first", 409, "DISPATCH_REQUIRED");
   }

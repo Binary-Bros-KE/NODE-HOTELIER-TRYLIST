@@ -32,15 +32,34 @@ type DispatchOrder = {
   dispatchRequests?: { status: string; rejectReason: string | null; requestNo: string }[];
 };
 
-const needsStock = (item: OrderItemForStock) => computeStockRequirements([item]).size > 0;
+type Db = Pick<Prisma.TransactionClient, "product">;
 
-/** A line that consumes stock and hasn't been covered by any store request yet. */
-export const lineNeedsDispatch = (item: OrderItemForStock & { dispatchRequestId: string | null }) => !item.dispatchRequestId && needsStock(item);
+/**
+ * Products on these lines that are NOT tracked per sale (ISSUE_ONLY /
+ * PERIODIC_COUNT). The store is never asked for them (see perSaleRequirements),
+ * so they must not count as "needs the store" either - otherwise a line made
+ * only of them (e.g. a juice whose fruit is counted at the kitchen) could never
+ * be requested and its order could never be started or served.
+ */
+export async function untrackedProductIds(db: Db, tenantId: string, items: OrderItemForStock[]): Promise<Set<string>> {
+  const ids = [...computeStockRequirements(items).keys()];
+  if (ids.length === 0) return new Set();
+  const rows = await db.product.findMany({ where: { tenantId, id: { in: ids }, trackingMode: { not: "PER_SALE" } }, select: { id: true } });
+  return new Set(rows.map((row) => row.id));
+}
 
-/** Where this order's ingredients stand with the store. `clear` = the chef may start/finish it. */
-export function orderDispatchInfo(order: DispatchOrder) {
+const needsStock = (item: OrderItemForStock, untracked: Set<string>) =>
+  [...computeStockRequirements([item]).keys()].some((productId) => !untracked.has(productId));
+
+/** A line that takes per-sale stock from the store and hasn't been covered by any store request yet. */
+export const lineNeedsDispatch = (item: OrderItemForStock & { dispatchRequestId: string | null }, untracked: Set<string>) =>
+  !item.dispatchRequestId && needsStock(item, untracked);
+
+/** Where this order's ingredients stand with the store. `clear` = the chef may start/finish it.
+ * `untracked` comes from untrackedProductIds(order.items). */
+export function orderDispatchInfo(order: DispatchOrder, untracked: Set<string>) {
   if (!dispatchRequired(order.location)) return { required: false, state: "NOT_REQUIRED" as DispatchState, clear: true, uncovered: 0, rejectReason: null as string | null };
-  const needing = order.items.filter(needsStock);
+  const needing = order.items.filter((item) => needsStock(item, untracked));
   if (needing.length === 0) return { required: true, state: "NOTHING_NEEDED" as DispatchState, clear: true, uncovered: 0, rejectReason: null };
   const uncovered = needing.filter((item) => !item.dispatchRequestId);
   const waiting = needing.some((item) => item.dispatchRequest?.status === "REQUESTED");
@@ -82,7 +101,8 @@ export async function createDispatchRequest(order: RequestableOrder, actorId: st
   const location = order.location;
   if (!location || !dispatchRequired(location)) throw new DispatchError("This location doesn't use store dispatch", 409);
   if (!["OPEN", "PREPARING", "READY", "SERVED"].includes(order.status)) throw new DispatchError("This order can't request ingredients any more", 409);
-  const lines = order.items.filter((item) => !item.dispatchRequestId && needsStock(item));
+  const untracked = await untrackedProductIds(prisma, order.tenantId, order.items);
+  const lines = order.items.filter((item) => lineNeedsDispatch(item, untracked));
   if (lines.length === 0) throw new DispatchError("Everything on this order has already been requested", 409);
   const fromLocationId = await supplyingStoreId(order.tenantId, location);
   if (!fromLocationId) throw new DispatchError("No store is set up to supply this kitchen. Choose one in Locations.", 409);
@@ -104,7 +124,7 @@ export async function createDispatchRequest(order: RequestableOrder, actorId: st
   const latest = freshNeeded ? null : found;
   const cutoff = latest?.respondedAt ?? null;
   const alreadyPending = latest?.status === "REQUESTED"
-    ? order.items.filter((item) => item.dispatchRequestId === latest.id && (!cutoff || !item.createdAt || item.createdAt > cutoff) && needsStock(item))
+    ? order.items.filter((item) => item.dispatchRequestId === latest.id && (!cutoff || !item.createdAt || item.createdAt > cutoff) && needsStock(item, untracked))
     : [];
   const requestLines = [...alreadyPending, ...lines];
 
