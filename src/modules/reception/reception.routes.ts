@@ -16,6 +16,7 @@ import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 import { nairobiParts } from "../../lib/shifts.js";
 import { roomIsAvailable } from "../../lib/roomAvailability.js";
+import { notify, roomBookingConfirmed } from "../../lib/websiteNotifications.js";
 
 export const receptionRouter = Router();
 
@@ -611,6 +612,8 @@ receptionRouter.patch("/reservations/:id/confirm", async (req, res) => {
     await logActivity(tx, tid, current.id, "UPDATED", "Reservation confirmed", actor);
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
+  // Online bookings: tell the guest it's accepted.
+  notify(() => roomBookingConfirmed(current.id));
   res.json({ reservation });
 });
 

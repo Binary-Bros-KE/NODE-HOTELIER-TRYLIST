@@ -5,6 +5,8 @@ import { normalizeMsisdn } from "../../lib/mpesa.js";
 import { prisma } from "../../lib/prisma.js";
 import { allow } from "../../lib/rateLimit.js";
 import { nairobiParts } from "../../lib/shifts.js";
+import { verifyTurnstile } from "../../lib/turnstile.js";
+import { appointmentReceived, guestCancelled, inquiryReceived, notify, roomBookingReceived } from "../../lib/websiteNotifications.js";
 import { appointmentForGuest, appointmentSlots, cancelAppointmentByGuest, createAppointmentRequest } from "./appointments.js";
 import {
   BookingError, bookingForGuest, bookingPaymentStatus, cancelBookingByGuest, createRoomBooking, depositFor, startBookingPayment,
@@ -36,6 +38,12 @@ function limit(name: string, perVisitor: number, perSite: number, windowMs = 60 
     }
     next();
   };
+}
+
+/** Cloudflare Turnstile, when configured: the form's widget token must check out. */
+async function human(req: Request, res: Response, next: NextFunction) {
+  if (await verifyTurnstile((req.body as { turnstileToken?: unknown } | undefined)?.turnstileToken, req.header("x-site-client-ip"))) { next(); return; }
+  res.status(400).json({ error: "Please complete the “I'm human” check above the button and try again." });
 }
 
 const blank = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
@@ -86,7 +94,7 @@ const roomBookingSchema = z.object({
   if (nights > 60) ctx.addIssue({ code: "custom", path: ["checkOut"], message: "Stays are limited to 60 nights online" });
 });
 
-publicBookingsRouter.post("/bookings/room", requireFeature("roomBooking"), limit("room", 5, 60), async (req, res) => {
+publicBookingsRouter.post("/bookings/room", requireFeature("roomBooking"), limit("room", 5, 60), human, async (req, res) => {
   const parsed = roomBookingSchema.safeParse(req.body);
   if (!parsed.success) { invalid(res, parsed.error); return; }
   const { checkIn, checkOut, company: _honeypot, ...rest } = parsed.data;
@@ -96,6 +104,7 @@ publicBookingsRouter.post("/bookings/room", requireFeature("roomBooking"), limit
       checkIn: new Date(`${checkIn}T00:00:00.000Z`),
       checkOut: new Date(`${checkOut}T00:00:00.000Z`),
     });
+    notify(() => roomBookingReceived(result.manageToken));
     res.status(201).json(result);
   } catch (error) {
     fail(res, error, "We couldn't complete the booking — please try again or call us");
@@ -123,12 +132,14 @@ const appointmentSchema = z.object({
   ...guestFields,
 });
 
-publicBookingsRouter.post("/bookings/appointment", requireFeature("appointments"), limit("appointment", 5, 60), async (req, res) => {
+publicBookingsRouter.post("/bookings/appointment", requireFeature("appointments"), limit("appointment", 5, 60), human, async (req, res) => {
   const parsed = appointmentSchema.safeParse(req.body);
   if (!parsed.success) { invalid(res, parsed.error); return; }
   const { company: _honeypot, ...input } = parsed.data;
   try {
-    res.status(201).json(await createAppointmentRequest(req.site!, input));
+    const created = await createAppointmentRequest(req.site!, input);
+    notify(() => appointmentReceived(created.manageToken));
+    res.status(201).json(created);
   } catch (error) {
     fail(res, error, "We couldn't book that appointment — please try again or call us");
   }
@@ -158,6 +169,7 @@ publicBookingsRouter.post("/bookings/:token/cancel", limit("cancel", 10, 200), a
     const isRoom = await prisma.reservation.count({ where: { manageToken: token, tenantId: req.site!.tenantId } });
     if (isRoom) await cancelBookingByGuest(req.site!, token);
     else await cancelAppointmentByGuest(req.site!, token);
+    notify(() => guestCancelled(token));
     res.status(204).send();
   } catch (error) {
     fail(res, error, "We couldn't cancel the booking — please call us");
@@ -206,7 +218,7 @@ const inquirySchema = z.object({
   company: z.string().max(0, "Invalid request").optional(),
 }).refine((v) => v.email || v.phone, { message: "Leave an email or a phone number so we can reply", path: ["email"] });
 
-publicBookingsRouter.post("/inquiries", requireFeature("inquiries"), limit("inquiry", 5, 100), async (req, res) => {
+publicBookingsRouter.post("/inquiries", requireFeature("inquiries"), limit("inquiry", 5, 100), human, async (req, res) => {
   const parsed = inquirySchema.safeParse(req.body);
   if (!parsed.success) { invalid(res, parsed.error); return; }
   const { company: _honeypot, ...data } = parsed.data;
@@ -216,6 +228,7 @@ publicBookingsRouter.post("/inquiries", requireFeature("inquiries"), limit("inqu
     where: { tenantId: site.tenantId, OR: [...(data.email ? [{ email: data.email }] : []), ...(data.phone ? [{ phone: data.phone }] : [])] },
     select: { id: true },
   });
-  await prisma.websiteInquiry.create({ data: { ...data, tenantId: site.tenantId, customerId: customer?.id ?? null } });
+  const inquiry = await prisma.websiteInquiry.create({ data: { ...data, tenantId: site.tenantId, customerId: customer?.id ?? null } });
+  notify(() => inquiryReceived(inquiry.id));
   res.status(201).json({ ok: true });
 });

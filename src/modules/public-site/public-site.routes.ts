@@ -1,4 +1,5 @@
 import { Router, type Response } from "express";
+import { env } from "../../config/env.js";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
@@ -82,6 +83,8 @@ publicSiteRouter.get("/resolve", async (req, res) => {
       social: w.socialLinks,
       features: siteFeatures(site),
       booking: bookingRules(site),
+      // Public by design: the widget needs it in the browser.
+      security: { turnstileSiteKey: env.TURNSTILE_SITE_KEY ?? null },
       nav: pages,
       preview: site.preview,
     },

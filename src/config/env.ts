@@ -20,6 +20,17 @@ const envSchema = z.object({
   SITE_CNAME_TARGET: z.string().trim().min(1).optional(),
   CLOUDFLARE_API_TOKEN: z.string().trim().min(1).optional(),
   CLOUDFLARE_ZONE_ID: z.string().trim().min(1).optional(),
+  // Outgoing email (booking received/confirmed, hotel notifications) through
+  // any SMTP service (Resend, Brevo, a mailbox...). Unset = emails are skipped.
+  // Hotels' own addresses go in Reply-To; the sender is always MAIL_FROM_ADDRESS.
+  SMTP_HOST: z.string().trim().min(1).optional(),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_USER: z.string().trim().min(1).optional(),
+  SMTP_PASS: z.string().min(1).optional(),
+  MAIL_FROM_ADDRESS: z.string().trim().email().optional(),
+  // Cloudflare Turnstile on public website forms. Unset = forms aren't challenged.
+  TURNSTILE_SITE_KEY: z.string().trim().min(1).optional(),
+  TURNSTILE_SECRET_KEY: z.string().trim().min(1).optional(),
   // Bootstrap credentials for the first platform admin account, consumed
   // only by `npm run seed:platform-admin` (see that script). The running
   // app never reads these — platform admins authenticate against

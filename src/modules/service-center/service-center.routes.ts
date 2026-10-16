@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { appointmentConfirmed, notify } from "../../lib/websiteNotifications.js";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
@@ -679,6 +680,8 @@ serviceCenterRouter.patch("/appointments/:id", async (req, res) => {
   const resolved = await resolveAppointment(current.tenantId, merged, current.id);
   if ("error" in resolved) { res.status(409).json({ error: resolved.error }); return; }
   const appointment = await prisma.appointment.update({ where: { id: current.id }, data: { ...parsed.data, membershipId: resolved.membership?.id, paymentMethodId: resolved.paymentMethod?.id, endsAt: resolved.endsAt, amount: resolved.amount }, include });
+  // An online request just accepted: tell the guest.
+  if (current.status !== "CONFIRMED" && parsed.data.status === "CONFIRMED") notify(() => appointmentConfirmed(current.id));
   res.json({ appointment: withAppointmentMembershipPlan(appointment) });
 });
 
