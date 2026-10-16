@@ -88,6 +88,17 @@ publicSiteRouter.get("/resolve", async (req, res) => {
   });
 });
 
+/** Every published page (for the sitemap) — slugs and last-modified only. */
+publicSiteRouter.get("/pages", async (req, res) => {
+  const pages = await prisma.websitePage.findMany({
+    where: { tenantId: req.site!.tenantId, isPublished: true },
+    orderBy: { sortOrder: "asc" },
+    select: { slug: true, kind: true, updatedAt: true },
+  });
+  cacheable(res);
+  res.json({ pages });
+});
+
 publicSiteRouter.get("/pages/:slug", async (req, res) => {
   const site = req.site!;
   const page = await prisma.websitePage.findFirst({
