@@ -4073,6 +4073,9 @@ model TenantWebsite {
   analyticsId    String?
 
   // Extra contact bits BusinessProfile doesn't have.
+  // One exact line shown wherever the site prints the address (marketing's wording);
+  // null = composed from the business profile's address, city and country.
+  displayAddress String?
   whatsappNumber String?
   mapEmbedUrl    String?
   latitude       Decimal? @db.Decimal(9, 6)

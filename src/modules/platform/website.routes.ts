@@ -84,6 +84,7 @@ const settingsSchema = z.object({
   seoDescription: text(320).default(null),
   ogImageUrl: imageRef.default(null),
   analyticsId: z.preprocess(blankToNull, z.string().trim().regex(/^[A-Z0-9-]{4,40}$/i, "Use the measurement ID, e.g. G-XXXXXXX").nullable()).default(null),
+  displayAddress: text(160).default(null),
   whatsappNumber: z.preprocess(blankToNull, z.string().trim().regex(/^\+?[\d\s-]{7,20}$/, "Use an international number, e.g. +254 7…").nullable()).default(null),
   mapEmbedUrl: mapEmbed.default(null),
   latitude: z.preprocess(blankToNull, z.coerce.number().min(-90).max(90).nullable()).default(null),

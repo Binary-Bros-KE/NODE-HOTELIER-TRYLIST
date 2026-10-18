@@ -72,6 +72,7 @@ publicSiteRouter.get("/resolve", async (req, res) => {
         alternativePhone: p?.alternativePhone ?? null,
         email: p?.email ?? null,
         whatsapp: w.whatsappNumber,
+        displayAddress: w.displayAddress,
         address: p?.address ?? null,
         city: p?.city ?? null,
         county: p?.county ?? null,
