@@ -836,7 +836,9 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // location net profit (salesByLocation) stays Expense-tab-only too. ----
     const expensesOnly = round2(expenses.reduce((s, e) => s + Number(e.amount), 0));
     const inventoryConsumptionExpenses = round2(inventoryConsumption.reduce((s, m) => s + Number(m.value ?? 0), 0));
-    const salariesPaid = round2(salaryPayments.reduce((s, sp) => s + Number(sp.netPay), 0));
+    const casualLabourPaid = await prisma.casualLabourPayment.aggregate({ where: { tenantId: tid, status: "COMPLETE", paidAt: { gte: start, lte: end } }, _sum: { amount: true } });
+    // Casual labourers are paid as salaries (CasualLabourPayment), so they count here too.
+    const salariesPaid = round2(salaryPayments.reduce((s, sp) => s + Number(sp.netPay), 0) + Number(casualLabourPaid._sum.amount ?? 0));
     const totalExpenses = round2(expensesOnly + salariesPaid + inventoryConsumptionExpenses);
     const expensesByCategoryMap = new Map<string, { name: string; count: number; total: number }>();
     const expensesByLocationMap = new Map<string, number>();
@@ -1932,12 +1934,25 @@ reportsRouter.get("/expenses", async (req, res, next) => {
       }),
     ]);
     const expenses = expensesFetched.filter((e) => inPeriod(e.expenseDate));
-    const salaries = salariesFetched.filter((s) => s.paidAt && inPeriod(s.paidAt));
+    const casualFetched = await prisma.casualLabourPayment.findMany({
+      where: { tenantId: tid, status: "COMPLETE", paidAt: { gte: fetchStart, lte: fetchEnd }, ...(locationId ? { locationId } : {}) },
+      include: { location: { select: { name: true } } },
+      orderBy: { paidAt: "desc" },
+    });
+    const salariesAndCasual = [
+      ...salariesFetched,
+      ...casualFetched.map((c) => ({
+        id: c.id, payslipNo: c.paymentNo, payPeriod: c.workDate, paidAt: c.paidAt as Date | null,
+        grossPay: c.amount, totalDeductions: 0, netPay: c.amount, paymentMethod: c.paymentMethod as string | null,
+        employee: { firstName: `${c.workerName} (casual)`, lastName: null, department: { name: "Casual labour" }, defaultLocation: c.location },
+      })),
+    ];
+    const salaries = salariesAndCasual.filter((s) => s.paidAt && inPeriod(s.paidAt));
     const inventoryConsumption = inventoryConsumptionFetched.filter((m) => inPeriod(m.occurredAt));
     const supplierPayments = supplierPaymentsFetched.filter((p) => inPeriod(p.paidAt));
     const assetMovements = assetMovementsFetched.filter((m) => inPeriod(m.occurredAt));
     const expensesInTrendBand = expensesFetched.filter((e) => inTrendBand(e.expenseDate));
-    const salariesInTrendBand = salariesFetched.filter((s) => s.paidAt && inTrendBand(s.paidAt));
+    const salariesInTrendBand = salariesAndCasual.filter((s) => s.paidAt && inTrendBand(s.paidAt));
     const inventoryConsumptionInTrendBand = inventoryConsumptionFetched.filter((m) => inTrendBand(m.occurredAt));
     const supplierPaymentsInTrendBand = supplierPaymentsFetched.filter((p) => inTrendBand(p.paidAt));
     const assetMovementsInTrendBand = assetMovementsFetched.filter((m) => inTrendBand(m.occurredAt));

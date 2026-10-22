@@ -2,7 +2,7 @@ import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
-import { nextPayslipNo, nextTransactionNo } from "../../lib/sequence.js";
+import { nextCasualLabourNo, nextPayslipNo, nextTransactionNo } from "../../lib/sequence.js";
 import { nairobiParts } from "../../lib/shifts.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
 import { assertPaymentReferenceUnused, normalizePaymentReference } from "../../lib/paymentReferences.js";
@@ -352,6 +352,138 @@ function groupSalaries<T extends { basicSalary: unknown; totalAllowances: unknow
     .sort((a, b) => b.net - a.net);
 }
 
+// ---------------------------------------------------------------- casual labour
+// One-off labourers paid on the spot (see CasualLabourPayment). Defined before
+// "/:id" so "/casual" isn't read as a payslip id.
+
+const casualSchema = z.object({
+  workerName: z.string().trim().min(1).max(120),
+  workerPhone: optionalText(40),
+  workerIdNo: optionalText(40),
+  job: z.string().trim().min(1).max(300),
+  workDate: z.coerce.date(),
+  locationId: optionalId,
+  // Optional days x rate; without them, amount is entered directly.
+  quantity: z.preprocess(blankToUndefined, z.coerce.number().positive().optional()),
+  unitLabel: optionalText(30),
+  rate: z.preprocess(blankToUndefined, z.coerce.number().positive().optional()),
+  amount: z.preprocess(blankToUndefined, z.coerce.number().positive().optional()),
+  paymentMethod: z.enum(paymentMethods),
+  reference: optionalText(120),
+  notes: optionalText(500),
+}).refine((v) => (v.quantity && v.rate) || v.amount, { message: "Enter the amount, or the days and the rate", path: ["amount"] });
+
+const casualListSchema = z.object({
+  search: optionalText(120),
+  year: z.preprocess(blankToUndefined, z.coerce.number().int().optional()),
+  from: optionalDate,
+  to: optionalDate,
+  locationId: optionalId,
+  status: z.preprocess(blankToUndefined, z.enum(salaryStatuses).optional()),
+});
+
+const casualInclude = { location: { select: { id: true, name: true } } } as const;
+
+employeeSalariesRouter.get("/casual", async (req, res) => {
+  const query = casualListSchema.safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Invalid filters", details: query.error.flatten() }); return; }
+  const { search, year, from, to, locationId, status } = query.data;
+  const start = from ?? (year ? new Date(Date.UTC(year, 0, 1)) : undefined);
+  const end = to ?? (year ? new Date(Date.UTC(year, 11, 31)) : undefined);
+  const payments = await prisma.casualLabourPayment.findMany({
+    where: {
+      tenantId: tenantId(req),
+      ...(status ? { status } : {}),
+      ...(locationId ? { locationId } : {}),
+      ...(start || end ? { workDate: { ...(start ? { gte: start } : {}), ...(end ? { lte: end } : {}) } } : {}),
+      ...(search ? { OR: [
+        { paymentNo: { contains: search, mode: "insensitive" } },
+        { workerName: { contains: search, mode: "insensitive" } },
+        { workerPhone: { contains: search, mode: "insensitive" } },
+        { job: { contains: search, mode: "insensitive" } },
+      ] } : {}),
+    },
+    include: casualInclude,
+    orderBy: [{ workDate: "desc" }, { createdAt: "desc" }],
+  });
+  res.json({ payments });
+});
+
+/** Labourers paid before, newest first, so a returning one is picked instead of retyped. */
+employeeSalariesRouter.get("/casual/workers", async (req, res) => {
+  const rows = await prisma.casualLabourPayment.findMany({
+    where: { tenantId: tenantId(req) },
+    select: { workerName: true, workerPhone: true, workerIdNo: true, rate: true, unitLabel: true },
+    orderBy: { createdAt: "desc" },
+    take: 500,
+  });
+  const seen = new Set<string>();
+  const workers = rows.filter((row) => {
+    const key = row.workerName.trim().toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  res.json({ workers });
+});
+
+employeeSalariesRouter.post("/casual", async (req, res, next) => {
+  const data = casualSchema.safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: data.error.issues[0]?.message ?? "Invalid casual labour payment", details: data.error.flatten() }); return; }
+  const tid = tenantId(req);
+  const d = data.data;
+  const amount = d.quantity && d.rate ? Math.round(d.quantity * d.rate * 100) / 100 : d.amount!;
+  try {
+    if (d.locationId && !(await prisma.location.findFirst({ where: { id: d.locationId, tenantId: tid }, select: { id: true } }))) {
+      res.status(400).json({ error: "Choose a location from this property" }); return;
+    }
+    const [paymentNo, transactionNo] = await Promise.all([nextCasualLabourNo(tid), nextTransactionNo(tid)]);
+    const payment = await prisma.$transaction(async (tx) => {
+      const reference = d.reference ? await assertPaymentReferenceUnused(tx, tid, d.reference) : undefined;
+      const created = await tx.casualLabourPayment.create({
+        data: {
+          tenantId: tid, paymentNo, workerName: d.workerName, workerPhone: d.workerPhone ?? null, workerIdNo: d.workerIdNo ?? null,
+          job: d.job, workDate: d.workDate, locationId: d.locationId ?? null,
+          quantity: d.quantity && d.rate ? d.quantity : null, unitLabel: d.quantity && d.rate ? d.unitLabel ?? "days" : null, rate: d.quantity && d.rate ? d.rate : null,
+          amount, paymentMethod: d.paymentMethod, reference: reference ?? null, notes: d.notes ?? null, createdBy: req.userId ?? null,
+        },
+        include: casualInclude,
+      });
+      // Same money trail as a payslip: a SALARY_PAYMENT out, voided with the payment.
+      await tx.transaction.create({
+        data: {
+          tenantId: tid, transactionNo, direction: "OUT", source: "SALARY_PAYMENT", amount, reference,
+          locationId: d.locationId ?? null, employeeId: req.userId,
+          description: `Casual labour ${paymentNo} - ${d.workerName} (${d.job})`, sourceRefId: created.id,
+        },
+      });
+      return created;
+    });
+    res.status(201).json({ payment });
+  } catch (error) {
+    if (sendSalaryError(res, error)) return;
+    next(error);
+  }
+});
+
+employeeSalariesRouter.post("/casual/:id/void", async (req, res) => {
+  const data = voidSchema.safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: "Give a reason for voiding", details: data.error.flatten() }); return; }
+  const tid = tenantId(req);
+  const existing = await prisma.casualLabourPayment.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, status: true } });
+  if (!existing) { res.status(404).json({ error: "Casual labour payment not found" }); return; }
+  if (existing.status === "VOIDED") { res.status(409).json({ error: "This payment is already voided" }); return; }
+  const payment = await prisma.$transaction(async (tx) => {
+    await tx.transaction.updateMany({ where: { tenantId: tid, source: "SALARY_PAYMENT", sourceRefId: existing.id }, data: { status: "VOIDED" } });
+    return tx.casualLabourPayment.update({
+      where: { id: existing.id },
+      data: { status: "VOIDED", voidReason: data.data.reason, voidedBy: req.userId ?? null },
+      include: casualInclude,
+    });
+  });
+  res.json({ payment });
+});
+
 /** Completed salaries for a period, totalled overall and by employee, location, department and month. */
 employeeSalariesRouter.get("/report", requirePermission("SALARY_MANAGE"), async (req, res, next) => {
   const query = reportSchema.safeParse(req.query);
@@ -379,10 +511,39 @@ employeeSalariesRouter.get("/report", requirePermission("SALARY_MANAGE"), async 
       },
       orderBy: { payPeriod: "asc" },
     });
-    const totals = groupSalaries(rows, () => ({ key: "all", name: "All employees" }))[0] ?? { count: 0, basic: 0, allowances: 0, deductions: 0, gross: 0, net: 0 };
+    // Casual labour counts as salaries too: each payment is one row in a
+    // "Casual labour" department, its worker named "(casual)". A department
+    // filter leaves them out - they belong to none.
+    const casualTo = query.data.month ? to : to ? new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() + 1, 0)) : undefined;
+    const casual = departmentId ? [] : await prisma.casualLabourPayment.findMany({
+      where: {
+        tenantId: tid,
+        status: "COMPLETE",
+        ...(locationId ? { locationId } : {}),
+        ...(from || casualTo ? { workDate: { ...(from ? { gte: from } : {}), ...(casualTo ? { lte: casualTo } : {}) } } : {}),
+      },
+      include: { location: { select: { id: true, name: true } } },
+      orderBy: { workDate: "asc" },
+    });
+    type ReportRow = {
+      employee: { id: string; firstName: string; lastName: string; department: { id: string; name: string } | null; defaultLocation: { id: string; name: string } | null }
+      basicSalary: unknown; totalAllowances: unknown; totalDeductions: unknown; grossPay: unknown; netPay: unknown; carriedOverAmount: unknown
+      payPeriod: Date
+      items: { type: string; label: string; amount: unknown }[]
+    }
+    const allRows: ReportRow[] = [
+      ...rows,
+      ...casual.map((c) => ({
+        employee: { id: `casual:${c.workerName.trim().toLowerCase()}`, firstName: `${c.workerName.trim()} (casual)`, lastName: "", department: { id: "casual", name: "Casual labour" }, defaultLocation: c.location },
+        basicSalary: c.amount, totalAllowances: 0, totalDeductions: 0, grossPay: c.amount, netPay: c.amount, carriedOverAmount: 0,
+        payPeriod: new Date(Date.UTC(c.workDate.getUTCFullYear(), c.workDate.getUTCMonth(), 1)),
+        items: [],
+      })),
+    ];
+    const totals = groupSalaries(allRows, () => ({ key: "all", name: "All employees" }))[0] ?? { count: 0, basic: 0, allowances: 0, deductions: 0, gross: 0, net: 0 };
     // Each employee's allowance and deduction lines, same label summed across their payslips in the range.
     const breakdown = new Map<string, { allowanceItems: Map<string, number>; deductionItems: Map<string, number>; carriedOver: number }>();
-    for (const row of rows) {
+    for (const row of allRows) {
       const entry = breakdown.get(row.employee.id) ?? { allowanceItems: new Map(), deductionItems: new Map(), carriedOver: 0 };
       for (const item of row.items) {
         const target = item.type === "ALLOWANCE" ? entry.allowanceItems : entry.deductionItems;
@@ -395,14 +556,14 @@ employeeSalariesRouter.get("/report", requirePermission("SALARY_MANAGE"), async 
     res.json({
       range: { from: from?.toISOString() ?? null, to: to?.toISOString() ?? null },
       totals,
-      byEmployee: groupSalaries(rows, (r) => ({ key: r.employee.id, name: `${r.employee.firstName} ${r.employee.lastName}`.trim() })).map((group) => {
+      byEmployee: groupSalaries(allRows, (r) => ({ key: r.employee.id, name: `${r.employee.firstName} ${r.employee.lastName}`.trim() })).map((group) => {
         const entry = breakdown.get(group.key);
         // carriedOver: deductions pushed to a later month, so the deduction lines can add up to more than \`deductions\`.
         return { ...group, allowanceItems: lines(entry?.allowanceItems), deductionItems: lines(entry?.deductionItems), carriedOver: round2Report(entry?.carriedOver ?? 0) };
       }),
-      byLocation: groupSalaries(rows, (r) => ({ key: r.employee.defaultLocation?.id ?? "unassigned", name: r.employee.defaultLocation?.name ?? "Works anywhere" })),
-      byDepartment: groupSalaries(rows, (r) => ({ key: r.employee.department?.id ?? "none", name: r.employee.department?.name ?? "No department" })),
-      byMonth: groupSalaries(rows, (r) => ({ key: r.payPeriod.toISOString().slice(0, 7), name: `${MONTH_NAMES[r.payPeriod.getUTCMonth()]} ${r.payPeriod.getUTCFullYear()}` })).sort((a, b) => a.key.localeCompare(b.key)),
+      byLocation: groupSalaries(allRows, (r) => ({ key: r.employee.defaultLocation?.id ?? "unassigned", name: r.employee.defaultLocation?.name ?? "Works anywhere" })),
+      byDepartment: groupSalaries(allRows, (r) => ({ key: r.employee.department?.id ?? "none", name: r.employee.department?.name ?? "No department" })),
+      byMonth: groupSalaries(allRows, (r) => ({ key: r.payPeriod.toISOString().slice(0, 7), name: `${MONTH_NAMES[r.payPeriod.getUTCMonth()]} ${r.payPeriod.getUTCFullYear()}` })).sort((a, b) => a.key.localeCompare(b.key)),
     });
   } catch (error) {
     next(error);
