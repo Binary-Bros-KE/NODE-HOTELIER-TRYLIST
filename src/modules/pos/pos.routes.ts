@@ -543,7 +543,7 @@ async function shiftPastBusinessDayCutover(tid: string, userId: string | undefin
  * one past the waiters' return window — for the genuine mistake nobody else
  * can fix. Used only by the cancel/return-request paths; it still goes
  * through normal approval, so stock and payments are unwound the same way. */
-async function isSuperAdminUser(tid: string, userId: string | undefined): Promise<boolean> {
+export async function isSuperAdminUser(tid: string, userId: string | undefined): Promise<boolean> {
   if (!userId) return false;
   const employee = await prisma.employee.findFirst({ where: { id: userId, tenantId: tid, status: "ACTIVE" }, select: { role: { select: { name: true } } } });
   return employee?.role?.name === "Super Admin";

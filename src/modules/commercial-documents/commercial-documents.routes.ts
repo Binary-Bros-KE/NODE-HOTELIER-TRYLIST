@@ -6,7 +6,7 @@ import { prisma } from "../../lib/prisma.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { resolveEffectiveLocation } from "../../lib/location.js";
 import { nextCommercialDocumentPaymentNo, nextCustomerNo, nextInvoiceNo, nextQuotationNo, nextTransactionNo } from "../../lib/sequence.js";
-import { orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.js";
+import { isSuperAdminUser, orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 
 const docTypes = ["QUOTATION", "INVOICE"] as const;
@@ -1076,4 +1076,60 @@ commercialDocumentsRouter.post("/:id/payments", async (req, res) => {
     return refreshDocumentTotals(tx as Tx, document.id);
   });
   res.status(201).json({ document: updated });
+});
+
+/**
+ * Deletes an invoice or quotation (Super Admin only). Money is never deleted:
+ *  - Payments recorded on the document itself (manual invoices, quotation
+ *    deposits, payments taken on a converted invoice) have their transactions
+ *    VOIDED, so they drop out of every report, cash-up and the payment-code
+ *    check, and stay visible in Transactions as voided.
+ *  - A stay invoice's payments are the folio's (FolioPayment + FOLIO_*
+ *    transactions) and an order invoice's are the order's: those belong to the
+ *    stay / sale, not the invoice, so they are left untouched. Only the
+ *    document goes; the stay or order can be invoiced again.
+ *  - An invoice converted from a quotation returns that quotation to ACCEPTED
+ *    (the deposits it carried live on the quotation's own payments).
+ *  - A quotation that was converted can't go while its invoice exists - the
+ *    invoice shows its deposits.
+ * Lines and payment rows cascade with the document.
+ */
+commercialDocumentsRouter.delete("/:id", async (req, res) => {
+  const tid = tenantId(req);
+  if (!(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can delete invoices and quotations" }); return; }
+  const doc = await prisma.commercialDocument.findFirst({
+    where: { id: req.params.id, tenantId: tid },
+    include: {
+      payments: { select: { transactionId: true } },
+      convertedDocuments: { select: { documentNo: true, type: true } },
+    },
+  });
+  if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+  const invoice = doc.convertedDocuments.find((d) => d.type === "INVOICE");
+  if (doc.type === "QUOTATION" && invoice) {
+    res.status(409).json({ error: `This quotation was converted to invoice ${invoice.documentNo}. Delete that invoice first.` });
+    return;
+  }
+
+  const transactionIds = doc.payments.map((p) => p.transactionId).filter((id): id is string => Boolean(id));
+  const result = await prisma.$transaction(async (tx) => {
+    const transactions = transactionIds.length
+      ? await tx.transaction.findMany({ where: { tenantId: tid, id: { in: transactionIds }, status: "COMPLETE" }, select: { id: true, description: true } })
+      : [];
+    for (const t of transactions) {
+      await tx.transaction.update({
+        where: { id: t.id },
+        data: { status: "VOIDED", description: `${t.description ?? doc.documentNo} - voided: ${doc.documentNo} deleted` },
+      });
+    }
+    if (doc.type === "INVOICE" && doc.source === "QUOTATION" && doc.sourceDocumentId) {
+      await tx.commercialDocument.updateMany({
+        where: { id: doc.sourceDocumentId, tenantId: tid, status: "CONVERTED" },
+        data: { status: "ACCEPTED", updatedBy: req.userId },
+      });
+    }
+    await tx.commercialDocument.delete({ where: { id: doc.id } });
+    return { voidedPayments: transactions.length };
+  });
+  res.json({ deleted: doc.documentNo, ...result });
 });
