@@ -2383,7 +2383,7 @@ posRouter.get("/product-stock", async (req, res) => {
     locationId: z.string().cuid().optional(),
     search: z.string().trim().max(100).optional(),
     categoryId: z.string().cuid().optional(),
-    stock: z.enum(["ALL", "LOW", "OUT"]).default("ALL"),
+    stock: z.enum(["ALL", "IN", "LOW", "OUT"]).default("ALL"),
     inStockOnly: z.coerce.boolean().default(false),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
@@ -2392,31 +2392,31 @@ posRouter.get("/product-stock", async (req, res) => {
   const locationIds = scope.ids;
   if (locationIds && locationIds.length === 0) { res.status(200).json({ products: [], categories: [], summary: { totalProducts: 0, totalUnits: 0, lowStock: 0, outOfStock: 0 } }); return; }
 
+  // A location's products are the ones tagged for its section (a zero-stock
+  // product is still in its section) plus anything that has stock there.
+  const locationTypes = locationIds
+    ? (await prisma.location.findMany({ where: { tenantId: tid, id: { in: locationIds } }, select: { type: true } })).map((l) => l.type)
+    : [];
   const where: Prisma.ProductWhereInput = {
     tenantId: tid,
     isActive: true,
-    ...(query.data.categoryId ? { categoryId: query.data.categoryId } : {}),
-    ...(query.data.search ? { OR: [
-      { name: { contains: query.data.search, mode: "insensitive" } },
-      { sku: { contains: query.data.search, mode: "insensitive" } },
-      { barcode: { contains: query.data.search, mode: "insensitive" } },
-      { brand: { contains: query.data.search, mode: "insensitive" } },
+    isExpenseItem: false,
+    ...(locationIds ? { OR: [
+      { tags: { hasSome: locationTypes } },
+      { stocks: { some: { locationId: { in: locationIds }, quantity: { not: 0 } } } },
     ] } : {}),
   };
-  const [products, categories] = await Promise.all([
-    prisma.product.findMany({
-      where,
-      select: {
-        id: true, name: true, sku: true, barcode: true, brand: true, unit: true,
-        reorderLevel: true, maxStockLevel: true, sellingPrice: true, sellsDirectly: true,
-        packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } },
-        category: { select: { id: true, name: true } },
-        stocks: { where: locationIds ? { locationId: { in: locationIds } } : {}, select: { locationId: true, quantity: true, location: { select: { id: true, name: true } } } },
-      },
-      orderBy: { name: "asc" },
-    }),
-    prisma.category.findMany({ where: { tenantId: tid, scope: "STORE" }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
-  ]);
+  const products = await prisma.product.findMany({
+    where,
+    select: {
+      id: true, name: true, sku: true, barcode: true, brand: true, unit: true,
+      reorderLevel: true, maxStockLevel: true, sellingPrice: true, sellsDirectly: true,
+      packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } },
+      category: { select: { id: true, name: true } },
+      stocks: { where: locationIds ? { locationId: { in: locationIds } } : {}, select: { locationId: true, quantity: true, location: { select: { id: true, name: true } } } },
+    },
+    orderBy: { name: "asc" },
+  });
 
   const rows = products.map((product) => {
     const quantity = product.stocks.reduce((sum, stock) => sum + Number(stock.quantity), 0);
@@ -2442,8 +2442,18 @@ posRouter.get("/product-stock", async (req, res) => {
       stockByLocation: product.stocks.map((stock) => ({ locationId: stock.locationId, locationName: stock.location.name, quantity: Number(stock.quantity) })),
     };
   });
-  const visibleRows = query.data.inStockOnly ? rows.filter((row) => row.quantity > 0) : rows;
-  const filtered = visibleRows.filter((row) => query.data.stock === "LOW" ? row.low : query.data.stock === "OUT" ? row.out : true);
+  const locationRows = query.data.inStockOnly ? rows.filter((row) => row.quantity > 0) : rows;
+  // Categories come from this location's products only, before search/category
+  // narrow the list, so the dropdown never offers a category with nothing in it.
+  const categoryMap = new Map<string, { id: string; name: string }>();
+  for (const row of locationRows) if (row.category) categoryMap.set(row.category.id, row.category);
+  const categories = [...categoryMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const term = query.data.search?.toLowerCase();
+  const visibleRows = locationRows.filter((row) =>
+    (!query.data.categoryId || row.category?.id === query.data.categoryId)
+    && (!term || [row.name, row.sku, row.barcode, row.brand].some((value) => value?.toLowerCase().includes(term))));
+  const filtered = visibleRows.filter((row) =>
+    query.data.stock === "IN" ? !row.out : query.data.stock === "LOW" ? row.low : query.data.stock === "OUT" ? row.out : true);
   res.status(200).json({
     products: filtered,
     categories,
