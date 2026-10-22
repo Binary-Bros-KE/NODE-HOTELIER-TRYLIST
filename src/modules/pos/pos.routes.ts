@@ -1300,6 +1300,11 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
     res.status(409).json({ error: "Orders posted to the store cannot be reverted. Request a return instead." });
     return;
   }
+  // Posted to a counter = handed to the barman: from then on it's a return or Super Admin.
+  if (!unpaidServiceSale && order.location?.serveMode === "COUNTER") {
+    res.status(409).json({ error: "Orders posted to the counter cannot be reverted. Request a return instead." });
+    return;
+  }
   // Once the kitchen has started an order it can no longer be reverted.
   if (!unpaidServiceSale && (order.status !== "OPEN" || order.servedAt)) {
     res.status(409).json({ error: "The kitchen has already started this order, so it can't be reverted" });
