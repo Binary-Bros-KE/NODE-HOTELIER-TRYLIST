@@ -373,14 +373,33 @@ employeeSalariesRouter.get("/report", requirePermission("SALARY_MANAGE"), async 
         ...(from || to ? { payPeriod: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {}),
         ...(Object.keys(employeeWhere).length ? { employee: employeeWhere } : {}),
       },
-      include: { employee: { select: { id: true, firstName: true, lastName: true, employeeCode: true, department: { select: { id: true, name: true } }, defaultLocation: { select: { id: true, name: true } } } } },
+      include: {
+        employee: { select: { id: true, firstName: true, lastName: true, employeeCode: true, department: { select: { id: true, name: true } }, defaultLocation: { select: { id: true, name: true } } } },
+        items: { select: { type: true, label: true, amount: true }, orderBy: { createdAt: "asc" } },
+      },
       orderBy: { payPeriod: "asc" },
     });
     const totals = groupSalaries(rows, () => ({ key: "all", name: "All employees" }))[0] ?? { count: 0, basic: 0, allowances: 0, deductions: 0, gross: 0, net: 0 };
+    // Each employee's allowance and deduction lines, same label summed across their payslips in the range.
+    const breakdown = new Map<string, { allowanceItems: Map<string, number>; deductionItems: Map<string, number>; carriedOver: number }>();
+    for (const row of rows) {
+      const entry = breakdown.get(row.employee.id) ?? { allowanceItems: new Map(), deductionItems: new Map(), carriedOver: 0 };
+      for (const item of row.items) {
+        const target = item.type === "ALLOWANCE" ? entry.allowanceItems : entry.deductionItems;
+        target.set(item.label, (target.get(item.label) ?? 0) + Number(item.amount));
+      }
+      entry.carriedOver += Number(row.carriedOverAmount);
+      breakdown.set(row.employee.id, entry);
+    }
+    const lines = (items: Map<string, number> | undefined) => [...(items ?? new Map<string, number>())].map(([label, amount]) => ({ label, amount: round2Report(amount) }));
     res.json({
       range: { from: from?.toISOString() ?? null, to: to?.toISOString() ?? null },
       totals,
-      byEmployee: groupSalaries(rows, (r) => ({ key: r.employee.id, name: `${r.employee.firstName} ${r.employee.lastName}`.trim() })),
+      byEmployee: groupSalaries(rows, (r) => ({ key: r.employee.id, name: `${r.employee.firstName} ${r.employee.lastName}`.trim() })).map((group) => {
+        const entry = breakdown.get(group.key);
+        // carriedOver: deductions pushed to a later month, so the deduction lines can add up to more than \`deductions\`.
+        return { ...group, allowanceItems: lines(entry?.allowanceItems), deductionItems: lines(entry?.deductionItems), carriedOver: round2Report(entry?.carriedOver ?? 0) };
+      }),
       byLocation: groupSalaries(rows, (r) => ({ key: r.employee.defaultLocation?.id ?? "unassigned", name: r.employee.defaultLocation?.name ?? "Works anywhere" })),
       byDepartment: groupSalaries(rows, (r) => ({ key: r.employee.department?.id ?? "none", name: r.employee.department?.name ?? "No department" })),
       byMonth: groupSalaries(rows, (r) => ({ key: r.payPeriod.toISOString().slice(0, 7), name: `${MONTH_NAMES[r.payPeriod.getUTCMonth()]} ${r.payPeriod.getUTCFullYear()}` })).sort((a, b) => a.key.localeCompare(b.key)),
