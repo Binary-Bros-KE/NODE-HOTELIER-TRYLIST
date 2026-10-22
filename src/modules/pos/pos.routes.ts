@@ -633,6 +633,98 @@ posRouter.get("/orders/ready", async (req, res) => {
   res.status(200).json({ notifications: orders.map((order) => ({ type: "ORDER_READY", message: `Order #${order.orderNumber} is ready to serve`, order: withFinancials(order, tax) })) });
 });
 
+type MenuItemsById = Awaited<ReturnType<typeof resolveMenuLines>>["menuItemsById"];
+type AddonsById = Awaited<ReturnType<typeof resolveMenuLines>>["addonsById"];
+type PosOrderFull = Prisma.PosOrderGetPayload<{ include: typeof orderInclude }>;
+const statusError = (message: string, status: number) => Object.assign(new Error(message), { status });
+
+/** The usual POS error mapping: a stock shortfall is 409, a status-tagged error uses its status.
+ * Returns false for anything else, which the caller rethrows. */
+function sendOrderError(res: import("express").Response, error: unknown) {
+  if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return true; }
+  if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return true; }
+  return false;
+}
+
+/** Waiters who work two places (restaurant + bar) post from whichever location they're
+ * switched to. A line stays at that location when it sells the item (or the item is sold
+ * everywhere); otherwise it goes to the one other location that sells it, so bar drinks
+ * never reach the kitchen/store and food never lands at the bar counter. */
+function splitLinesByLocation(lines: ResolvedLine[], menuItemsById: MenuItemsById, baseLocationId: string | null) {
+  const here: ResolvedLine[] = [];
+  const elsewhere = new Map<string, { location: Prisma.LocationGetPayload<{}>; lines: ResolvedLine[] }>();
+  for (const line of lines) {
+    const item = menuItemsById.get(line.menuItemId)!;
+    if (!baseLocationId || item.locations.length === 0 || item.locations.some((loc) => loc.id === baseLocationId)) { here.push(line); continue; }
+    if (item.locations.length > 1) throw statusError(`${item.name} is sold in more than one other location. Switch to that location before adding it.`, 400);
+    const target = item.locations[0];
+    const bucket = elsewhere.get(target.id) ?? { location: target, lines: [] };
+    bucket.lines.push(line);
+    elsewhere.set(target.id, bucket);
+  }
+  return { here, elsewhere };
+}
+
+/** Checks one location's share of a new order can be made there (stock on hand, or
+ * postable to its store) and works out how that order starts. */
+async function prepareOrderGroup(tid: string, location: FulfillmentLocation, lines: ResolvedLine[], menuItemsById: MenuItemsById, addonsById: AddonsById) {
+  if (location && !location.canSellMenu) throw statusError(`${location.name} isn't set up to sell menu items`, 409);
+  // Owner-controlled per location (Location.serveMode). DIRECT: skips
+  // OPEN/PREPARING/READY entirely and goes straight to SERVED, exactly like
+  // a retail (Products/Services) sale already does. COUNTER: no kitchen
+  // prep either, but a human still has to hand it over — the order is born
+  // straight at READY, same as if a kitchen had just finished it, and
+  // whoever's staffing the counter marks it served via the existing
+  // PATCH .../serve (gated to POS_APPROVE_COUNTER for this mode).
+  const serveMode = location?.serveMode ?? "KITCHEN";
+  const instantServe = serveMode === "DIRECT";
+  const startsAtCounter = serveMode === "COUNTER";
+  const requirements = computeStockRequirements(resolvedLinesForStock(lines, menuItemsById, addonsById));
+  const stockLocationId = requirements.size > 0 ? await resolveStockLocationId(tid, location?.id ?? null) : null;
+  if (requirements.size > 0 && !stockLocationId) throw statusError("No location is configured to hold stock for this order", 400);
+  if (!instantServe && stockLocationId && !dispatchRequired(location)) {
+    await prisma.$transaction((tx) => assertStockAvailable(tx, tid, requirements, stockLocationId));
+  }
+  await assertPostableToStore(tid, location, requirements);
+  return { location, lines, instantServe, startsAtCounter, requirements, stockLocationId };
+}
+type PreparedOrderGroup = Awaited<ReturnType<typeof prepareOrderGroup>>;
+
+type OrderHeader = Pick<Prisma.PosOrderUncheckedCreateInput,
+  "tableId" | "billGroupId" | "customerId" | "reservationId" | "saleType" | "complimentarySessionId" | "complimentaryOrderRole" | "complimentaryReason" | "complimentaryRecipientName" | "createdBy" | "notes">;
+
+/** Writes one location's order inside the caller's transaction. A direct-serve order is
+ * born SERVED, so its stock and sales ledger are taken now. */
+async function createGroupOrder(tx: Prisma.TransactionClient, tid: string, orderNumber: number, header: OrderHeader, group: PreparedOrderGroup, discount: number, req: { userId?: string }) {
+  const order = await tx.posOrder.create({
+    data: {
+      ...header,
+      tenantId: tid,
+      orderNumber,
+      locationId: group.location?.id,
+      discount,
+      paymentStatus: header.saleType === "COMPLIMENTARY" ? "PAID" : "UNPAID",
+      status: group.instantServe ? "SERVED" : group.startsAtCounter ? "READY" : "OPEN",
+      servedAt: group.instantServe ? new Date() : undefined,
+      readyAt: group.startsAtCounter ? new Date() : undefined,
+      items: { create: lineCreatePayload(group.lines) },
+    },
+    include: orderInclude,
+  });
+  if (group.instantServe) {
+    if (group.stockLocationId) await deductStockForOrder(tx, tid, group.requirements, group.stockLocationId, order.orderNumber, req);
+    await recordMenuLedger(tx, { tenantId: tid, type: order.saleType === "COMPLIMENTARY" ? "COMPLIMENTARY" : "SALE", order, lines: menuLedgerLinesFromItems(order.items), by: req.userId });
+  }
+  return order;
+}
+
+/** After the write: store-dispatch locations request their ingredients now, and counter
+ * locations print the barman a ticket of what was just posted. */
+async function afterOrdersCreated(tid: string, orders: PosOrderFull[], userId: string | undefined) {
+  await Promise.all(orders.map((order) => autoRequestDispatch(tid, order.id, userId)));
+  await Promise.all(orders.map((order) => queueOrderTicket({ tenantId: tid, order, event: "NEW", after: order.items, by: userId })));
+}
+
 posRouter.post("/orders", async (req, res) => {
   const parsed = orderSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid order", details: parsed.error.flatten() }); return; }
@@ -665,70 +757,27 @@ posRouter.post("/orders", async (req, res) => {
   const { location } = locationResult;
   if (location && !location.canSellMenu) { res.status(409).json({ error: `${location.name} isn't set up to sell menu items` }); return; }
   const effectiveLocationId = location?.id ?? null;
-  // Owner-controlled per location (Location.serveMode). DIRECT: skips
-  // OPEN/PREPARING/READY entirely and goes straight to SERVED, exactly like
-  // a retail (Products/Services) sale already does. COUNTER: no kitchen
-  // prep either, but a human still has to hand it over — the order is born
-  // straight at READY, same as if a kitchen had just finished it, and
-  // whoever's staffing the counter marks it served via the existing
-  // PATCH .../serve (gated to POS_APPROVE_COUNTER for this mode).
-  const groupsByLocation = new Map<string, { location: FulfillmentLocation; lines: ResolvedLine[] }>();
-  const targetForLine = (line: ResolvedLine): FulfillmentLocation => {
-    const item = menuItemsById.get(line.menuItemId)!;
-    if (!location || item.locations.length === 0 || item.locations.some((loc) => loc.id === effectiveLocationId)) return location;
-    if (item.locations.length === 1) return item.locations[0];
-    throw Object.assign(new Error(`${item.name} is sold in more than one other location. Switch to that location before adding it.`), { status: 400 });
-  };
-  try {
-    for (const line of resolvedLines) {
-      const target = targetForLine(line);
-      if (target && !target.canSellMenu) throw Object.assign(new Error(`${target.name} isn't set up to sell menu items`), { status: 409 });
-      const key = target?.id ?? "__none__";
-      const bucket = groupsByLocation.get(key) ?? { location: target, lines: [] };
-      bucket.lines.push(line);
-      groupsByLocation.set(key, bucket);
-    }
-  } catch (error) {
-    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
-    throw error;
-  }
 
-  const rawGroups = [...groupsByLocation.values()];
-  const overallSubtotal = rawGroups.reduce((sum, group) => sum + group.lines.reduce((lineSum, line) => lineSum + lineSubtotal(line), 0), 0);
-  let allocatedDiscount = 0;
-  let orderGroups: {
-    location: FulfillmentLocation;
-    lines: ResolvedLine[];
-    instantServe: boolean;
-    startsAtCounter: boolean;
-    requirements: Map<string, { quantity: number; name: string }>;
-    stockLocationId: string | null;
-    discount: number;
-  }[];
+  let orderGroups: (PreparedOrderGroup & { discount: number })[];
   try {
-    orderGroups = await Promise.all(rawGroups.map(async (group, index) => {
-      const serveMode = group.location?.serveMode ?? "KITCHEN";
-      const instantServe = serveMode === "DIRECT";
-      const startsAtCounter = serveMode === "COUNTER";
-      const requirements = computeStockRequirements(resolvedLinesForStock(group.lines, menuItemsById, addonsById));
-      const stockLocationId = requirements.size > 0 ? await resolveStockLocationId(tid, group.location?.id ?? null) : null;
-      if (requirements.size > 0 && !stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this order"), { status: 400 });
-      if (!instantServe && stockLocationId && !dispatchRequired(group.location)) {
-        await prisma.$transaction((tx) => assertStockAvailable(tx, tid, requirements, stockLocationId));
-      }
-      await assertPostableToStore(tid, group.location, requirements);
+    const { here, elsewhere } = splitLinesByLocation(resolvedLines, menuItemsById, effectiveLocationId);
+    const rawGroups = [...(here.length ? [{ location, lines: here }] : []), ...elsewhere.values()];
+    const prepared = await Promise.all(rawGroups.map((group) => prepareOrderGroup(tid, group.location, group.lines, menuItemsById, addonsById)));
+    // One discount for the whole bill, shared across the location orders by value; the last takes the rounding.
+    const overallSubtotal = prepared.reduce((sum, group) => sum + group.lines.reduce((lineSum, line) => lineSum + lineSubtotal(line), 0), 0);
+    let allocatedDiscount = 0;
+    orderGroups = prepared.map((group, index) => {
       const groupSubtotal = group.lines.reduce((sum, line) => sum + lineSubtotal(line), 0);
-      const discount = parsed.data.saleType === "COMPLIMENTARY" ? 0 : rawGroups.length === 1
+      const discount = parsed.data.saleType === "COMPLIMENTARY" ? 0 : prepared.length === 1
         ? parsed.data.discount
-        : index === rawGroups.length - 1
+        : index === prepared.length - 1
           ? money2(parsed.data.discount - allocatedDiscount)
           : money2(overallSubtotal > 0 ? parsed.data.discount * (groupSubtotal / overallSubtotal) : 0);
       allocatedDiscount += discount;
-      return { ...group, instantServe, startsAtCounter, requirements, stockLocationId, discount };
-    }));
+      return { ...group, discount };
+    });
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
-    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    if (sendOrderError(res, error)) return;
     throw error;
   }
 
@@ -760,50 +809,29 @@ posRouter.post("/orders", async (req, res) => {
   try {
     const createdOrders = await prisma.$transaction(async (tx) => {
       const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
-      const billGroupId = orderGroups.length > 1 ? randomBytes(12).toString("hex") : undefined;
-      const created: Prisma.PosOrderGetPayload<{ include: typeof orderInclude }>[] = [];
+      const header: OrderHeader = {
+        tableId: parsed.data.tableId,
+        billGroupId: orderGroups.length > 1 ? randomBytes(12).toString("hex") : undefined,
+        customerId,
+        reservationId: billToReservationId,
+        saleType: parsed.data.saleType,
+        complimentarySessionId,
+        complimentaryOrderRole: parsed.data.saleType === "COMPLIMENTARY" ? "HOST_COMP" : parsed.data.complimentarySessionId ? (parsed.data.complimentaryOrderRole ?? "GUEST_SPEND") : undefined,
+        complimentaryReason: parsed.data.complimentaryReason,
+        complimentaryRecipientName: parsed.data.complimentaryRecipientName,
+        createdBy: req.userId,
+        notes: parsed.data.notes,
+      };
+      const created: PosOrderFull[] = [];
       for (const [index, group] of orderGroups.entries()) {
-        const order = await tx.posOrder.create({
-          data: {
-            tenantId: tid,
-            orderNumber: (last?.orderNumber ?? 0) + index + 1,
-            tableId: parsed.data.tableId,
-            locationId: group.location?.id,
-            billGroupId,
-            customerId,
-            reservationId: billToReservationId,
-            saleType: parsed.data.saleType,
-            complimentarySessionId,
-            complimentaryOrderRole: parsed.data.saleType === "COMPLIMENTARY" ? "HOST_COMP" : parsed.data.complimentarySessionId ? (parsed.data.complimentaryOrderRole ?? "GUEST_SPEND") : undefined,
-            complimentaryReason: parsed.data.complimentaryReason,
-            complimentaryRecipientName: parsed.data.complimentaryRecipientName,
-            createdBy: req.userId,
-            notes: parsed.data.notes,
-            discount: group.discount,
-            paymentStatus: parsed.data.saleType === "COMPLIMENTARY" ? "PAID" : "UNPAID",
-            status: group.instantServe ? "SERVED" : group.startsAtCounter ? "READY" : "OPEN",
-            servedAt: group.instantServe ? new Date() : undefined,
-            readyAt: group.startsAtCounter ? new Date() : undefined,
-            items: { create: lineCreatePayload(group.lines) },
-          },
-          include: orderInclude,
-        });
-        if (group.instantServe) {
-          if (group.stockLocationId) await deductStockForOrder(tx, tid, group.requirements, group.stockLocationId, order.orderNumber, req);
-          await recordMenuLedger(tx, { tenantId: tid, type: order.saleType === "COMPLIMENTARY" ? "COMPLIMENTARY" : "SALE", order, lines: menuLedgerLinesFromItems(order.items), by: req.userId });
-        }
-        created.push(order);
+        created.push(await createGroupOrder(tx, tid, (last?.orderNumber ?? 0) + index + 1, header, group, group.discount, req));
       }
       if (parsed.data.tableId) {
         await tx.table.updateMany({ where: { id: parsed.data.tableId }, data: { status: "OCCUPIED" } });
       }
       return created;
     });
-    // Store-dispatch locations: the ingredients are requested from the store right now,
-    // so the chef just sees "waiting for store approval".
-    await Promise.all(createdOrders.map((order) => autoRequestDispatch(tid, order.id, req.userId)));
-    // Counter locations: the barman gets a ticket of what was just posted.
-    await Promise.all(createdOrders.map((order) => queueOrderTicket({ tenantId: tid, order, event: "NEW", after: order.items, by: req.userId })));
+    await afterOrdersCreated(tid, createdOrders, req.userId);
     const primary = createdOrders.find((order) => order.locationId === effectiveLocationId) ?? createdOrders[0];
     res.status(201).json({ order: withFinancials(primary, tax), linkedOrders: createdOrders.map((order) => withFinancials(order, tax)) });
   } catch (error) {
@@ -813,30 +841,16 @@ posRouter.post("/orders", async (req, res) => {
   }
 });
 
-/** Adds more items to a still-open FOOD order — another round, more food —
- * before it's finally settled. Food/Bar only: Products/Services sales are
- * one-shot, created and settled together, with no "keep adding" moment. */
-posRouter.post("/orders/:id/items", async (req, res) => {
-  const parsed = addItemsSchema.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: "Invalid items", details: parsed.error.flatten() }); return; }
-  const tid = tenantIdFor(req);
-  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
-  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
-  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only add items to your own orders" }); return; }
-  if (order.channel !== "FOOD") { res.status(409).json({ error: "Only food/bar orders can have items added after the fact" }); return; }
-  if (["COMPLETED", "CANCELLED"].includes(order.status)) { res.status(409).json({ error: "This order is already finalized — start a new one instead" }); return; }
-
-  const tax = await taxSettingsFor(tid);
-  let resolvedLines: ResolvedLine[];
-  let menuItemsById: Awaited<ReturnType<typeof resolveMenuLines>>["menuItemsById"];
-  let addonsById: Awaited<ReturnType<typeof resolveMenuLines>>["addonsById"];
-  try {
-    ({ lines: resolvedLines, menuItemsById, addonsById } = await resolveMenuLines(tid, parsed.data.items, tax));
-  } catch (error) {
-    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
-    throw error;
-  }
-
+/** Validates adding a round to one existing order (stock on hand, or postable to its
+ * store) and returns the write to run once every part of the round has passed. */
+async function prepareAddToOrder(
+  tid: string,
+  order: PosOrderFull,
+  resolvedLines: ResolvedLine[],
+  menuItemsById: MenuItemsById,
+  addonsById: AddonsById,
+  req: { userId?: string },
+) {
   // Same menu item, same variant, same set of add-ons is the *same line* —
   // bump its quantity instead of stacking a duplicate row on the bill. A
   // different variant or add-on selection stays a separate line.
@@ -847,36 +861,25 @@ posRouter.post("/orders/:id/items", async (req, res) => {
   // it once — adding more from here on is silent to them otherwise. Rather
   // than merge into an already-prepared line (which would blur "how many are
   // actually new"), each addition here becomes its own flagged row so the
-  // "Updated orders" queue shows exactly what's new, nothing more.
-  const flagAsUpdate = order.status !== "OPEN";
+  // "Updated orders" queue shows exactly what's new, nothing more. A
+  // direct-serve location has no handover, so nothing there is flagged.
+  const flagAsUpdate = order.status !== "OPEN" && order.location?.serveMode !== "DIRECT";
 
   // Catch a stock shortfall now, while the waiter can still swap the item -
   // not at Serve, after the kitchen has already cooked it. (A SERVED order
   // deducts immediately below, guarded; a store-dispatch location is checked
   // against the store when the kitchen requests the ingredients.)
-  if (order.status !== "SERVED" && dispatchRequired(order.location)) {
+  if (order.status !== "SERVED") {
     const addedRequirements = computeStockRequirements(resolvedLinesForStock(resolvedLines, menuItemsById, addonsById));
-    try {
+    if (dispatchRequired(order.location)) {
       await assertPostableToStore(tid, order.location, addedRequirements);
-    } catch (error) {
-      if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
-      throw error;
-    }
-  }
-  if (order.status !== "SERVED" && !dispatchRequired(order.location)) {
-    const addedRequirements = computeStockRequirements(resolvedLinesForStock(resolvedLines, menuItemsById, addonsById));
-    const addedStockLocationId = addedRequirements.size > 0 ? await resolveStockLocationId(tid, order.locationId) : null;
-    if (addedStockLocationId) {
-      try {
-        await prisma.$transaction((tx) => assertStockAvailable(tx, tid, addedRequirements, addedStockLocationId));
-      } catch (error) {
-        if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
-        throw error;
-      }
+    } else {
+      const addedStockLocationId = addedRequirements.size > 0 ? await resolveStockLocationId(tid, order.locationId) : null;
+      if (addedStockLocationId) await prisma.$transaction((tx) => assertStockAvailable(tx, tid, addedRequirements, addedStockLocationId));
     }
   }
 
-  try {
+  return async () => {
     const updated = await prisma.$transaction(async (tx) => {
       for (const line of resolvedLines) {
         const key = lineKey(line.variantId, line.addons);
@@ -908,7 +911,7 @@ posRouter.post("/orders/:id/items", async (req, res) => {
         // when the chef marks it prepared (settleServedAdditions).
         const deferStock = dispatchRequired(order.location);
         const stockLocationId = deferStock ? null : await resolveStockLocationId(tid, order.locationId);
-        if (!deferStock && !stockLocationId) throw Object.assign(new Error("No location is configured to hold stock for this order"), { status: 400 });
+        if (!deferStock && !stockLocationId) throw statusError("No location is configured to hold stock for this order", 400);
         // Only the newly added items need deducting — the rest were already
         // committed when the order was first served. Reuses menuItemsById's
         // full variant list (with its own stockProduct) rather than just a
@@ -953,10 +956,79 @@ posRouter.post("/orders/:id/items", async (req, res) => {
     });
     await autoRequestDispatch(tid, order.id, req.userId);
     await queueOrderTicket({ tenantId: tid, order: updated, event: "UPDATED", before: order.items, after: updated.items, by: req.userId });
-    res.status(201).json({ order: withFinancials(updated, tax) });
+    return updated;
+  };
+}
+
+/** Adds more items to a still-open FOOD order — another round, more food —
+ * before it's finally settled. Food/Bar only: Products/Services sales are
+ * one-shot, created and settled together, with no "keep adding" moment.
+ * Routed like a new order: a line another location makes goes onto that
+ * location's linked order on the same bill (opened now if there isn't one),
+ * so a drink added to a restaurant tab goes to the bar counter, not the store. */
+posRouter.post("/orders/:id/items", async (req, res) => {
+  const parsed = addItemsSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid items", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only add items to your own orders" }); return; }
+  if (order.channel !== "FOOD") { res.status(409).json({ error: "Only food/bar orders can have items added after the fact" }); return; }
+  if (["COMPLETED", "CANCELLED"].includes(order.status)) { res.status(409).json({ error: "This order is already finalized — start a new one instead" }); return; }
+
+  const tax = await taxSettingsFor(tid);
+  try {
+    const { lines: resolvedLines, menuItemsById, addonsById } = await resolveMenuLines(tid, parsed.data.items, tax);
+    const { here, elsewhere } = splitLinesByLocation(resolvedLines, menuItemsById, order.locationId);
+
+    // Every part of the round is checked before anything is written.
+    const linked = elsewhere.size > 0 && order.billGroupId
+      ? await prisma.posOrder.findMany({ where: { tenantId: tid, billGroupId: order.billGroupId, id: { not: order.id }, channel: "FOOD", status: { notIn: ["COMPLETED", "CANCELLED", "PENDING_CANCELLATION"] } }, include: orderInclude })
+      : [];
+    const writes: (() => Promise<PosOrderFull>)[] = [];
+    if (here.length) writes.push(await prepareAddToOrder(tid, order, here, menuItemsById, addonsById, req));
+    const newGroups: PreparedOrderGroup[] = [];
+    for (const group of elsewhere.values()) {
+      const existing = linked.find((other) => other.locationId === group.location.id && ownsOrder(other, req));
+      if (existing) writes.push(await prepareAddToOrder(tid, existing, group.lines, menuItemsById, addonsById, req));
+      else newGroups.push(await prepareOrderGroup(tid, group.location, group.lines, menuItemsById, addonsById));
+    }
+
+    const touched: PosOrderFull[] = [];
+    for (const write of writes) touched.push(await write());
+    if (newGroups.length) {
+      const billGroupId = order.billGroupId ?? randomBytes(12).toString("hex");
+      const header: OrderHeader = {
+        tableId: order.tableId,
+        billGroupId,
+        customerId: order.customerId,
+        reservationId: order.reservationId,
+        saleType: order.saleType,
+        complimentarySessionId: order.complimentarySessionId,
+        complimentaryOrderRole: order.complimentaryOrderRole,
+        complimentaryReason: order.complimentaryReason,
+        complimentaryRecipientName: order.complimentaryRecipientName,
+        createdBy: order.createdBy ?? req.userId,
+      };
+      const created = await prisma.$transaction(async (tx) => {
+        if (!order.billGroupId) await tx.posOrder.update({ where: { id: order.id }, data: { billGroupId } });
+        const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
+        const orders: PosOrderFull[] = [];
+        for (const [index, group] of newGroups.entries()) {
+          orders.push(await createGroupOrder(tx, tid, (last?.orderNumber ?? 0) + index + 1, header, group, 0, req));
+        }
+        return orders;
+      });
+      await afterOrdersCreated(tid, created, req.userId);
+      touched.push(...created);
+    }
+
+    const primary = touched.find((touchedOrder) => touchedOrder.id === order.id)
+      ?? await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+    const linkedOrders = touched.filter((touchedOrder) => touchedOrder.id !== order.id);
+    res.status(201).json({ order: withFinancials(primary, tax), linkedOrders: linkedOrders.map((linkedOrder) => withFinancials(linkedOrder, tax)) });
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
-    if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
+    if (sendOrderError(res, error)) return;
     throw error;
   }
 });
@@ -1849,7 +1921,7 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
   if (orders.some((order) => !ownsOrder(order, req))) { res.status(403).json({ error: "You can only take payment on your own linked bills" }); return; }
   if (orders.some((order) => order.saleType === "COMPLIMENTARY")) { res.status(409).json({ error: "Complimentary linked bills do not take payments" }); return; }
   if (orders.some(hasPendingReturnRequests)) { res.status(409).json({ error: "Approve or reject pending returns before taking payment" }); return; }
-  if (orders.some(hasPendingAdditions)) { res.status(409).json({ error: "The kitchen hasn't handed over all added items yet" }); return; }
+  if (orders.some(hasPendingAdditions)) { res.status(409).json({ error: "Some added items on this bill haven't been handed over yet" }); return; }
 
   const payable = orders.map((order) => {
     const withTotals = withFinancials(order, tax);
@@ -1944,7 +2016,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
     return;
   }
   if (hasPendingAdditions(order)) {
-    res.status(409).json({ error: "The kitchen hasn't handed over the items added to this order yet" });
+    res.status(409).json({ error: "The items added to this order haven't been handed over yet" });
     return;
   }
   const payable = order.status === "SERVED" || (order.status === "COMPLETED" && order.paymentStatus !== "PAID");
@@ -2011,7 +2083,7 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only complete your own orders" }); return; }
   if (order.status !== "SERVED") { res.status(409).json({ error: "Only a served order can be completed" }); return; }
-  if (hasPendingAdditions(order)) { res.status(409).json({ error: "The kitchen hasn't handed over the items added to this order yet" }); return; }
+  if (hasPendingAdditions(order)) { res.status(409).json({ error: "The items added to this order haven't been handed over yet" }); return; }
   if (hasPendingReturnRequests(order)) {
     res.status(409).json({ error: "Approve or reject the pending return before completing this order" });
     return;

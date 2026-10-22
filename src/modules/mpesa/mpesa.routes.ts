@@ -47,7 +47,7 @@ mpesaRouter.post("/stk/orders/:orderId", async (req, res, next) => {
     } else if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only take payment on your own orders" }); return; }
     if (order.saleType === "COMPLIMENTARY") { res.status(409).json({ error: "Complimentary orders do not take payments" }); return; }
     if (hasPendingReturnRequests(order)) { res.status(409).json({ error: "Approve or reject the pending return before taking payment" }); return; }
-    if (hasPendingAdditions(order)) { res.status(409).json({ error: "The kitchen hasn't handed over the items added to this order yet" }); return; }
+    if (hasPendingAdditions(order)) { res.status(409).json({ error: "The items added to this order haven't been handed over yet" }); return; }
     const payable = order.status === "SERVED" || isDebtPayment;
     if (!payable) { res.status(409).json({ error: order.status === "COMPLETED" ? "This order is already fully paid" : "The order must be served before it can be paid" }); return; }
 

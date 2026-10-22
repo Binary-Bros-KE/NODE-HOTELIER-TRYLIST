@@ -82,5 +82,8 @@ export async function settleServedAdditions(tx: Prisma.TransactionClient, tid: s
 
 const isUndeductedAdditionOrder = (order: SettleOrder) => Boolean(order.servedAt) && dispatchRequired(order.location);
 
-/** Payment / completion must wait until added lines on a served order have been handed over. */
-export const hasPendingAdditions = (order: SettleOrder) => isUndeductedAdditionOrder(order) && order.items.some((item) => item.addedAfterSend);
+/** Payment / completion must wait until added lines on a served order have been handed over:
+ * by the kitchen at a store-dispatch location, or by the barman at a counter location
+ * (otherwise the bill closes and the barman's "serve the added items" prompt is lost). */
+export const hasPendingAdditions = (order: SettleOrder) =>
+  (isUndeductedAdditionOrder(order) || order.location?.serveMode === "COUNTER") && order.items.some((item) => item.addedAfterSend);

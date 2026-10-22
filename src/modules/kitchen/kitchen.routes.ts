@@ -111,7 +111,12 @@ kitchenRouter.get("/orders", handle(async (req, res) => {
  * alone once it's moved past PREPARING. */
 kitchenRouter.get("/orders/updated", handle(async (req, res) => {
   const orders = await prisma.posOrder.findMany({
-    where: { tenantId: tenantId(req), channel: "FOOD", status: { notIn: ["CANCELLED", "COMPLETED", "PENDING_CANCELLATION"] }, items: { some: { addedAfterSend: true } }, ...(await locationScope(req)) },
+    where: {
+      tenantId: tenantId(req), channel: "FOOD", status: { notIn: ["CANCELLED", "COMPLETED", "PENDING_CANCELLATION"] }, items: { some: { addedAfterSend: true } },
+      // Counter (bar) additions are handed over by the barman at the POS, never by the kitchen.
+      OR: [{ locationId: null }, { location: { is: { serveMode: "KITCHEN" } } }],
+      ...(await locationScope(req)),
+    },
     include: orderInclude,
     orderBy: { updatedAt: "desc" },
   });
@@ -123,6 +128,7 @@ kitchenRouter.get("/orders/updated", handle(async (req, res) => {
  * touch the order's own status, which continues as normal. */
 kitchenRouter.patch("/orders/:id/ack-updates", handle(async (req, res) => {
   const order = await loadTicket(req, ["OPEN", "PREPARING", "READY", "SERVED"]);
+  if (order.location && order.location.serveMode !== "KITCHEN") throw new DispatchError("This is a counter order - the barman confirms its added items at the POS", 409);
   await prisma.$transaction(async (tx) => {
     // On a served order at a store-dispatch location this is when the added
     // items' ingredients leave the kitchen shelf (and only once dispatched).
