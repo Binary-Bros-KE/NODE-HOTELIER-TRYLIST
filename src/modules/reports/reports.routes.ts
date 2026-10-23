@@ -145,6 +145,15 @@ function folioLinesFinancials(lines: ReportTaxLine[], tax: Awaited<ReturnType<ty
   }, tax);
 }
 
+/** A voided store usage put its stock back, so its ISSUE movements no longer count as
+ * consumption. Spelled as an OR (not a NOT) because sourceType/sourceRefId are mostly
+ * NULL, and NOT over NULLs would silently drop ordinary movements. */
+async function excludeVoidedStoreUsage(tid: string): Promise<Prisma.InventoryMovementWhereInput> {
+  const ids = (await prisma.storeUsage.findMany({ where: { tenantId: tid, status: "VOIDED" }, select: { id: true } })).map((u) => u.id);
+  if (ids.length === 0) return {};
+  return { OR: [{ sourceType: null }, { sourceType: { not: "STORE_USAGE" } }, { sourceRefId: null }, { sourceRefId: { notIn: ids } }] };
+}
+
 function fullName(person: { firstName: string; lastName?: string | null }) {
   return `${person.firstName} ${person.lastName ?? ""}`.trim();
 }
@@ -549,6 +558,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         where: {
           tenantId: tid,
           type: { in: ["ISSUE", "USAGE", "ROOM_CONSUMPTION", "DAMAGE_LOSS"] },
+          ...(await excludeVoidedStoreUsage(tid)),
           occurredAt: { gte: start, lte: end },
           ...(locationId ? { locationId } : {}),
         },
@@ -1910,6 +1920,7 @@ reportsRouter.get("/expenses", async (req, res, next) => {
         where: {
           tenantId: tid,
           type: { in: ["ISSUE", "USAGE", "ROOM_CONSUMPTION", "DAMAGE_LOSS"] },
+          ...(await excludeVoidedStoreUsage(tid)),
           occurredAt: { gte: fetchStart, lte: fetchEnd },
           ...(locationId ? { locationId } : {}),
         },

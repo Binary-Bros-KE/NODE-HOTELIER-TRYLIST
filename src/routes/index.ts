@@ -31,6 +31,7 @@ import { stockReceiptsRouter } from "../modules/stock-receipts/stock-receipts.ro
 import { stockTransfersRouter } from "../modules/stock-transfers/stock-transfers.routes.js";
 import { dispatchRouter } from "../modules/dispatch/dispatch.routes.js";
 import { stockIssuesRouter } from "../modules/stock-issues/stock-issues.routes.js";
+import { storeUsageRouter } from "../modules/store-usage/store-usage.routes.js";
 import { stockLedgerRouter } from "../modules/stock-ledger/stock-ledger.routes.js";
 import { menuLedgerRouter } from "../modules/menu-ledger/menu-ledger.routes.js";
 import { menuCategoriesRouter } from "../modules/menu-categories/menu-categories.routes.js";
@@ -92,6 +93,7 @@ router.use("/stock-receipts", stockReceiptsRouter);
 router.use("/stock-transfers", stockTransfersRouter);
 router.use("/dispatch-requests", dispatchRouter);
 router.use("/stock-issues", stockIssuesRouter);
+router.use("/store-usage", storeUsageRouter);
 router.use("/stock-ledger", stockLedgerRouter);
 router.use("/menu-ledger", menuLedgerRouter);
 router.use("/menu-categories", menuCategoriesRouter);

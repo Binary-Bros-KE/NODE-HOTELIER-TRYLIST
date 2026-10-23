@@ -527,6 +527,8 @@ model Tenant {
   websitePages               WebsitePage[]
   websiteMedia               WebsiteMedia[]
   websiteInquiries           WebsiteInquiry[]
+  usageCategories            UsageCategory[]
+  storeUsages                StoreUsage[]
 }
 
 enum CustomerType {
@@ -2362,6 +2364,7 @@ model Product {
   @@unique([tenantId, sku])
   @@unique([tenantId, barcode])
   @@index([tenantId, categoryId])
+  storeUsageItems          StoreUsageItem[]
 }
 
 // One live running balance per (product, location) — a location "carries"
@@ -2583,6 +2586,8 @@ model Location {
   websiteBookingSites    TenantWebsite[]        @relation("WebsiteBookingLocation")
 
   @@unique([tenantId, name])
+  storeUsagesFrom        StoreUsage[]           @relation("StoreUsageFrom")
+  storeUsagesUsedAt      StoreUsage[]           @relation("StoreUsageUsedAt")
 }
 
 enum MpesaAccountType {
@@ -4199,4 +4204,77 @@ model WebsiteInquiry {
   customer   Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, status, createdAt])
+}
+
+
+// Store usage: stock taken out of the store and used up there and then - staff
+// meals, a conference, a complimentary event - for any product, including ones
+// that are also sold per dish. Nothing lands in another location's stock. Each
+// line is an ISSUE movement (sourceType STORE_USAGE, sourceRefId = the usage), so
+// it counts as inventory consumption; voiding returns the stock to the store.
+enum StoreUsageStatus {
+  ACTIVE
+  VOIDED
+}
+
+// What store usage is grouped by at month-end (Staff meals, Conference...). Its
+// own list - not the money Expense categories.
+model UsageCategory {
+  id          String       @id @default(cuid())
+  tenantId    String
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  usages      StoreUsage[]
+
+  @@unique([tenantId, name])
+}
+
+model StoreUsage {
+  id               String           @id @default(cuid())
+  tenantId         String
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usageNo          String
+  categoryId       String
+  category         UsageCategory    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  fromLocationId   String
+  fromLocation     Location         @relation("StoreUsageFrom", fields: [fromLocationId], references: [id], onDelete: Restrict)
+  usedAtLocationId String?
+  usedAtLocation   Location?        @relation("StoreUsageUsedAt", fields: [usedAtLocationId], references: [id], onDelete: SetNull)
+  title            String?
+  note             String?
+  usedAt           DateTime         @default(now())
+  totalValue       Decimal          @default(0) @db.Decimal(12, 2)
+  status           StoreUsageStatus @default(ACTIVE)
+  // Plain ids, same convention as PosOrder.createdBy.
+  createdBy        String?
+  voidedBy         String?
+  voidReason       String?
+  voidedAt         DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  items            StoreUsageItem[]
+
+  @@unique([tenantId, usageNo])
+  @@index([tenantId, usedAt])
+  @@index([tenantId, categoryId])
+}
+
+model StoreUsageItem {
+  id          String     @id @default(cuid())
+  usageId     String
+  usage       StoreUsage @relation(fields: [usageId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  productName String
+  // In the product's stock unit (the pack unit when it's tracked in packs).
+  quantity    Decimal    @db.Decimal(12, 3)
+  unitCost    Decimal?   @db.Decimal(12, 2)
+  value       Decimal    @default(0) @db.Decimal(12, 2)
+
+  @@index([usageId])
+  @@index([productId])
 }

@@ -88,6 +88,10 @@ export async function nextPayslipNo(tenantId: string): Promise<string> {
   return nextSequenceNo(tenantId, "payslip", "PAY", 6);
 }
 
+export async function nextStoreUsageNo(tenantId: string): Promise<string> {
+  return nextSequenceNo(tenantId, "store-usage", "USE", 6);
+}
+
 export async function nextQuotationNo(tenantId: string): Promise<string> {
   return nextSequenceNo(tenantId, "quotation", "QT", 6);
 }
