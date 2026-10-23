@@ -1420,6 +1420,39 @@ posRouter.post("/orders/:id/make-complimentary", async (req, res) => {
   res.status(200).json({ order: withFinancials(updated, tax) });
 });
 
+/** Super Admin: the reverse - a complimentary order (switched, or posted as one by
+ * mistake) becomes a sale again with its full amount to pay. Active orders only; a
+ * completed comp stays as it is. */
+posRouter.post("/orders/:id/make-sale", async (req, res) => {
+  const tid = tenantIdFor(req);
+  if (!(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can turn a complimentary order into a sale" }); return; }
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (order.saleType !== "COMPLIMENTARY") { res.status(409).json({ error: "This order is already a sale" }); return; }
+  if (!["OPEN", "PREPARING", "READY", "SERVED"].includes(order.status)) { res.status(409).json({ error: "Only an active order can be switched back to a sale - a completed one stays complimentary" }); return; }
+
+  const tax = await taxSettingsFor(tid);
+  const by = (await employeeName(prisma, tid, req.userId)) ?? "a Super Admin";
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.posOrder.update({
+      where: { id: order.id },
+      data: {
+        saleType: "SALE",
+        // Inside a host's session a sale is guest spend; otherwise it has no comp role at all.
+        complimentaryOrderRole: order.complimentarySessionId ? "GUEST_SPEND" : null,
+        complimentaryReason: null,
+        complimentaryRecipientName: null,
+        paymentStatus: "UNPAID",
+        notes: [order.notes, `Switched from complimentary to sale by ${by} on ${new Date().toLocaleString("en-KE", { timeZone: "Africa/Nairobi" })}.`].filter(Boolean).join("\n"),
+      },
+    });
+    // What the serve recorded as given away is now recorded as sold.
+    await tx.menuLedgerEntry.updateMany({ where: { tenantId: tid, orderId: order.id, type: "COMPLIMENTARY" }, data: { type: "SALE" } });
+    return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+  });
+  res.status(200).json({ order: withFinancials(updated, tax) });
+});
+
 posRouter.delete("/orders/:id/revert", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
