@@ -38,18 +38,23 @@ export function renderDispatchPrint(slip: Slip, columns: number, businessName: s
   const section = (title: string, dishes: Slip['dishes']) => {
     if (!dishes.length) return;
     line(rule); heading(title); line(rule);
-    for (const dish of dishes) {
+    // Dishes in bold at normal height (double height alone stretches the letters);
+    // one line per ingredient, indented under its dish, so a 15-ingredient recipe
+    // stays short. A dotted line between dishes keeps them clearly apart.
+    const indent = '  ';
+    dishes.forEach((dish, dishIndex) => {
+      if (dishIndex > 0) { line('.'.repeat(cols)); }
       const price = `KSh ${Number(dish.totalPrice).toFixed(2)}`;
       const names = wrap(`${quantity(dish.quantity)} x ${dish.name}`.toUpperCase(), Math.max(8, cols - price.length - 1));
-      command(27, 69, 1, 29, 33, 1);
+      command(27, 69, 1);
       names.forEach((name, index) => line(index === 0 ? name.padEnd(cols - price.length) + price : name));
-      command(29, 33, 0, 27, 69, 0);
+      command(27, 69, 0);
       for (const ingredient of dish.ingredients) {
         const amount = `${quantity(ingredient.quantity)} ${ingredient.unit ?? ''}`.trim();
-        wrap(ingredient.name, Math.max(8, cols - amount.length - 1)).forEach((name, index) => line(index === 0 ? name.padEnd(cols - amount.length) + amount : name));
-        line('.'.repeat(cols));
+        const width = cols - indent.length;
+        wrap(ingredient.name, Math.max(8, width - amount.length - 1)).forEach((name, index) => line(indent + (index === 0 ? name.padEnd(width - amount.length) + amount : name)));
       }
-    }
+    });
   };
   section('ALREADY ON ORDER', slip.existingDishes);
   section(slip.kind === 'UPDATED_ORDER' ? 'UPDATED ITEMS TO DISPATCH' : 'ITEMS TO DISPATCH', slip.dishes);
