@@ -9,6 +9,7 @@ import { DispatchError, employeeName } from "../../lib/dispatch.js";
 import { InsufficientStockError, recordStockMovement } from "../../lib/stockLedger.js";
 import { dispatchSlipDishSections, refreshOpenRequest, requestDishes, rungUpByName } from "../../lib/dispatchAuto.js";
 import { releaseTableIfIdle } from "../pos/pos.routes.js";
+import { blankToUndefined, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
 
 // The store's side of a kitchen's ingredient request: see what the chef asked
 // for, dispatch it (a real store -> kitchen stock transfer) or reject it with a
@@ -43,6 +44,15 @@ async function withStoreStock<T extends Prisma.StockDispatchRequestGetPayload<{ 
   return requests.map((r) => ({ ...r, items: r.items.map((i) => ({ ...i, storeQty: balance.get(`${r.fromLocationId}:${i.productId}`) ?? 0 })) }));
 }
 
+const listFilterSchema = z.object({
+  search: z.preprocess(blankToUndefined, z.string().trim().max(60).optional()),
+  employeeId: z.preprocess(blankToUndefined, z.string().trim().min(1).optional()),
+  toLocationId: z.preprocess(blankToUndefined, z.string().trim().min(1).optional()),
+  historyStatus: z.preprocess(blankToUndefined, z.enum(["DISPATCHED", "REJECTED", "CANCELLED"]).optional()),
+  from: localStamp,
+  to: localStamp,
+});
+
 dispatchRouter.get("/", handle(async (req, res) => {
   const tid = tenantId(req);
   const history = req.query.status === "history";
@@ -57,11 +67,31 @@ dispatchRouter.get("/", handle(async (req, res) => {
       await prisma.$transaction((tx) => refreshOpenRequest(tx, tid, request.id));
     }
   }
+  const filters = listFilterSchema.safeParse(req.query);
+  if (!filters.success) throw new DispatchError("Invalid filters", 400);
+  const f = filters.data;
+  const where: Prisma.StockDispatchRequestWhereInput = {
+    tenantId: tid,
+    status: history ? (f.historyStatus ?? { in: ["DISPATCHED", "REJECTED", "CANCELLED"] }) : "REQUESTED",
+    ...(f.toLocationId ? { toLocationId: f.toLocationId } : {}),
+    ...(f.from || f.to ? { requestedAt: { ...(f.from ? { gte: parseLocalStamp(f.from, false) } : {}), ...(f.to ? { lte: parseLocalStamp(f.to, true) } : {}) } } : {}),
+    AND: [
+      // A request number (DSP-000317) or an order number (489 / #489).
+      ...(f.search ? [{ OR: [
+        { requestNo: { contains: f.search, mode: "insensitive" as const } },
+        ...(/^#?\d+$/.test(f.search) ? [{ orderNumber: Number(f.search.replace("#", "")) }] : []),
+      ] }] : []),
+      // Whoever had a hand in it: rang the order up, asked for it, or dispatched/rejected it.
+      ...(f.employeeId ? [{ OR: [{ requestedBy: f.employeeId }, { respondedBy: f.employeeId }, { order: { createdBy: f.employeeId } }] }] : []),
+    ],
+  };
+  const filtered = Boolean(f.search || f.employeeId || f.from || f.to || f.toLocationId || f.historyStatus);
   const requests = await prisma.stockDispatchRequest.findMany({
-    where: { tenantId: tid, status: history ? { in: ["DISPATCHED", "REJECTED", "CANCELLED"] } : "REQUESTED" },
+    where,
     include: requestInclude,
     orderBy: history ? { respondedAt: "desc" } : { requestedAt: "asc" },
-    take: history ? 100 : 200,
+    // Unfiltered history is the latest 100; a filter reaches further back.
+    take: history ? (filtered ? 500 : 100) : 200,
   });
   res.json({ requests: await withDishes(tid, await withStoreStock(tid, requests)) });
 }));
