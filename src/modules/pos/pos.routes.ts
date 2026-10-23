@@ -1361,6 +1361,65 @@ posRouter.patch("/orders/:id/ack-updates", async (req, res) => {
   res.status(200).json({ order: withFinancials(updated, tax) });
 });
 
+const makeComplimentarySchema = z.object({
+  reason: z.string().trim().min(3).max(255),
+  recipientName: z.string().trim().min(2).max(120),
+  customerId: z.string().trim().min(1).optional(),
+});
+
+/** Super Admin: an order rung up as a sale that was really given away (common at the bar
+ * and club) becomes complimentary. Unpaid orders only - nothing to reverse. Stock is
+ * untouched (it was consumed either way); the menu ledger rows the serve wrote as SALE
+ * become COMPLIMENTARY, and reports and shift totals follow the order's sale type. */
+posRouter.post("/orders/:id/make-complimentary", async (req, res) => {
+  const parsed = makeComplimentarySchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Give a reason and who it was given to", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  if (!(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can make an order complimentary" }); return; }
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (order.saleType === "COMPLIMENTARY") { res.status(409).json({ error: "This order is already complimentary" }); return; }
+  if (order.channel !== "FOOD") { res.status(409).json({ error: "Only food/bar orders can be made complimentary" }); return; }
+  if (!["OPEN", "PREPARING", "READY", "SERVED"].includes(order.status)) { res.status(409).json({ error: "Only an order that hasn't been completed or cancelled can be made complimentary" }); return; }
+  if (order.payments.length > 0) { res.status(409).json({ error: "This order already has a payment. Refund it first; only unpaid orders can be made complimentary." }); return; }
+  if (order.billedToRoomAt) { res.status(409).json({ error: "This order is charged to a room. Remove it from the room bill first." }); return; }
+  let customerId = order.customerId;
+  try {
+    if (parsed.data.customerId) customerId = (await resolveCustomerId(tid, parsed.data.customerId)) ?? customerId;
+  } catch (error) {
+    if (sendOrderError(res, error)) return;
+    throw error;
+  }
+
+  const tax = await taxSettingsFor(tid);
+  const by = (await employeeName(prisma, tid, req.userId)) ?? "a Super Admin";
+  const updated = await prisma.$transaction(async (tx) => {
+    // A comp can't be settled as part of a linked bill, so it leaves the group (and a group of one is no group).
+    if (order.billGroupId) {
+      const rest = await tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: order.billGroupId, id: { not: order.id } }, select: { id: true } });
+      if (rest.length === 1) await tx.posOrder.update({ where: { id: rest[0].id }, data: { billGroupId: null } });
+    }
+    await tx.posOrder.update({
+      where: { id: order.id },
+      data: {
+        saleType: "COMPLIMENTARY",
+        complimentaryOrderRole: "HOST_COMP",
+        complimentaryReason: parsed.data.reason,
+        complimentaryRecipientName: parsed.data.recipientName,
+        customerId,
+        discount: 0,
+        paymentStatus: "PAID",
+        billGroupId: null,
+        notes: [order.notes, `Switched from sale to complimentary by ${by} on ${new Date().toLocaleString("en-KE", { timeZone: "Africa/Nairobi" })}.`].filter(Boolean).join("\n"),
+      },
+    });
+    // What the serve recorded as sold is now recorded as given away.
+    await tx.menuLedgerEntry.updateMany({ where: { tenantId: tid, orderId: order.id, type: "SALE" }, data: { type: "COMPLIMENTARY" } });
+    return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+  });
+  res.status(200).json({ order: withFinancials(updated, tax) });
+});
+
 posRouter.delete("/orders/:id/revert", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
