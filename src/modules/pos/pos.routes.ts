@@ -56,15 +56,6 @@ const orderLineSchema = z.object({
   addons: z.array(z.object({ addonId: z.string().cuid(), quantity: z.coerce.number().int().min(1).max(20).default(1) })).default([]),
 });
 const optionalDate = z.preprocess((value) => value === "" || value == null ? undefined : value, z.coerce.date().optional());
-const complimentarySessionSchema = z.object({
-  title: z.string().trim().min(1).max(150),
-  hostName: z.string().trim().min(1).max(120),
-  hostPhone: z.string().trim().max(40).optional(),
-  eventDate: z.coerce.date().optional(),
-  startsAt: optionalDate,
-  endsAt: optionalDate,
-  notes: z.string().trim().max(500).optional(),
-}).refine((value) => !value.endsAt || !value.startsAt || value.endsAt > value.startsAt, { path: ["endsAt"], message: "End time must be after start time" });
 const orderSchema = z.object({
   tableId: z.string().cuid().optional(),
   locationId: z.string().cuid().optional(),
@@ -73,10 +64,8 @@ const orderSchema = z.object({
   notes: z.string().trim().max(500).optional(),
   discount: z.coerce.number().min(0).default(0),
   saleType: z.enum(["SALE", "COMPLIMENTARY"]).default("SALE"),
-  complimentarySessionId: z.string().cuid().optional(),
-  complimentaryOrderRole: z.enum(["HOST_COMP", "GUEST_SPEND"]).optional(),
+  // A complimentary order is given to its customer (required); the reason is optional.
   complimentaryReason: z.string().trim().max(255).optional(),
-  complimentaryRecipientName: z.string().trim().max(120).optional(),
   items: z.array(orderLineSchema).min(1),
 });
 const addItemsSchema = z.object({ items: z.array(orderLineSchema).min(1) });
@@ -271,7 +260,6 @@ export const orderInclude = {
   payments: { include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } } },
   table: true,
   location: true,
-  complimentarySession: true,
   customer: { select: { id: true, firstName: true, lastName: true, phone: true, balance: true } },
   reservation: { select: { id: true, reservationNo: true, customerId: true, customer: { select: { firstName: true, lastName: true } }, room: { select: { number: true } } } },
   returnRequests: {
@@ -281,33 +269,6 @@ export const orderInclude = {
     orderBy: { requestedAt: "desc" },
   },
 } as const;
-
-posRouter.get("/complimentary-sessions", async (req, res) => {
-  const tid = tenantIdFor(req);
-  const activeOnly = req.query.activeOnly === "true";
-  const sessions = await prisma.complimentarySession.findMany({
-    where: { tenantId: tid, ...(activeOnly ? { status: "OPEN" } : {}) },
-    include: { _count: { select: { orders: true } } },
-    orderBy: [{ status: "asc" }, { startsAt: "desc" }, { eventDate: "desc" }],
-    take: 100,
-  });
-  res.status(200).json({ sessions });
-});
-
-posRouter.post("/complimentary-sessions", async (req, res, next) => {
-  const parsed = complimentarySessionSchema.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: "Invalid complimentary session", details: parsed.error.flatten() }); return; }
-  try {
-    const startsAt = parsed.data.startsAt ?? parsed.data.eventDate ?? new Date();
-    const session = await prisma.complimentarySession.create({
-      data: { ...parsed.data, tenantId: tenantIdFor(req), createdBy: req.userId, eventDate: parsed.data.eventDate ?? startsAt, startsAt },
-      include: { _count: { select: { orders: true } } },
-    });
-    res.status(201).json({ session });
-  } catch (error) {
-    next(error);
-  }
-});
 
 /** Validates an explicitly-chosen customerId belongs to this tenant — who a
  * sale is for is always optional (a quick anonymous cash sale shouldn't have
@@ -734,7 +695,7 @@ async function prepareOrderGroup(tid: string, location: FulfillmentLocation, lin
 type PreparedOrderGroup = Awaited<ReturnType<typeof prepareOrderGroup>>;
 
 type OrderHeader = Pick<Prisma.PosOrderUncheckedCreateInput,
-  "tableId" | "billGroupId" | "customerId" | "reservationId" | "saleType" | "complimentarySessionId" | "complimentaryOrderRole" | "complimentaryReason" | "complimentaryRecipientName" | "createdBy" | "notes">;
+  "tableId" | "billGroupId" | "customerId" | "reservationId" | "saleType" | "complimentaryReason" | "complimentaryRecipientName" | "createdBy" | "notes">;
 
 /** Writes one location's order inside the caller's transaction. A direct-serve order is
  * born SERVED, so its stock and sales ledger are taken now. */
@@ -826,7 +787,6 @@ posRouter.post("/orders", async (req, res) => {
 
   let customerId: string | undefined;
   let billToReservationId: string | undefined;
-  let complimentarySessionId: string | undefined;
   try {
     customerId = await resolveCustomerId(tid, parsed.data.customerId);
     if (parsed.data.reservationId) {
@@ -836,16 +796,11 @@ posRouter.post("/orders", async (req, res) => {
       // was explicitly chosen — same rule the settlement ROOM branch uses.
       customerId = customerId ?? reservation!.customerId;
     }
-    if (parsed.data.complimentarySessionId) {
-      const session = await prisma.complimentarySession.findFirst({ where: { id: parsed.data.complimentarySessionId, tenantId: tid, status: "OPEN" }, select: { id: true } });
-      if (!session) throw Object.assign(new Error("Choose an open complimentary session"), { status: 400 });
-      complimentarySessionId = session.id;
-    }
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
     throw error;
   }
-  // A complimentary order needs a named recipient before it's posted —
+  // A complimentary order is given to its customer, so one must be attached -
   // every other sale (including a plain walk-in) is unaffected.
   if (parsed.data.saleType === "COMPLIMENTARY" && !customerId) { res.status(400).json({ error: "Choose a customer before posting this complimentary order" }); return; }
 
@@ -858,10 +813,7 @@ posRouter.post("/orders", async (req, res) => {
         customerId,
         reservationId: billToReservationId,
         saleType: parsed.data.saleType,
-        complimentarySessionId,
-        complimentaryOrderRole: parsed.data.saleType === "COMPLIMENTARY" ? "HOST_COMP" : parsed.data.complimentarySessionId ? (parsed.data.complimentaryOrderRole ?? "GUEST_SPEND") : undefined,
-        complimentaryReason: parsed.data.complimentaryReason,
-        complimentaryRecipientName: parsed.data.complimentaryRecipientName,
+        complimentaryReason: parsed.data.saleType === "COMPLIMENTARY" ? parsed.data.complimentaryReason : undefined,
         createdBy: req.userId,
         notes: parsed.data.notes,
       };
@@ -1047,8 +999,6 @@ posRouter.post("/orders/:id/items", async (req, res) => {
         customerId: order.customerId,
         reservationId: order.reservationId,
         saleType: order.saleType,
-        complimentarySessionId: order.complimentarySessionId,
-        complimentaryOrderRole: order.complimentaryOrderRole,
         complimentaryReason: order.complimentaryReason,
         complimentaryRecipientName: order.complimentaryRecipientName,
         createdBy: order.createdBy ?? req.userId,
@@ -1404,9 +1354,9 @@ posRouter.patch("/orders/:id/ack-updates", async (req, res) => {
   res.status(200).json({ order: withFinancials(updated, tax) });
 });
 
+// Given to the order's customer (required, may be attached here); the reason is optional.
 const makeComplimentarySchema = z.object({
-  reason: z.string().trim().min(3).max(255),
-  recipientName: z.string().trim().min(2).max(120),
+  reason: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? undefined : v), z.string().trim().max(255).optional()),
   customerId: z.string().trim().min(1).optional(),
 });
 
@@ -1416,7 +1366,7 @@ const makeComplimentarySchema = z.object({
  * become COMPLIMENTARY, and reports and shift totals follow the order's sale type. */
 posRouter.post("/orders/:id/make-complimentary", async (req, res) => {
   const parsed = makeComplimentarySchema.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: "Give a reason and who it was given to", details: parsed.error.flatten() }); return; }
+  if (!parsed.success) { res.status(400).json({ error: "Invalid complimentary details", details: parsed.error.flatten() }); return; }
   const tid = tenantIdFor(req);
   if (!(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can make an order complimentary" }); return; }
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
@@ -1433,6 +1383,7 @@ posRouter.post("/orders/:id/make-complimentary", async (req, res) => {
     if (sendOrderError(res, error)) return;
     throw error;
   }
+  if (!customerId) { res.status(400).json({ error: "Attach a customer before making this order complimentary" }); return; }
 
   const tax = await taxSettingsFor(tid);
   const by = (await employeeName(prisma, tid, req.userId)) ?? "a Super Admin";
@@ -1446,9 +1397,7 @@ posRouter.post("/orders/:id/make-complimentary", async (req, res) => {
       where: { id: order.id },
       data: {
         saleType: "COMPLIMENTARY",
-        complimentaryOrderRole: "HOST_COMP",
-        complimentaryReason: parsed.data.reason,
-        complimentaryRecipientName: parsed.data.recipientName,
+        complimentaryReason: parsed.data.reason ?? null,
         customerId,
         discount: 0,
         paymentStatus: "PAID",
@@ -1481,8 +1430,6 @@ posRouter.post("/orders/:id/make-sale", async (req, res) => {
       where: { id: order.id },
       data: {
         saleType: "SALE",
-        // Inside a host's session a sale is guest spend; otherwise it has no comp role at all.
-        complimentaryOrderRole: order.complimentarySessionId ? "GUEST_SPEND" : null,
         complimentaryReason: null,
         complimentaryRecipientName: null,
         paymentStatus: "UNPAID",

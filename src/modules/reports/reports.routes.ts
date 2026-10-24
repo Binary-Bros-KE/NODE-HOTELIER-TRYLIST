@@ -538,7 +538,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       taxSettingsFor(tid),
       prisma.posOrder.findMany({
         where: { tenantId: tid, status: "COMPLETED", completedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
-        include: { items: { include: orderItemInclude }, location: { select: { id: true, name: true } }, customer: { select: { id: true, firstName: true, lastName: true } }, complimentarySession: true, payments: { select: { amount: true } } },
+        include: { items: { include: orderItemInclude }, location: { select: { id: true, name: true } }, customer: { select: { id: true, firstName: true, lastName: true } }, payments: { select: { amount: true } } },
       }),
       prisma.posOrder.findMany({
         where: { tenantId: tid, status: "CANCELLED", updatedAt: { gte: start, lte: end }, ...(locationId ? { locationId } : {}) },
@@ -658,7 +658,6 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const topItemsMap = new Map<string, { kind: "MENU" | "PRODUCT" | "SERVICE" | "OTHER"; name: string; variant: string | null; qty: number; revenue: number }>();
     const byLocationMap = new Map<string, { name: string; count: number; revenue: number; cogs: number }>();
     const byCustomerMap = new Map<string, { name: string; count: number; revenue: number }>();
-    const compSessions = new Map<string, { id: string; title: string; hostName: string | null; startsAt: Date | null; endsAt: Date | null; complimentaryValue: number; complimentaryCogs: number; guestRevenue: number; guestCogs: number; orders: number }>();
     let complimentaryValue = 0;
     let complimentaryCogs = 0;
     let complimentaryCount = 0;
@@ -698,30 +697,6 @@ reportsRouter.get("/sales", async (req, res, next) => {
         complimentaryCogs += orderCogs;
         complimentaryCount += 1;
       }
-      if (order.complimentarySessionId) {
-        const session = compSessions.get(order.complimentarySessionId) ?? {
-          id: order.complimentarySessionId,
-          title: order.complimentarySession?.title ?? "Complimentary session",
-          hostName: order.complimentarySession?.hostName ?? null,
-          startsAt: order.complimentarySession?.startsAt ?? order.complimentarySession?.eventDate ?? null,
-          endsAt: order.complimentarySession?.endsAt ?? null,
-          complimentaryValue: 0,
-          complimentaryCogs: 0,
-          guestRevenue: 0,
-          guestCogs: 0,
-          orders: 0,
-        };
-        session.orders += 1;
-        if (order.saleType === "COMPLIMENTARY") {
-          session.complimentaryValue += fin.complimentaryValue;
-          session.complimentaryCogs += orderCogs;
-        } else {
-          session.guestRevenue += fin.total;
-          session.guestCogs += orderCogs;
-        }
-        compSessions.set(order.complimentarySessionId, session);
-      }
-
       const locKey = order.locationId ?? "unassigned";
       const locBucket = byLocationMap.get(locKey) ?? { name: order.location?.name ?? "Unassigned", count: 0, revenue: 0, cogs: 0 };
       locBucket.count += 1;
@@ -1050,18 +1025,6 @@ reportsRouter.get("/sales", async (req, res, next) => {
         completedSalesValue, totalSoldValue, grossPosSales, roomGross, discountsAll, soldNetValue, unpaidValue, cashCollected: totalRevenue, cogs: cogsTotal, unresolvedCostLines,
         expensesOnly, salariesPaid, inventoryConsumptionExpenses,
       },
-      complimentarySessions: [...compSessions.values()].map((s) => ({
-        ...s,
-        startsAt: s.startsAt?.toISOString() ?? null,
-        endsAt: s.endsAt?.toISOString() ?? null,
-        complimentaryValue: round2(s.complimentaryValue),
-        complimentaryCogs: round2(s.complimentaryCogs),
-        guestRevenue: round2(s.guestRevenue),
-        guestCogs: round2(s.guestCogs),
-        guestProfit: round2(s.guestRevenue - s.guestCogs),
-        coverPercent: s.complimentaryCogs > 0 ? round2(((s.guestRevenue - s.guestCogs) / s.complimentaryCogs) * 100) : (s.guestRevenue > 0 ? 100 : 0),
-        netImpact: round2(s.guestRevenue - s.guestCogs - s.complimentaryCogs),
-      })).sort((a, b) => b.netImpact - a.netImpact),
       topItems,
       soldItems,
       soldByKind,
@@ -1136,7 +1099,7 @@ reportsRouter.get("/employees/:employeeId/breakdown", async (req, res, next) => 
       const fin = computeOrderFinancials(o, tax);
       return {
         id: o.id, orderNumber: o.orderNumber, status: o.status, paymentStatus: o.paymentStatus, saleType: o.saleType,
-        complimentaryOrderRole: o.complimentaryOrderRole, complimentaryRecipientName: o.complimentaryRecipientName,
+        complimentaryRecipientName: o.complimentaryRecipientName,
         createdAt: o.createdAt, total: fin.total,
         paid: o.payments.reduce((s, p) => s + Number(p.amount), 0),
       };

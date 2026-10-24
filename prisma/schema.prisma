@@ -200,15 +200,7 @@ enum PosOrderSaleType {
   COMPLIMENTARY
 }
 
-enum ComplimentaryOrderRole {
-  HOST_COMP
-  GUEST_SPEND
-}
 
-enum ComplimentarySessionStatus {
-  OPEN
-  CLOSED
-}
 
 enum TableStatus {
   AVAILABLE
@@ -448,7 +440,6 @@ model Tenant {
   inventoryMovements         InventoryMovement[]
   posOrders                  PosOrder[]
   posOrderReturnRequests     PosOrderReturnRequest[]
-  complimentarySessions      ComplimentarySession[]
   addons                     Addon[]
   menuItems                  MenuItem[]
   menuCategories             MenuCategory[]
@@ -2846,10 +2837,9 @@ model PosOrder {
   status                      PosOrderStatus          @default(OPEN)
   channel                     PosOrderChannel         @default(FOOD)
   saleType                    PosOrderSaleType        @default(SALE)
-  complimentarySessionId      String?
-  complimentarySession        ComplimentarySession?   @relation(fields: [complimentarySessionId], references: [id], onDelete: SetNull)
-  complimentaryOrderRole      ComplimentaryOrderRole?
   complimentaryReason         String?
+  // History only: who a complimentary order was given to, typed in before comps
+  // had to carry a customer. New orders never set it.
   complimentaryRecipientName  String?
   discount                    Decimal                 @default(0) @db.Decimal(12, 2)
   notes                       String?
@@ -2910,33 +2900,12 @@ model PosOrder {
   @@index([locationId])
   @@index([customerId])
   @@index([tenantId, saleType, updatedAt])
-  @@index([complimentarySessionId])
   @@index([tenantId, creditExpectedAt])
   @@index([tenantId, billedToRoomAt])
   @@index([tenantId, status, completedAt])
   @@index([tenantId, billGroupId])
 }
 
-model ComplimentarySession {
-  id        String                     @id @default(cuid())
-  tenantId  String
-  tenant    Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  title     String
-  hostName  String
-  hostPhone String?
-  eventDate DateTime                   @default(now())
-  startsAt  DateTime?
-  endsAt    DateTime?
-  status    ComplimentarySessionStatus @default(OPEN)
-  notes     String?
-  createdBy String?
-  createdAt DateTime                   @default(now())
-  updatedAt DateTime                   @updatedAt
-  orders    PosOrder[]
-
-  @@index([tenantId, status, eventDate])
-  @@index([tenantId, startsAt, endsAt])
-}
 
 // One row per movement of a customer's balance: +ve raises it (an order
 // completed on credit), -ve lowers it (a repayment). `balanceAfter` is the
