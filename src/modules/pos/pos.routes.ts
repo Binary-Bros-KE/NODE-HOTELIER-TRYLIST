@@ -112,7 +112,8 @@ type OrderLineInput = z.infer<typeof orderLineSchema>;
 // and the product/recipe used later for stock deduction. Add-ons are a flat
 // tenant catalog now — validated separately, not per item.
 const menuLineInclude = {
-  variants: { where: { isActive: true }, include: variantStockInclude },
+  // Stock product tags drive the routing fallback for items without locations.
+  variants: { where: { isActive: true }, include: { ...variantStockInclude, stockProduct: { select: { id: true, name: true, tags: true } } } },
   product: true,
   recipe: { include: { ingredients: { include: { product: true } } } },
   locations: { where: { isActive: true, canSellMenu: true } },
@@ -646,24 +647,53 @@ function sendOrderError(res: import("express").Response, error: unknown) {
   return false;
 }
 
+type RoutableItem<L> = {
+  locations: L[];
+  product?: { tags: string[] } | null;
+  variants?: { stockProduct?: { tags?: string[] } | null }[];
+};
+
+/** Where a menu item is made when posted at `baseLocationId`. The item's own locations
+ * decide: it stays when the base sells it, else goes to the one other location that does
+ * (two or more is ambiguous - the waiter must switch). An item with no locations falls
+ * back to its stock product's tags (Tusker Lite's product is tagged BAR -> the bar),
+ * staying put when the base has that type or the tag doesn't single out one location;
+ * food made from recipes carries no tags, so allocating menu items stays the main setup.
+ * `target: null` means it stays at the base. */
+function fulfillmentTarget<L extends { id: string; type?: string | null }>(item: RoutableItem<L>, baseLocationId: string | null, sellingLocations: L[]): { target: L | null; ambiguous: boolean } {
+  const stay = { target: null, ambiguous: false };
+  if (!baseLocationId) return stay;
+  if (item.locations.length > 0) {
+    if (item.locations.some((loc) => loc.id === baseLocationId)) return stay;
+    return item.locations.length === 1 ? { target: item.locations[0], ambiguous: false } : { target: null, ambiguous: true };
+  }
+  const tags = item.product?.tags?.length ? item.product.tags : [...new Set((item.variants ?? []).flatMap((v) => v.stockProduct?.tags ?? []))];
+  if (tags.length === 0) return stay;
+  const tagged = sellingLocations.filter((loc) => loc.type && tags.includes(loc.type));
+  if (tagged.length !== 1 || tagged[0].id === baseLocationId) return stay;
+  return { target: tagged[0], ambiguous: false };
+}
+
 /** Waiters who work two places (restaurant + bar) post from whichever location they're
- * switched to. A line stays at that location when it sells the item (or the item is sold
- * everywhere); otherwise it goes to the one other location that sells it, so bar drinks
- * never reach the kitchen/store and food never lands at the bar counter. */
-function splitLinesByLocation(lines: ResolvedLine[], menuItemsById: MenuItemsById, baseLocationId: string | null) {
+ * switched to; each line goes where fulfillmentTarget says, so bar drinks never reach the
+ * kitchen/store and food never lands at the bar counter. */
+function splitLinesByLocation(lines: ResolvedLine[], menuItemsById: MenuItemsById, baseLocationId: string | null, sellingLocations: Prisma.LocationGetPayload<{}>[]) {
   const here: ResolvedLine[] = [];
   const elsewhere = new Map<string, { location: Prisma.LocationGetPayload<{}>; lines: ResolvedLine[] }>();
   for (const line of lines) {
     const item = menuItemsById.get(line.menuItemId)!;
-    if (!baseLocationId || item.locations.length === 0 || item.locations.some((loc) => loc.id === baseLocationId)) { here.push(line); continue; }
-    if (item.locations.length > 1) throw statusError(`${item.name} is sold in more than one other location. Switch to that location before adding it.`, 400);
-    const target = item.locations[0];
+    const { target, ambiguous } = fulfillmentTarget(item, baseLocationId, sellingLocations);
+    if (ambiguous) throw statusError(`${item.name} is sold in more than one other location. Switch to that location before adding it.`, 400);
+    if (!target) { here.push(line); continue; }
     const bucket = elsewhere.get(target.id) ?? { location: target, lines: [] };
     bucket.lines.push(line);
     elsewhere.set(target.id, bucket);
   }
   return { here, elsewhere };
 }
+
+/** The locations a menu line can be routed to. */
+const sellingLocationsFor = (tid: string) => prisma.location.findMany({ where: { tenantId: tid, isActive: true, canSellMenu: true } });
 
 /** Checks one location's share of a new order can be made there (stock on hand, or
  * postable to its store) and works out how that order starts. */
@@ -760,7 +790,7 @@ posRouter.post("/orders", async (req, res) => {
 
   let orderGroups: (PreparedOrderGroup & { discount: number })[];
   try {
-    const { here, elsewhere } = splitLinesByLocation(resolvedLines, menuItemsById, effectiveLocationId);
+    const { here, elsewhere } = splitLinesByLocation(resolvedLines, menuItemsById, effectiveLocationId, await sellingLocationsFor(tid));
     const rawGroups = [...(here.length ? [{ location, lines: here }] : []), ...elsewhere.values()];
     const prepared = await Promise.all(rawGroups.map((group) => prepareOrderGroup(tid, group.location, group.lines, menuItemsById, addonsById)));
     // One discount for the whole bill, shared across the location orders by value; the last takes the rounding.
@@ -979,7 +1009,7 @@ posRouter.post("/orders/:id/items", async (req, res) => {
   const tax = await taxSettingsFor(tid);
   try {
     const { lines: resolvedLines, menuItemsById, addonsById } = await resolveMenuLines(tid, parsed.data.items, tax);
-    const { here, elsewhere } = splitLinesByLocation(resolvedLines, menuItemsById, order.locationId);
+    const { here, elsewhere } = splitLinesByLocation(resolvedLines, menuItemsById, order.locationId, await sellingLocationsFor(tid));
 
     // Every part of the round is checked before anything is written.
     const linked = elsewhere.size > 0 && order.billGroupId
@@ -2410,7 +2440,7 @@ posRouter.get("/menu-items", async (req, res) => {
     include: {
       menuCategory: true,
       product: { include: { packUnit: { select: { id: true, name: true } }, stocks: { where: stockWhere, select: { quantity: true } } } },
-      locations: { where: { isActive: true, canSellMenu: true }, select: { id: true, name: true, serveMode: true } },
+      locations: { where: { isActive: true, canSellMenu: true }, select: { id: true, name: true, serveMode: true, type: true } },
       recipe: { include: { ingredients: { include: { product: { include: { stocks: { where: stockWhere, select: { quantity: true } } } } } } } },
       variants: {
         where: { isActive: true },
@@ -2427,6 +2457,7 @@ posRouter.get("/menu-items", async (req, res) => {
               unit: true,
               packUnit: { select: { id: true, name: true } },
               stocks: { where: stockWhere, select: { quantity: true } },
+              tags: true,
             },
           },
         },
@@ -2434,6 +2465,7 @@ posRouter.get("/menu-items", async (req, res) => {
     },
     orderBy: [{ menuCategory: { sortOrder: "asc" } }, { sortOrder: "asc" }, { name: "asc" }],
   });
+  const routingLocations = await prisma.location.findMany({ where: { tenantId: tid, isActive: true, canSellMenu: true }, select: { id: true, name: true, serveMode: true, type: true } });
 
   /** How many of this item (or variant) can be sold right now — floor(stock
    * / qty-per-unit), or the minimum across a recipe's ingredients. null means
@@ -2495,8 +2527,9 @@ posRouter.get("/menu-items", async (req, res) => {
       availableQuantity = bestVariant.availableQuantity;
       availabilityUnitLabel = bestVariant.availabilityUnitLabel;
     }
-    const routesHere = !effectiveLocationId || item.locations.length === 0 || item.locations.some((loc) => loc.id === effectiveLocationId);
-    const fulfillmentLocation = routesHere ? null : item.locations[0] ?? null;
+    // The same rule the order routing uses, so the card says where it will really go.
+    const route = fulfillmentTarget({ locations: item.locations, product, variants }, effectiveLocationId, routingLocations);
+    const fulfillmentLocation = route.target ?? (route.ambiguous ? item.locations[0] ?? null : null);
     if (!effectiveLocationId || fulfillmentLocation) availableQuantity = null;
     return {
       ...item,
