@@ -519,69 +519,80 @@ export async function isSuperAdminUser(tid: string, userId: string | undefined):
 // "unallocated = everywhere" convention used for menu items/tables.
 // On top of location, an employee without canSeeAllOrders only sees orders
 // they themselves rang up — a waiter's list, a counter/manager's everyone's.
+const orderListFilterSchema = z.object({
+  channel: z.enum(["FOOD", "PRODUCTS", "SERVICES"]).optional(),
+  locationId: z.string().cuid().optional(),
+  // Only meaningful for someone with canSeeAllOrders — see below, an
+  // employee restricted to their own orders can't use this to browse
+  // someone else's regardless of what they pass here.
+  employeeId: z.string().cuid().optional(),
+  // Only sales where a line was sold at a price other than its list price (till override audit).
+  overridden: z.enum(["true"]).optional(),
+  // Nairobi wall-clock: a plain date (whole day) or a date+time (exact
+  // instant), same convention as the stock ledger's filters.
+  from: localStamp,
+  to: localStamp,
+  // A business day (e.g. 09:00 to 09:00 next day, per Business Information)
+  // — the day that STARTS on this date. Wins over from/to when given, same
+  // as the stock ledger's "shift" period mode.
+  shiftDate: dateOnlyStamp,
+  // Searched across every order, not just one page: an order number
+  // (32 or #32) matches exactly; table, customer name or phone by text.
+  search: z.preprocess(blankToUndefined, z.string().trim().max(60).optional()),
+});
+type OrderListFilters = z.infer<typeof orderListFilterSchema>;
+
+/** The where clause shared by the order list and the paged sales register: tenant,
+ * location scope, who may see whose orders, period and search. */
+async function orderListWhere(tid: string, userId: string | undefined, f: OrderListFilters): Promise<{ where: Prisma.PosOrderWhereInput } | { error: string }> {
+  const [locationScope, canSeeAll] = await Promise.all([scopedLocationIds(tid, userId, f.locationId), canSeeAllOrders(tid, userId)]);
+  if ("error" in locationScope) return { error: locationScope.error ?? "You cannot view this location" };
+  let dateStart: Date | undefined;
+  let dateEnd: Date | undefined;
+  if (f.shiftDate) {
+    const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessDayStartHour: true } });
+    ({ start: dateStart, end: dateEnd } = businessDayWindowForDateOnly(profile?.businessDayStartHour ?? 0, new Date(`${f.shiftDate}T00:00:00.000Z`)));
+  } else {
+    dateStart = f.from ? parseLocalStamp(f.from, false) : undefined;
+    dateEnd = f.to ? parseLocalStamp(f.to, true) : undefined;
+  }
+  const term = f.search;
+  return {
+    where: {
+      tenantId: tid,
+      ...(f.channel ? { channel: f.channel } : {}),
+      ...(f.overridden ? { items: { some: { listPrice: { not: null } } } } : {}),
+      ...(locationScope.ids ? { locationId: { in: locationScope.ids } } : {}),
+      ...(canSeeAll
+        ? (f.employeeId ? { createdBy: f.employeeId } : {})
+        : { createdBy: userId ?? "__unauthenticated__" }),
+      ...(dateStart || dateEnd ? { createdAt: { ...(dateStart ? { gte: dateStart } : {}), ...(dateEnd ? { lte: dateEnd } : {}) } } : {}),
+      ...(term ? { OR: [
+        ...(/^#?\d+$/.test(term) ? [{ orderNumber: Number(term.replace("#", "")) }] : []),
+        { table: { label: { contains: term, mode: "insensitive" as const } } },
+        ...(term.length >= 3 && "takeaway".includes(term.toLowerCase()) ? [{ tableId: null }] : []),
+        { customer: { firstName: { contains: term, mode: "insensitive" as const } } },
+        { customer: { lastName: { contains: term, mode: "insensitive" as const } } },
+        { customer: { phone: { contains: term } } },
+      ] } : {}),
+    },
+  };
+}
+
 posRouter.get("/orders", async (req, res) => {
-  const query = z.object({
+  const query = orderListFilterSchema.extend({
     status: z.enum(["OPEN", "PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED", "PENDING_CANCELLATION"]).optional(),
-    channel: z.enum(["FOOD", "PRODUCTS", "SERVICES"]).optional(),
-    locationId: z.string().cuid().optional(),
-    // Only meaningful for someone with canSeeAllOrders — see below, an
-    // employee restricted to their own orders can't use this to browse
-    // someone else's regardless of what they pass here.
-    employeeId: z.string().cuid().optional(),
-    // Only sales where a line was sold at a price other than its list price (till override audit).
-    overridden: z.enum(["true"]).optional(),
     // Cap the rows returned (most recent first) so a long-lived POS screen
     // doesn't drag in thousands of historical orders. Omitted = no cap.
     limit: z.coerce.number().int().min(1).max(500).optional(),
-    // Nairobi wall-clock: a plain date (whole day) or a date+time (exact
-    // instant), same convention as the stock ledger's filters.
-    from: localStamp,
-    to: localStamp,
-    // A business day (e.g. 09:00 to 09:00 next day, per Business Information)
-    // — the day that STARTS on this date. Wins over from/to when given, same
-    // as the stock ledger's "shift" period mode.
-    shiftDate: dateOnlyStamp,
-    // Searched across every order, not just the capped page: an order number
-    // (32 or #32) matches exactly; table, customer name or phone by text.
-    search: z.preprocess(blankToUndefined, z.string().trim().max(60).optional()),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
   const tid = tenantIdFor(req);
-  const term = query.data.search;
-  const searchWhere: Prisma.PosOrderWhereInput = term ? { OR: [
-    ...(/^#?\d+$/.test(term) ? [{ orderNumber: Number(term.replace("#", "")) }] : []),
-    { table: { label: { contains: term, mode: "insensitive" as const } } },
-    ...(term.length >= 3 && "takeaway".includes(term.toLowerCase()) ? [{ tableId: null }] : []),
-    { customer: { firstName: { contains: term, mode: "insensitive" as const } } },
-    { customer: { lastName: { contains: term, mode: "insensitive" as const } } },
-    { customer: { phone: { contains: term } } },
-  ] } : {};
-  const [locationScope, canSeeAll] = await Promise.all([scopedLocationIds(tid, req.userId, query.data.locationId), canSeeAllOrders(tid, req.userId)]);
-  if ("error" in locationScope) { res.status(403).json({ error: locationScope.error }); return; }
-  const locationWhere = locationScope.ids ? { locationId: { in: locationScope.ids } } : {};
-  let dateStart: Date | undefined;
-  let dateEnd: Date | undefined;
-  if (query.data.shiftDate) {
-    const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessDayStartHour: true } });
-    ({ start: dateStart, end: dateEnd } = businessDayWindowForDateOnly(profile?.businessDayStartHour ?? 0, new Date(`${query.data.shiftDate}T00:00:00.000Z`)));
-  } else {
-    dateStart = query.data.from ? parseLocalStamp(query.data.from, false) : undefined;
-    dateEnd = query.data.to ? parseLocalStamp(query.data.to, true) : undefined;
-  }
+  const scope = await orderListWhere(tid, req.userId, query.data);
+  if ("error" in scope) { res.status(403).json({ error: scope.error }); return; }
   const [orders, tax] = await Promise.all([
     prisma.posOrder.findMany({
-      where: {
-        tenantId: tid,
-        ...(query.data.status ? { status: query.data.status } : {}),
-        ...(query.data.channel ? { channel: query.data.channel } : {}),
-        ...(query.data.overridden ? { items: { some: { listPrice: { not: null } } } } : {}),
-        ...locationWhere,
-        ...(canSeeAll
-          ? (query.data.employeeId ? { createdBy: query.data.employeeId } : {})
-          : { createdBy: req.userId ?? "__unauthenticated__" }),
-        ...(dateStart || dateEnd ? { createdAt: { ...(dateStart ? { gte: dateStart } : {}), ...(dateEnd ? { lte: dateEnd } : {}) } } : {}),
-        ...searchWhere,
-      },
+      where: { ...scope.where, ...(query.data.status ? { status: query.data.status } : {}) },
       include: orderInclude,
       orderBy: { createdAt: "desc" },
       ...(query.data.limit ? { take: query.data.limit } : {}),
@@ -589,6 +600,54 @@ posRouter.get("/orders", async (req, res) => {
     taxSettingsFor(tid),
   ]);
   res.status(200).json({ orders: orders.map((order) => withFinancials(order, tax)) });
+});
+
+/** The sales register (Receipts): completed and cancelled orders by order number, newest
+ * back to the first, one page at a time, with totals over EVERY matching order - not just the page - so
+ * nothing is skipped and the cards always add up. */
+posRouter.get("/orders/register", async (req, res) => {
+  const query = orderListFilterSchema.extend({
+    status: z.enum(["ALL", "COMPLETED", "CANCELLED"]).default("ALL"),
+    // Paid / part-paid / unpaid apply to completed sales only.
+    paymentStatus: z.enum(["PAID", "PARTIAL", "UNPAID"]).optional(),
+    page: z.coerce.number().int().min(1).default(1),
+    pageSize: z.coerce.number().int().min(10).max(200).default(50),
+  }).safeParse(req.query);
+  if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
+  const tid = tenantIdFor(req);
+  const scope = await orderListWhere(tid, req.userId, query.data);
+  if ("error" in scope) { res.status(403).json({ error: scope.error }); return; }
+  const { status, paymentStatus, page, pageSize } = query.data;
+  const completedWhere: Prisma.PosOrderWhereInput = { status: "COMPLETED", ...(paymentStatus ? { paymentStatus } : {}) };
+  const statusWhere: Prisma.PosOrderWhereInput = paymentStatus || status === "COMPLETED"
+    ? completedWhere
+    : status === "CANCELLED" ? { status: "CANCELLED" } : { OR: [completedWhere, { status: "CANCELLED" }] };
+  const where: Prisma.PosOrderWhereInput = { AND: [scope.where, statusWhere] };
+
+  const tax = await taxSettingsFor(tid);
+  const [total, pageRows, all] = await Promise.all([
+    prisma.posOrder.count({ where }),
+    prisma.posOrder.findMany({ where, include: orderInclude, orderBy: { orderNumber: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
+    // Everything that matches, for the totals - what an order comes to needs its lines.
+    prisma.posOrder.findMany({
+      where,
+      select: {
+        status: true, saleType: true, discount: true, paymentStatus: true,
+        payments: { select: { amount: true } },
+        items: { select: { quantity: true, unitPrice: true, taxRate: true, taxMode: true, taxTreatment: true, addons: { select: { quantity: true, unitPrice: true } } } },
+      },
+    }),
+  ]);
+  const summary = { sales: 0, salesCount: 0, collected: 0, outstanding: 0, cancelled: 0, cancelledCount: 0 };
+  for (const order of all) {
+    const { total: orderTotal, paid } = withFinancials(order as unknown as FinancialOrder, tax)
+    if (order.status === "CANCELLED") { summary.cancelledCount += 1; summary.cancelled += orderTotal; continue; }
+    summary.salesCount += 1;
+    summary.sales += orderTotal;
+    summary.collected += paid;
+    summary.outstanding += Math.max(0, orderTotal - paid);
+  }
+  res.status(200).json({ orders: pageRows.map((order) => withFinancials(order, tax)), total, page, pageSize, summary });
 });
 
 /** POS notification queue: Kitchen places finished orders here for serving.
