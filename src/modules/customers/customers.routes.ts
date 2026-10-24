@@ -6,6 +6,7 @@ import { requireModule } from "../../middleware/tenantContext.js";
 import { nextCustomerNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { resolveActorLocation } from "../../lib/location.js";
+import { customerStatement, statementQuery } from "../../lib/statements.js";
 
 export const customersRouter = Router();
 customersRouter.use(requireModule("CUSTOMERS"));
@@ -121,6 +122,16 @@ customersRouter.get("/:id", async (req, res) => {
   const customer = await prisma.customer.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include: auditInclude });
   if (!customer) { res.status(404).json({ error: "Customer not found" }); return; }
   res.json({ customer });
+});
+
+/** Statement of account: each bill (credit sale, stay, invoice) with billed, paid and
+ * outstanding. ?show=owing (default) | all, ?from / ?to on the bill date. */
+customersRouter.get("/:id/statement", async (req, res) => {
+  const q = statementQuery.safeParse(req.query);
+  if (!q.success) { res.status(400).json({ error: "Invalid statement filters", details: q.error.flatten() }); return; }
+  const statement = await customerStatement(tenantId(req), req.params.id, q.data);
+  if (!statement) { res.status(404).json({ error: "Customer not found" }); return; }
+  res.json(statement);
 });
 
 /** The customer's credit statement: every balance movement newest-first,

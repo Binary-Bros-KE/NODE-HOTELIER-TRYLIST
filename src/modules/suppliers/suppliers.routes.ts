@@ -6,6 +6,7 @@ import { partialNoDefaults } from "../../lib/zod.js";
 import { nextSupplierPaymentNo, nextTransactionNo } from "../../lib/sequence.js";
 import { recordSupplierBalanceEntry } from "../../lib/supplierBalance.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
+import { statementQuery, supplierStatement } from "../../lib/statements.js";
 
 // Suppliers/vendors the property buys stock from. A plain definitional
 // lookup for now — Purchases / Goods Received will consume it later — so
@@ -157,6 +158,20 @@ async function recomputePurchasePaymentStatus(tx: Prisma.TransactionClient, purc
   const paid = Number(paidAgg._sum.amount ?? 0);
   return tx.purchase.update({ where: { id: purchaseId }, data: { paymentStatus: paymentStatusFrom(paid, owed) } });
 }
+
+/** Statement of account: each purchase with goods received, paid and outstanding.
+ * ?show=owing (default) | all, ?from / ?to on the purchase date. */
+suppliersRouter.get("/:id/statement", async (req, res, next) => {
+  try {
+    const q = statementQuery.safeParse(req.query);
+    if (!q.success) { res.status(400).json({ error: "Invalid statement filters", details: q.error.flatten() }); return; }
+    const statement = await supplierStatement(tenantId(req), req.params.id, q.data);
+    if (!statement) { res.status(404).json({ error: "Supplier not found" }); return; }
+    res.json(statement);
+  } catch (error) {
+    next(error);
+  }
+});
 
 /** Payment history for one supplier — the only thing that ever brings
  * Supplier.balance back down (Goods Received only ever raises it). */
