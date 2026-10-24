@@ -585,6 +585,8 @@ posRouter.get("/orders", async (req, res) => {
     // Cap the rows returned (most recent first) so a long-lived POS screen
     // doesn't drag in thousands of historical orders. Omitted = no cap.
     limit: z.coerce.number().int().min(1).max(500).optional(),
+    // Completed but not fully paid (on credit / part-paid) - every one, however old.
+    owing: z.enum(["true"]).optional(),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
   const tid = tenantIdFor(req);
@@ -592,7 +594,7 @@ posRouter.get("/orders", async (req, res) => {
   if ("error" in scope) { res.status(403).json({ error: scope.error }); return; }
   const [orders, tax] = await Promise.all([
     prisma.posOrder.findMany({
-      where: { ...scope.where, ...(query.data.status ? { status: query.data.status } : {}) },
+      where: { ...scope.where, ...(query.data.status ? { status: query.data.status } : {}), ...(query.data.owing ? { status: "COMPLETED" as const, paymentStatus: { not: "PAID" as const } } : {}) },
       include: orderInclude,
       orderBy: { createdAt: "desc" },
       ...(query.data.limit ? { take: query.data.limit } : {}),
