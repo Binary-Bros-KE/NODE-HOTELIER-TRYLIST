@@ -23,6 +23,9 @@ const listSchema = z.object({
   // "Latest transactions" widget only wants a handful. Omitted = no cap,
   // matching the page's existing unbounded behaviour.
   limit: z.coerce.number().int().min(1).max(500).optional(),
+  // The Transactions page: newest first, one page at a time (wins over limit).
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(10).max(200).default(100),
 });
 
 const tenantId = (req: { tenantId?: string }) => {
@@ -41,7 +44,7 @@ const transactionInclude = {
 transactionsRouter.get("/", async (req, res) => {
   const query = listSchema.safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid transaction filters", details: query.error.flatten() }); return; }
-  const { direction, source, paymentMethodId, locationId, search, from, to, limit } = query.data;
+  const { direction, source, paymentMethodId, locationId, search, from, to, limit, page, pageSize } = query.data;
   const tid = tenantId(req);
 
   const where = {
@@ -68,13 +71,15 @@ transactionsRouter.get("/", async (req, res) => {
   // The summary always reflects every matching row, not just the page a
   // `limit` returns — a "latest 8" request shouldn't quietly shrink the
   // in/out totals to just those 8.
-  const [transactions, aggregate] = await Promise.all([
-    prisma.transaction.findMany({ where, include: transactionInclude, orderBy: { createdAt: "desc" }, ...(limit ? { take: limit } : {}) }),
+  const paging: { skip?: number; take?: number } = page ? { skip: (page - 1) * pageSize, take: pageSize } : limit ? { take: limit } : {};
+  const [transactions, aggregate, total] = await Promise.all([
+    prisma.transaction.findMany({ where, include: transactionInclude, orderBy: { createdAt: "desc" }, ...paging }),
     prisma.transaction.groupBy({ by: ["direction"], where: { ...where, status: "COMPLETE" }, _sum: { amount: true }, _count: true }),
+    prisma.transaction.count({ where }),
   ]);
 
   const totalIn = Number(aggregate.find((a) => a.direction === "IN")?._sum.amount ?? 0);
   const totalOut = Number(aggregate.find((a) => a.direction === "OUT")?._sum.amount ?? 0);
   const totalCount = aggregate.reduce((s, a) => s + a._count, 0);
-  res.json({ transactions, summary: { totalIn, totalOut, count: totalCount } });
+  res.json({ transactions, total, summary: { totalIn, totalOut, count: totalCount } });
 });

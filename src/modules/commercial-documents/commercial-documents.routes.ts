@@ -455,7 +455,7 @@ commercialDocumentsRouter.get("/options", async (req, res) => {
 
 commercialDocumentsRouter.get("/source-options", async (req, res) => {
   const tid = tenantId(req);
-  const [fallback, roomTypes, services, reservations, rawOrders] = await Promise.all([
+  const [fallback, roomTypes, services] = await Promise.all([
     taxDefaults(tid),
     prisma.roomType.findMany({
       where: { tenantId: tid, isActive: true },
@@ -466,23 +466,6 @@ commercialDocumentsRouter.get("/source-options", async (req, res) => {
       where: { tenantId: tid, isActive: true },
       include: { unit: true, variants: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } },
       orderBy: { name: "asc" },
-    }),
-    prisma.reservation.findMany({
-      where: { tenantId: tid, folio: { isNot: null }, status: { in: ["CHECKED_IN", "CHECKED_OUT"] } },
-      include: {
-        customer: true,
-        room: { include: { roomType: true } },
-        location: true,
-        folio: { include: { lineItems: true, payments: { include: { paymentMethod: { select: { id: true, name: true } } } } } },
-      },
-      orderBy: { updatedAt: "desc" },
-      take: 100,
-    }),
-    prisma.posOrder.findMany({
-      where: { tenantId: tid, status: "COMPLETED", customerId: { not: null } },
-      include: orderInclude,
-      orderBy: { updatedAt: "desc" },
-      take: 100,
     }),
   ]);
 
@@ -546,7 +529,80 @@ commercialDocumentsRouter.get("/source-options", async (req, res) => {
     }))];
   });
 
-  const folios = reservations.flatMap((reservation) => {
+  res.json({ roomRates: roomRateLines, services: serviceLines });
+});
+
+const sourceSearchSchema = z.object({
+  kind: z.enum(["order", "folio"]),
+  search: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? undefined : v), z.string().trim().max(60).optional()),
+  page: z.coerce.number().int().min(1).default(1),
+});
+const SOURCE_PAGE_SIZE = 25;
+
+/** What an invoice can be generated from, searched across EVERY stay or completed
+ * sale (not just the latest 100), newest first, a page at a time. Sales: an order
+ * number matches exactly, a customer name/phone by text. Stays (only those still
+ * owing, as before): reservation or folio number, customer, room. */
+commercialDocumentsRouter.get("/source-search", async (req, res) => {
+  const parsed = sourceSearchSchema.safeParse(req.query);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid search" }); return; }
+  const tid = tenantId(req);
+  const { kind, search: term, page } = parsed.data;
+  const contains = (value: string) => ({ contains: value, mode: "insensitive" as const });
+
+  if (kind === "order") {
+    const where = {
+      tenantId: tid, status: "COMPLETED" as const, customerId: { not: null }, billedToRoomAt: null, saleType: { not: "COMPLIMENTARY" as const },
+      ...(term ? { OR: [
+        ...(/^#?\d+$/.test(term) ? [{ orderNumber: Number(term.replace("#", "")) }] : []),
+        { customer: { firstName: contains(term) } },
+        { customer: { lastName: contains(term) } },
+        { customer: { phone: { contains: term } } },
+      ] } : {}),
+    };
+    const [total, rawOrders, tax] = await Promise.all([
+      prisma.posOrder.count({ where }),
+      prisma.posOrder.findMany({ where, include: orderInclude, orderBy: { orderNumber: "desc" }, skip: (page - 1) * SOURCE_PAGE_SIZE, take: SOURCE_PAGE_SIZE }),
+      taxSettingsFor(tid),
+    ]);
+    const items = rawOrders.map((order) => withFinancials(order, tax)).map((order) => ({
+      id: order.id,
+      orderNumber: order.orderNumber,
+      channel: order.channel,
+      customerName: order.customer ? customerLabel(order.customer) : "Customer",
+      locationName: order.location?.name ?? null,
+      total: order.total,
+      paid: order.paid,
+      balance: Math.max(0, round2(order.total - order.paid)),
+      createdAt: order.createdAt,
+    }));
+    res.json({ items, total, page, pageSize: SOURCE_PAGE_SIZE });
+    return;
+  }
+
+  // Stays: what's owing is worked out from the folio's lines, so match first, then keep the unpaid ones.
+  const fallback = await taxDefaults(tid);
+  const reservations = await prisma.reservation.findMany({
+    where: {
+      tenantId: tid, folio: { isNot: null }, status: { in: ["CHECKED_IN", "CHECKED_OUT"] },
+      ...(term ? { OR: [
+        { reservationNo: contains(term) },
+        { folio: { folioNo: contains(term) } },
+        { room: { number: contains(term) } },
+        { customer: { firstName: contains(term) } },
+        { customer: { lastName: contains(term) } },
+        { customer: { phone: { contains: term } } },
+      ] } : {}),
+    },
+    include: {
+      customer: true,
+      room: { include: { roomType: true } },
+      location: true,
+      folio: { include: { lineItems: true, payments: { select: { amount: true } } } },
+    },
+    orderBy: { checkIn: "desc" },
+  });
+  const owing = reservations.flatMap((reservation) => {
     if (!reservation.folio) return [];
     const charges = round2(reservation.folio.lineItems.reduce((sum, line) => sum + folioLineGross(line, fallback), 0));
     const paid = paymentSum(reservation.folio.payments);
@@ -567,21 +623,7 @@ commercialDocumentsRouter.get("/source-options", async (req, res) => {
       balance,
     }];
   });
-
-  const tax = await taxSettingsFor(tid);
-  const orders = rawOrders.map((order) => withFinancials(order, tax)).filter((order) => order.total > 0.01).map((order) => ({
-    id: order.id,
-    orderNumber: order.orderNumber,
-    channel: order.channel,
-    customerName: order.customer ? customerLabel(order.customer) : "Customer",
-    locationName: order.location?.name ?? null,
-    total: order.total,
-    paid: order.paid,
-    balance: Math.max(0, round2(order.total - order.paid)),
-    createdAt: order.createdAt,
-  }));
-
-  res.json({ roomRates: roomRateLines, services: serviceLines, folios, orders });
+  res.json({ items: owing.slice((page - 1) * SOURCE_PAGE_SIZE, page * SOURCE_PAGE_SIZE), total: owing.length, page, pageSize: SOURCE_PAGE_SIZE });
 });
 
 commercialDocumentsRouter.get("/source-links", async (req, res) => {
