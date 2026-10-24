@@ -23,7 +23,7 @@ import { deductStockForOrder, hasPendingAdditions, isUndeductedAddition, resolve
 import { perSaleRequirements } from "../../lib/trackingMode.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 import { businessDayStart, businessDayWindowForDateOnly } from "../../lib/businessDay.js";
-import { dateOnlyStamp, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
+import { blankToUndefined, dateOnlyStamp, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
 
 // POS configuration, stores, and stock all remain scoped to the tenant supplied
 // by the authenticated request context (currently x-tenant-id during scaffolding).
@@ -580,9 +580,21 @@ posRouter.get("/orders", async (req, res) => {
     // — the day that STARTS on this date. Wins over from/to when given, same
     // as the stock ledger's "shift" period mode.
     shiftDate: dateOnlyStamp,
+    // Searched across every order, not just the capped page: an order number
+    // (32 or #32) matches exactly; table, customer name or phone by text.
+    search: z.preprocess(blankToUndefined, z.string().trim().max(60).optional()),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
   const tid = tenantIdFor(req);
+  const term = query.data.search;
+  const searchWhere: Prisma.PosOrderWhereInput = term ? { OR: [
+    ...(/^#?d+$/.test(term) ? [{ orderNumber: Number(term.replace("#", "")) }] : []),
+    { table: { label: { contains: term, mode: "insensitive" as const } } },
+    ...(term.length >= 3 && "takeaway".includes(term.toLowerCase()) ? [{ tableId: null }] : []),
+    { customer: { firstName: { contains: term, mode: "insensitive" as const } } },
+    { customer: { lastName: { contains: term, mode: "insensitive" as const } } },
+    { customer: { phone: { contains: term } } },
+  ] } : {};
   const [locationScope, canSeeAll] = await Promise.all([scopedLocationIds(tid, req.userId, query.data.locationId), canSeeAllOrders(tid, req.userId)]);
   if ("error" in locationScope) { res.status(403).json({ error: locationScope.error }); return; }
   const locationWhere = locationScope.ids ? { locationId: { in: locationScope.ids } } : {};
@@ -607,6 +619,7 @@ posRouter.get("/orders", async (req, res) => {
           ? (query.data.employeeId ? { createdBy: query.data.employeeId } : {})
           : { createdBy: req.userId ?? "__unauthenticated__" }),
         ...(dateStart || dateEnd ? { createdAt: { ...(dateStart ? { gte: dateStart } : {}), ...(dateEnd ? { lte: dateEnd } : {}) } } : {}),
+        ...searchWhere,
       },
       include: orderInclude,
       orderBy: { createdAt: "desc" },
