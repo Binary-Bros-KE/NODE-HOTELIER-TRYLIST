@@ -588,7 +588,7 @@ posRouter.get("/orders", async (req, res) => {
   const tid = tenantIdFor(req);
   const term = query.data.search;
   const searchWhere: Prisma.PosOrderWhereInput = term ? { OR: [
-    ...(/^#?d+$/.test(term) ? [{ orderNumber: Number(term.replace("#", "")) }] : []),
+    ...(/^#?\d+$/.test(term) ? [{ orderNumber: Number(term.replace("#", "")) }] : []),
     { table: { label: { contains: term, mode: "insensitive" as const } } },
     ...(term.length >= 3 && "takeaway".includes(term.toLowerCase()) ? [{ tableId: null }] : []),
     { customer: { firstName: { contains: term, mode: "insensitive" as const } } },
