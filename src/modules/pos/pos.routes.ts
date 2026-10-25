@@ -1504,6 +1504,128 @@ posRouter.post("/orders/:id/make-sale", async (req, res) => {
   res.status(200).json({ order: withFinancials(updated, tax) });
 });
 
+const splitBillSchema = z.object({
+  // Each entry becomes a new bill: which lines move to it, and how many of each.
+  bills: z.array(z.object({
+    lines: z.array(z.object({ itemId: z.string().min(1), quantity: z.coerce.number().int().min(1) })).min(1),
+  })).min(1).max(20),
+});
+
+/** Super Admin: people who drank on one tab each want their own bill. Moves chosen
+ * lines (or part of a line's quantity) off a served, unpaid bill onto new bills, each
+ * with its own order number, paid and printed separately. Stock and the menu ledger
+ * are untouched - the items were already made and served; only who pays changes. */
+posRouter.post("/orders/:id/split", async (req, res) => {
+  const parsed = splitBillSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Choose the items for each new bill", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  if (!(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can split a bill" }); return; }
+  const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  if (order.channel !== "FOOD") { res.status(409).json({ error: "Only food/bar bills can be split" }); return; }
+  if (order.status !== "SERVED") { res.status(409).json({ error: "Only a served bill can be split - serve it first" }); return; }
+  if (order.payments.length > 0) { res.status(409).json({ error: "This bill already has a payment. Only unpaid bills can be split." }); return; }
+  if (order.billedToRoomAt) { res.status(409).json({ error: "This bill is charged to a room and can't be split" }); return; }
+  if (hasPendingReturnRequests(order)) { res.status(409).json({ error: "Approve or reject the pending return first" }); return; }
+  if (order.items.some((item) => item.addedAfterSend)) { res.status(409).json({ error: "Some added items haven't been handed over yet - serve them first" }); return; }
+
+  // What leaves the bill, line by line, and what's left behind.
+  const moving = new Map<string, number>();
+  for (const bill of parsed.data.bills) for (const line of bill.lines) moving.set(line.itemId, (moving.get(line.itemId) ?? 0) + line.quantity);
+  for (const [itemId, quantity] of moving) {
+    const item = order.items.find((row) => row.id === itemId);
+    if (!item) { res.status(400).json({ error: "One of the items isn't on this bill" }); return; }
+    if (quantity > item.quantity) { res.status(400).json({ error: `Only ${item.quantity} of ${item.menuItem?.name ?? "an item"} on this bill` }); return; }
+  }
+  const leftBehind = order.items.reduce((sum, item) => sum + item.quantity - (moving.get(item.id) ?? 0), 0);
+  if (leftBehind < 1) { res.status(400).json({ error: "Leave at least one item on the original bill" }); return; }
+  // A discount stays on the original bill, which must still be worth at least that much.
+  const lineValue = (item: (typeof order.items)[number], quantity: number) =>
+    (Number(item.unitPrice) + item.addons.reduce((sum, addon) => sum + Number(addon.unitPrice) * addon.quantity, 0)) * quantity;
+  const remainingValue = order.items.reduce((sum, item) => sum + lineValue(item, item.quantity - (moving.get(item.id) ?? 0)), 0);
+  if (Number(order.discount) > remainingValue + 0.01) { res.status(409).json({ error: "The bill's discount is more than what would be left on it. Remove the discount first." }); return; }
+
+  const tax = await taxSettingsFor(tid);
+  const by = (await employeeName(prisma, tid, req.userId)) ?? "a Super Admin";
+  try {
+    const created = await prisma.$transaction(async (tx) => {
+      const last = await tx.posOrder.findFirst({ where: { tenantId: tid }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
+      // Lines are cut down as they move, so track what each still holds.
+      const remaining = new Map(order.items.map((item) => [item.id, item.quantity]));
+      const bills: PosOrderFull[] = [];
+      for (const [index, bill] of parsed.data.bills.entries()) {
+        const newOrder = await tx.posOrder.create({
+          data: {
+            tenantId: tid,
+            orderNumber: (last?.orderNumber ?? 0) + index + 1,
+            channel: order.channel,
+            tableId: order.tableId,
+            locationId: order.locationId,
+            createdBy: order.createdBy,
+            saleType: order.saleType,
+            customerId: order.saleType === "COMPLIMENTARY" ? order.customerId : undefined,
+            complimentaryReason: order.complimentaryReason,
+            complimentaryRecipientName: order.complimentaryRecipientName,
+            status: "SERVED",
+            servedAt: order.servedAt,
+            readyAt: order.readyAt,
+            preparingBy: order.preparingBy,
+            readyBy: order.readyBy,
+            paymentStatus: order.saleType === "COMPLIMENTARY" ? "PAID" : "UNPAID",
+            // Same business day as the bill it came from.
+            createdAt: order.createdAt,
+            notes: `Split from order #${order.orderNumber} by ${by} on ${new Date().toLocaleString("en-KE", { timeZone: "Africa/Nairobi" })}.`,
+          },
+        });
+        for (const line of bill.lines) {
+          const item = order.items.find((row) => row.id === line.itemId)!;
+          const left = remaining.get(item.id)!;
+          if (line.quantity >= left) {
+            // The whole (rest of the) line moves.
+            await tx.posOrderItem.update({ where: { id: item.id }, data: { orderId: newOrder.id } });
+            remaining.set(item.id, 0);
+          } else {
+            await tx.posOrderItem.update({ where: { id: item.id }, data: { quantity: left - line.quantity } });
+            remaining.set(item.id, left - line.quantity);
+            await tx.posOrderItem.create({
+              data: {
+                orderId: newOrder.id,
+                menuItemId: item.menuItemId,
+                variantId: item.variantId,
+                productId: item.productId,
+                serviceId: item.serviceId,
+                serviceVariantId: item.serviceVariantId,
+                quantity: line.quantity,
+                unitPrice: item.unitPrice,
+                taxRate: item.taxRate,
+                taxMode: item.taxMode,
+                taxTreatment: item.taxTreatment,
+                unitCost: item.unitCost,
+                listPrice: item.listPrice,
+                priceOverrideReason: item.priceOverrideReason,
+                priceOverriddenBy: item.priceOverriddenBy,
+                dispatchRequestId: item.dispatchRequestId,
+                addons: { create: item.addons.map((addon) => ({ addonId: addon.addonId, quantity: addon.quantity, unitPrice: addon.unitPrice })) },
+              },
+            });
+          }
+        }
+        bills.push(await tx.posOrder.findUniqueOrThrow({ where: { id: newOrder.id }, include: orderInclude }));
+      }
+      await tx.posOrder.update({
+        where: { id: order.id },
+        data: { notes: [order.notes, `Split into ${bills.map((b) => `#${b.orderNumber}`).join(", ")} by ${by} on ${new Date().toLocaleString("en-KE", { timeZone: "Africa/Nairobi" })}.`].filter(Boolean).join("\n") },
+      });
+      return bills;
+    });
+    const original = await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+    res.status(201).json({ order: withFinancials(original, tax), newOrders: created.map((bill) => withFinancials(bill, tax)) });
+  } catch (error) {
+    if (sendOrderError(res, error)) return;
+    throw error;
+  }
+});
+
 posRouter.delete("/orders/:id/revert", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
