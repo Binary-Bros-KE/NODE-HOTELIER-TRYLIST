@@ -1702,13 +1702,14 @@ reportsRouter.get("/inventory-overview", async (req, res, next) => {
       select: { id: true, name: true, sku: true, unit: true, unitCost: true, packSize: true, packLabel: true, packUnit: { select: { id: true, name: true } }, reorderLevel: true, isActive: true, tags: true, category: { select: { name: true } } },
     });
     const productById = new Map(allProducts.map((p) => [p.id, p]));
-    const activeProducts = allProducts.filter((p) => p.isActive);
 
-    // Each location section lists only the products tagged for its operation
-    // (Main Bar -> BAR, Restaurant -> RESTAURANT, ...), so a soda can appear in
-    // both Bar and Restaurant while a food item only shows under Store.
+    // Each location section lists the products tagged for its operation (Main Bar ->
+    // BAR, Restaurant -> RESTAURANT, ...) and every product actually held there,
+    // whatever its tags - stock on the shelf never hides because a tag is missing
+    // (Central Cafe's untagged products made Main Cafe read "no stock"). Same rule
+    // as the stock take.
     const perLocation = locations.map((loc) => {
-      const sectionProducts = activeProducts.filter((p) => p.tags.includes(loc.type));
+      const sectionProducts = allProducts.filter((p) => (p.isActive && p.tags.includes(loc.type)) || balances.has(`${p.id}::${loc.id}`));
       const rows: StockRow[] = sectionProducts.map((p) => ({
         productId: p.id,
         name: p.name,
