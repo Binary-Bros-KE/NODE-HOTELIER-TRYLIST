@@ -2209,6 +2209,8 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
     const query = salesQuerySchema.safeParse(req.query);
     if (!query.success) { res.status(400).json({ error: "Invalid report filters", details: query.error.flatten() }); return; }
     const { period, date, from, to, locationId } = query.data;
+    // Stock take (one location): list every product carried there, not only the ones that moved.
+    const allProducts = req.query.allProducts === "true" && Boolean(locationId);
     const tid = tenantId(req);
     const startHour = await businessDayStartHourFor(tid);
     const { start, end } = resolveSalesRange(period, date, from, to, startHour);
@@ -2218,7 +2220,7 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
       prisma.inventoryMovement.findMany({
         where: { tenantId: tid, occurredAt: { gte: start, lte: end }, ...scope },
         include: {
-          product: { select: { id: true, name: true, sku: true, unit: true, packSize: true, packLabel: true } },
+          product: { select: { id: true, name: true, sku: true, unit: true, packSize: true, packLabel: true, category: { select: { name: true } } } },
           location: { select: { id: true, name: true } },
           employee: { select: { firstName: true, lastName: true } },
         },
@@ -2235,10 +2237,12 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
     ]);
 
     const lastBefore = new Map(beforePeriod.map((m) => [`${m.productId}|${m.locationId}`, Number(m.balanceAfter ?? 0)]));
+    // added / removed: every increase / decrease whatever its type (a positive adjustment is
+    // added, a negative one removed), so opening + added - removed = closing.
     type Row = {
-      productId: string; name: string; sku: string | null; unit: string; packSize: number | null; packLabel: string | null;
+      productId: string; name: string; sku: string | null; category: string | null; unit: string; packSize: number | null; packLabel: string | null;
       locationId: string; locationName: string; opening: number; received: number; issued: number; adjustments: number;
-      net: number; closing: number; reconciles: boolean; movements: number;
+      added: number; removed: number; net: number; closing: number; reconciles: boolean; movements: number;
     };
     const rows = new Map<string, { row: Row; firstBefore: number | null; lastAfter: number | null }>();
     for (const m of inPeriod) {
@@ -2246,10 +2250,10 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
       const quantity = Number(m.quantity);
       const entry = rows.get(key) ?? {
         row: {
-          productId: m.product.id, name: m.product.name, sku: m.product.sku, unit: m.product.unit,
+          productId: m.product.id, name: m.product.name, sku: m.product.sku, category: m.product.category?.name ?? null, unit: m.product.unit,
           packSize: m.product.packSize == null ? null : Number(m.product.packSize), packLabel: m.product.packLabel,
           locationId: m.location.id, locationName: m.location.name,
-          opening: 0, received: 0, issued: 0, adjustments: 0, net: 0, closing: 0, reconciles: true, movements: 0,
+          opening: 0, received: 0, issued: 0, adjustments: 0, added: 0, removed: 0, net: 0, closing: 0, reconciles: true, movements: 0,
         },
         firstBefore: null,
         lastAfter: null,
@@ -2260,10 +2264,38 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
       if (STOCK_IN_TYPES.includes(m.type)) entry.row.received += quantity;
       else if (STOCK_OUT_TYPES.includes(m.type)) entry.row.issued += quantity;
       else if (STOCK_ADJUST_TYPES.includes(m.type)) entry.row.adjustments += quantity;
+      if (quantity >= 0) entry.row.added += quantity;
+      else entry.row.removed += -quantity;
       entry.row.net += quantity;
       entry.row.movements += 1;
       entry.lastAfter = m.balanceAfter != null ? Number(m.balanceAfter) : null;
       rows.set(key, entry);
+    }
+    if (allProducts && locationId) {
+      // Everything carried at this location (the products tagged for its operation, as the
+      // live stock view lists them) that didn't move: opening = closing, nothing added or sold.
+      const location = await prisma.location.findFirst({ where: { id: locationId, tenantId: tid }, select: { id: true, name: true, type: true } });
+      if (location) {
+        const carried = await prisma.product.findMany({
+          where: { tenantId: tid, isActive: true, tags: { has: location.type } },
+          select: { id: true, name: true, sku: true, unit: true, packSize: true, packLabel: true, category: { select: { name: true } } },
+        });
+        for (const p of carried) {
+          const key = `${p.id}|${location.id}`;
+          if (rows.has(key)) continue;
+          const balance = lastBefore.get(key) ?? 0;
+          rows.set(key, {
+            row: {
+              productId: p.id, name: p.name, sku: p.sku, category: p.category?.name ?? null, unit: p.unit,
+              packSize: p.packSize == null ? null : Number(p.packSize), packLabel: p.packLabel,
+              locationId: location.id, locationName: location.name,
+              opening: 0, received: 0, issued: 0, adjustments: 0, added: 0, removed: 0, net: 0, closing: 0, reconciles: true, movements: 0,
+            },
+            firstBefore: balance,
+            lastAfter: balance,
+          });
+        }
+      }
     }
     const summary = [...rows.values()].map(({ row, firstBefore, lastAfter }) => {
       const opening = firstBefore ?? 0;
@@ -2271,7 +2303,7 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
       return {
         ...row,
         opening: round3(opening), received: round3(row.received), issued: round3(row.issued), adjustments: round3(row.adjustments),
-        net: round3(row.net), closing: round3(closing),
+        added: round3(row.added), removed: round3(row.removed), net: round3(row.net), closing: round3(closing),
         reconciles: Math.abs(opening + row.net - closing) < 0.001,
       };
     }).sort((a, b) => a.name.localeCompare(b.name) || a.locationName.localeCompare(b.locationName));
@@ -2279,7 +2311,8 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
     res.json({
       range: { period, start: start.toISOString(), end: end.toISOString() },
       cards: {
-        products: new Set(summary.map((r) => r.productId)).size,
+        products: new Set(summary.filter((r) => r.movements > 0).map((r) => r.productId)).size,
+        listed: summary.length,
         locations: new Set(summary.map((r) => r.locationId)).size,
         movements: inPeriod.length,
         unreconciled: summary.filter((r) => !r.reconciles).length,
