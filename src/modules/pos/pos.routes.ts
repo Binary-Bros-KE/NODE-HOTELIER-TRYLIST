@@ -1508,20 +1508,20 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
-  // A service sale is created already SERVED and paid in a second step; if that step fails the
-  // till withdraws it (no payment yet) and puts back whatever stock it consumed.
-  const unpaidServiceSale = order.channel === "SERVICES" && order.status === "SERVED" && order.payments.length === 0;
+  // A retail or service sale is created already SERVED and paid in a second step; if that step
+  // fails the till withdraws it (no payment yet) and puts back whatever stock it consumed.
+  const unpaidRetailSale = (order.channel === "SERVICES" || order.channel === "PRODUCTS") && order.status === "SERVED" && order.payments.length === 0;
   if (order.channel === "FOOD" && dispatchRequired(order.location)) {
     res.status(409).json({ error: "Orders posted to the store cannot be reverted. Request a return instead." });
     return;
   }
   // Posted to a counter = handed to the barman: from then on it's a return or Super Admin.
-  if (!unpaidServiceSale && order.location?.serveMode === "COUNTER") {
+  if (!unpaidRetailSale && order.location?.serveMode === "COUNTER") {
     res.status(409).json({ error: "Orders posted to the counter cannot be reverted. Request a return instead." });
     return;
   }
   // Once the kitchen has started an order it can no longer be reverted.
-  if (!unpaidServiceSale && (order.status !== "OPEN" || order.servedAt)) {
+  if (!unpaidRetailSale && (order.status !== "OPEN" || order.servedAt)) {
     res.status(409).json({ error: "The kitchen has already started this order, so it can't be reverted" });
     return;
   }
@@ -1533,10 +1533,24 @@ posRouter.delete("/orders/:id/revert", async (req, res) => {
   if (!canRevert) { res.status(403).json({ error: "You can only revert your own undeducted orders" }); return; }
   try {
     await prisma.$transaction(async (tx) => {
-      if (unpaidServiceSale) {
+      if (unpaidRetailSale && order.channel === "SERVICES") {
         const consumed = computeStockRequirements(order.items);
         const stockLocationId = consumed.size > 0 ? await resolveStockLocationId(tid, order.locationId) : null;
         if (stockLocationId) await applyStockDelta(tx, tid, stockLocationId, consumed, new Map(), order.orderNumber, req);
+      }
+      // A product sale took its stock line by line at creation; each of those ledger rows is undone exactly.
+      if (unpaidRetailSale && order.channel === "PRODUCTS") {
+        const sold = await tx.inventoryMovement.findMany({
+          where: { tenantId: tid, sourceType: "POS_ORDER", sourceRefId: order.id, type: "SALE" },
+          select: { productId: true, locationId: true, quantity: true, product: { select: { name: true } } },
+        });
+        for (const row of sold) {
+          await recordStockMovement(tx, {
+            tenantId: tid, productId: row.productId, locationId: row.locationId, type: "RETURN", quantity: -Number(row.quantity),
+            note: `Returned: unpaid POS order #${order.orderNumber} was withdrawn`,
+            sourceType: "POS_ORDER_REVERT", sourceRefId: order.id, performedBy: req.userId ?? null, label: row.product.name,
+          });
+        }
       }
       // Stock the store already sent for this order's dispatches goes back into the
       // store through the ledger, so a reverted order never leaves the books short.
