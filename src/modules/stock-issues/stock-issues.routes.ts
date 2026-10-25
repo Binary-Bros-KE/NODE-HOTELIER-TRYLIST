@@ -437,3 +437,70 @@ stockIssuesRouter.post("/count", handle(async (req, res) => {
   });
   res.status(201).json({ lines: results });
 }));
+
+// ---------------------------------------------------------------- stock take
+// Counting a location's shelves from the Inventory Report's stock take. Each
+// entered count sets that product's stock to it, saved on its own as the count
+// goes on: the difference is one ADJUSTMENT movement (sourceType STOCK_TAKE),
+// recorded even when nothing changed, so the product shows as counted.
+
+const stockTakeSchema = z.object({
+  locationId: z.string().min(1),
+  productId: z.string().min(1),
+  counted: z.number().min(0),
+});
+
+stockIssuesRouter.post("/stock-take", requirePermission("STOCK_TAKE"), handle(async (req, res) => {
+  const tid = tenantId(req);
+  const body = parse(stockTakeSchema, req.body, res);
+  if (!body) return;
+  const location = await locationIn(tid, body.locationId);
+  const product = await prisma.product.findFirst({ where: { id: body.productId, tenantId: tid }, select: { id: true, name: true } });
+  if (!product) throw notFound("Product not found");
+  const movement = await prisma.$transaction(async (tx) => {
+    // Read inside the transaction so a sale landing mid-count is accounted for.
+    const row = await tx.productStock.findUnique({ where: { tenantId_productId_locationId: { tenantId: tid, productId: product.id, locationId: location.id } }, select: { quantity: true } });
+    const previous = Number(row?.quantity ?? 0);
+    const difference = Math.round((body.counted - previous) * 1000) / 1000;
+    return recordStockMovement(tx, {
+      tenantId: tid, productId: product.id, locationId: location.id, type: "ADJUSTMENT", quantity: difference,
+      note: `Stock take: counted ${body.counted} (was ${previous})`, sourceType: "STOCK_TAKE",
+      performedBy: req.userId ?? null, label: product.name,
+    });
+  });
+  res.status(201).json({
+    productId: product.id,
+    previous: Number(movement.balanceBefore ?? 0),
+    counted: Number(movement.balanceAfter ?? body.counted),
+    difference: Number(movement.quantity),
+    value: Number(movement.value ?? 0) * Math.sign(Number(movement.quantity)),
+  });
+}));
+
+/** This count so far: the latest stock-take entry per product at the location since `since`. */
+stockIssuesRouter.get("/stock-take", handle(async (req, res) => {
+  const tid = tenantId(req);
+  const query = parse(z.object({ locationId: z.string().min(1), since: z.coerce.date() }), req.query, res);
+  if (!query) return;
+  await locationIn(tid, query.locationId);
+  const movements = await prisma.inventoryMovement.findMany({
+    where: { tenantId: tid, locationId: query.locationId, sourceType: "STOCK_TAKE", createdAt: { gte: query.since } },
+    select: { productId: true, quantity: true, balanceBefore: true, balanceAfter: true, value: true, createdAt: true },
+    orderBy: { createdAt: "asc" },
+  });
+  // A product counted twice keeps its last count; its difference is from before the first.
+  const byProduct = new Map<string, { productId: string; previous: number; counted: number; difference: number; value: number; at: string }>();
+  for (const m of movements) {
+    const prior = byProduct.get(m.productId);
+    const signedValue = Number(m.value ?? 0) * Math.sign(Number(m.quantity))
+    byProduct.set(m.productId, {
+      productId: m.productId,
+      previous: prior ? prior.previous : Number(m.balanceBefore ?? 0),
+      counted: Number(m.balanceAfter ?? 0),
+      difference: Math.round(((prior?.difference ?? 0) + Number(m.quantity)) * 1000) / 1000,
+      value: Math.round(((prior?.value ?? 0) + signedValue) * 100) / 100,
+      at: m.createdAt.toISOString(),
+    });
+  }
+  res.json({ entries: [...byProduct.values()] });
+}));

@@ -278,6 +278,9 @@ enum Permission {
   // out on credit. Deliberately NOT a waiter's right - a waiter clearing their
   // own tabs corrupts the day's totals. Super Admin always holds it.
   CREDIT_COLLECT
+  // Count stock on the Inventory Report's stock take: each entered count sets the
+  // location's stock to it. Also opens that report without the Reports section.
+  STOCK_TAKE
 }
 
 enum ShiftSessionStatus {
