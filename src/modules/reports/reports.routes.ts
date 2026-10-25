@@ -2272,12 +2272,14 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
       rows.set(key, entry);
     }
     if (allProducts && locationId) {
-      // Everything carried at this location (the products tagged for its operation, as the
-      // live stock view lists them) that didn't move: opening = closing, nothing added or sold.
+      // Everything carried at this location that didn't move: the products tagged for its
+      // operation (as the live stock view lists them) and every product held there
+      // (a stock record at the location), whatever its tag. Opening = closing.
       const location = await prisma.location.findFirst({ where: { id: locationId, tenantId: tid }, select: { id: true, name: true, type: true } });
       if (location) {
+        const held = await prisma.productStock.findMany({ where: { tenantId: tid, locationId: location.id }, select: { productId: true } });
         const carried = await prisma.product.findMany({
-          where: { tenantId: tid, isActive: true, tags: { has: location.type } },
+          where: { tenantId: tid, OR: [{ isActive: true, tags: { has: location.type } }, { id: { in: held.map((h) => h.productId) } }] },
           select: { id: true, name: true, sku: true, unit: true, unitCost: true, packSize: true, packLabel: true, category: { select: { name: true } } },
         });
         for (const p of carried) {
