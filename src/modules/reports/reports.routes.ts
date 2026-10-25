@@ -2220,7 +2220,7 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
       prisma.inventoryMovement.findMany({
         where: { tenantId: tid, occurredAt: { gte: start, lte: end }, ...scope },
         include: {
-          product: { select: { id: true, name: true, sku: true, unit: true, packSize: true, packLabel: true, category: { select: { name: true } } } },
+          product: { select: { id: true, name: true, sku: true, unit: true, unitCost: true, packSize: true, packLabel: true, category: { select: { name: true } } } },
           location: { select: { id: true, name: true } },
           employee: { select: { firstName: true, lastName: true } },
         },
@@ -2240,7 +2240,7 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
     // added / removed: every increase / decrease whatever its type (a positive adjustment is
     // added, a negative one removed), so opening + added - removed = closing.
     type Row = {
-      productId: string; name: string; sku: string | null; category: string | null; unit: string; packSize: number | null; packLabel: string | null;
+      productId: string; name: string; sku: string | null; category: string | null; unit: string; unitCost: number; packSize: number | null; packLabel: string | null;
       locationId: string; locationName: string; opening: number; received: number; issued: number; adjustments: number;
       added: number; removed: number; net: number; closing: number; reconciles: boolean; movements: number;
     };
@@ -2250,7 +2250,7 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
       const quantity = Number(m.quantity);
       const entry = rows.get(key) ?? {
         row: {
-          productId: m.product.id, name: m.product.name, sku: m.product.sku, category: m.product.category?.name ?? null, unit: m.product.unit,
+          productId: m.product.id, name: m.product.name, sku: m.product.sku, category: m.product.category?.name ?? null, unit: m.product.unit, unitCost: Number(m.product.unitCost ?? 0),
           packSize: m.product.packSize == null ? null : Number(m.product.packSize), packLabel: m.product.packLabel,
           locationId: m.location.id, locationName: m.location.name,
           opening: 0, received: 0, issued: 0, adjustments: 0, added: 0, removed: 0, net: 0, closing: 0, reconciles: true, movements: 0,
@@ -2278,7 +2278,7 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
       if (location) {
         const carried = await prisma.product.findMany({
           where: { tenantId: tid, isActive: true, tags: { has: location.type } },
-          select: { id: true, name: true, sku: true, unit: true, packSize: true, packLabel: true, category: { select: { name: true } } },
+          select: { id: true, name: true, sku: true, unit: true, unitCost: true, packSize: true, packLabel: true, category: { select: { name: true } } },
         });
         for (const p of carried) {
           const key = `${p.id}|${location.id}`;
@@ -2286,7 +2286,7 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
           const balance = lastBefore.get(key) ?? 0;
           rows.set(key, {
             row: {
-              productId: p.id, name: p.name, sku: p.sku, category: p.category?.name ?? null, unit: p.unit,
+              productId: p.id, name: p.name, sku: p.sku, category: p.category?.name ?? null, unit: p.unit, unitCost: Number(p.unitCost ?? 0),
               packSize: p.packSize == null ? null : Number(p.packSize), packLabel: p.packLabel,
               locationId: location.id, locationName: location.name,
               opening: 0, received: 0, issued: 0, adjustments: 0, added: 0, removed: 0, net: 0, closing: 0, reconciles: true, movements: 0,
@@ -2304,6 +2304,8 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
         ...row,
         opening: round3(opening), received: round3(row.received), issued: round3(row.issued), adjustments: round3(row.adjustments),
         added: round3(row.added), removed: round3(row.removed), net: round3(row.net), closing: round3(closing),
+        // Closing stock at the product's current unit cost (packs priced per pack), as the live stock report values it.
+        value: round2(stockValue(Math.max(0, closing), row.unitCost, row.packSize) ?? 0),
         reconciles: Math.abs(opening + row.net - closing) < 0.001,
       };
     }).sort((a, b) => a.name.localeCompare(b.name) || a.locationName.localeCompare(b.locationName));
@@ -2313,6 +2315,7 @@ reportsRouter.get("/stock-movements", async (req, res, next) => {
       cards: {
         products: new Set(summary.filter((r) => r.movements > 0).map((r) => r.productId)).size,
         listed: summary.length,
+        stockValue: round2(summary.reduce((sum, r) => sum + r.value, 0)),
         locations: new Set(summary.map((r) => r.locationId)).size,
         movements: inPeriod.length,
         unreconciled: summary.filter((r) => !r.reconciles).length,
