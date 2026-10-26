@@ -58,6 +58,16 @@ export function renderDispatchPrint(slip: Slip, columns: number, businessName: s
   };
   section('ALREADY ON ORDER', slip.existingDishes);
   section(slip.kind === 'UPDATED_ORDER' ? 'UPDATED ITEMS TO DISPATCH' : 'ITEMS TO DISPATCH', slip.dishes);
+  // No dishes recorded (e.g. an older request): the store still gets the pick list.
+  if (!slip.dishes.length && !slip.existingDishes.length && slip.items.length) {
+    line(rule); heading('ITEMS TO DISPATCH'); line(rule);
+    for (const item of slip.items) {
+      const amount = `${quantity(item.quantity)} ${item.unit ?? ''}`.trim();
+      command(27, 69, 1);
+      wrap(item.name, Math.max(8, cols - amount.length - 1)).forEach((name, index) => line(index === 0 ? name.padEnd(cols - amount.length) + amount : name));
+      command(27, 69, 0);
+    }
+  }
   line(rule);
   line('Received by: ______________');
   line(); line(); line(); line();
