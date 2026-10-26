@@ -5,6 +5,7 @@ import type { Prisma, ReservationActivityAction } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
 import { syncRoomBilledOrderPayments } from "../../lib/roomBilledOrders.js";
+import { allocateFolio, ROOM_POT } from "../../lib/folioAllocation.js";
 import { requireModule, hasPermission } from "../../middleware/tenantContext.js";
 import { nextCustomerNo, nextReservationNo, nextFolioNo, nextTransactionNo, nextGroupNo } from "../../lib/sequence.js";
 import { resolveActorLocationWithHint } from "../../lib/location.js";
@@ -334,6 +335,39 @@ function folioTotals(folio: { lineItems: FolioLineForTax[]; payments: { amount: 
   return { charges, paid, balance: round2(charges - paid), tax: fin };
 }
 
+/** A folio's pots (each charged bill, plus room & stay) with what's paid and owing on each. */
+async function folioPots(db: Prisma.TransactionClient | typeof prisma, folioId: string, fallbackTax: TaxFallback | undefined) {
+  const folio = await db.folio.findUnique({
+    where: { id: folioId },
+    select: {
+      lineItems: { orderBy: { createdAt: "asc" }, select: { id: true, createdAt: true, label: true, source: true, sourceRefId: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true } },
+      payments: { orderBy: { createdAt: "asc" }, select: { amount: true, appliesToLineId: true, appliesToRoom: true } },
+    },
+  });
+  if (!folio) return null;
+  return {
+    lines: folio.lineItems,
+    ...allocateFolio(
+      folio.lineItems.map((line) => ({ id: line.id, source: line.source, sourceRefId: line.sourceRefId, createdAt: line.createdAt, total: folioTotals({ lineItems: [line], payments: [] }, fallbackTax).charges })),
+      folio.payments.map((payment) => ({ amount: Number(payment.amount), appliesToLineId: payment.appliesToLineId, appliesToRoom: payment.appliesToRoom })),
+    ),
+  };
+}
+
+/** Resolves what a new payment says it pays for ("ROOM" or a charged-bill line id) and
+ * checks the amount fits what's owing there. Nothing given = the whole folio. */
+async function paymentTarget(db: Prisma.TransactionClient | typeof prisma, folioId: string, appliesTo: string | undefined, amount: number, fallbackTax: TaxFallback | undefined) {
+  if (!appliesTo) return { appliesToLineId: null as string | null, appliesToRoom: false };
+  const state = await folioPots(db, folioId, fallbackTax);
+  const pot = state?.pots.get(appliesTo === ROOM_POT ? ROOM_POT : appliesTo);
+  if (!state || !pot || (appliesTo !== ROOM_POT && !pot.orderId)) throw Object.assign(new Error("Choose what this payment is for from this folio"), { status: 400 });
+  const owing = state.owing(pot);
+  const what = appliesTo === ROOM_POT ? "the room & stay charges" : "that bill";
+  if (owing <= 0.01) throw Object.assign(new Error(`${what === "that bill" ? "That bill" : "The room & stay charges"} ${what === "that bill" ? "is" : "are"} already paid`), { status: 409 });
+  if (amount > owing + 0.01) throw Object.assign(new Error(`Amount exceeds the ${owing.toFixed(2)} owing on ${what}`), { status: 400 });
+  return appliesTo === ROOM_POT ? { appliesToLineId: null as string | null, appliesToRoom: true } : { appliesToLineId: appliesTo as string | null, appliesToRoom: false };
+}
+
 async function reconcileRoomBilledPosPayments(
   tx: Prisma.TransactionClient,
   tid: string,
@@ -344,24 +378,26 @@ async function reconcileRoomBilledPosPayments(
   const folio = await tx.folio.findUnique({
     where: { id: folioId },
     select: {
-      lineItems: { orderBy: { createdAt: "asc" }, select: { source: true, sourceRefId: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true } },
-      payments: { orderBy: { createdAt: "asc" }, select: { paymentMethodId: true, amount: true, reference: true, paymentMethod: { select: { name: true } } } },
+      lineItems: { orderBy: { createdAt: "asc" }, select: { id: true, createdAt: true, source: true, sourceRefId: true, amount: true, quantity: true, taxRate: true, taxMode: true, taxTreatment: true } },
+      payments: { orderBy: { createdAt: "asc" }, select: { paymentMethodId: true, amount: true, reference: true, appliesToLineId: true, appliesToRoom: true, paymentMethod: { select: { name: true } } } },
       reservation: { select: { location: { select: { name: true } } } },
     },
   });
   if (!folio || folio.payments.length === 0) return;
-  const totalPaid = round2(folio.payments.reduce((sum, payment) => sum + Number(payment.amount), 0));
-  const paymentForReceipt = folio.payments[folio.payments.length - 1];
+  // Which charged bills the payments cover - the shared folio allocation rule.
+  const { pots } = allocateFolio(
+    folio.lineItems.map((line) => ({ id: line.id, source: line.source, sourceRefId: line.sourceRefId, createdAt: line.createdAt, total: folioTotals({ lineItems: [line], payments: [] }, fallbackTax).charges })),
+    folio.payments.map((payment) => ({ amount: Number(payment.amount), appliesToLineId: payment.appliesToLineId, appliesToRoom: payment.appliesToRoom })),
+  );
   const desiredByOrder = new Map<string, number>();
-  let chargesBefore = 0;
-  for (const line of folio.lineItems) {
-    const lineTotal = folioTotals({ lineItems: [line], payments: [] }, fallbackTax).charges;
-    if (line.source === "POS_ORDER" && line.sourceRefId) {
-      const covered = Math.min(Math.max(round2(totalPaid - chargesBefore), 0), lineTotal);
-      if (covered > 0.01) desiredByOrder.set(line.sourceRefId, round2((desiredByOrder.get(line.sourceRefId) ?? 0) + covered));
-    }
-    chargesBefore = round2(chargesBefore + lineTotal);
+  const potOfOrder = new Map<string, string>();
+  for (const pot of pots.values()) {
+    if (!pot.orderId || pot.paid <= 0.01) continue;
+    desiredByOrder.set(pot.orderId, round2((desiredByOrder.get(pot.orderId) ?? 0) + pot.paid));
+    potOfOrder.set(pot.orderId, pot.key);
   }
+  // The order's receipt names the payment aimed at its bill, else the latest one.
+  const paymentFor = (orderId: string) => [...folio.payments].reverse().find((p) => p.appliesToLineId === potOfOrder.get(orderId)) ?? folio.payments[folio.payments.length - 1];
   const orderIds = [...desiredByOrder.keys()];
   if (orderIds.length === 0) return;
   const orders = await tx.posOrder.findMany({
@@ -369,6 +405,7 @@ async function reconcileRoomBilledPosPayments(
     include: { items: { include: { addons: { select: { quantity: true, unitPrice: true } } } }, payments: true },
   });
   for (const order of orders) {
+    const paymentForReceipt = paymentFor(order.id);
     const total = computeOrderFinancials(order, fallbackTax as never).total;
     const desiredPaid = Math.min(desiredByOrder.get(order.id) ?? 0, total);
     const alreadyPaid = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0);
@@ -1086,28 +1123,36 @@ receptionRouter.delete("/reservations/:id/folio/charges/:lineItemId", async (req
   res.status(204).send();
 });
 
-receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
-  const data = paymentSchema.safeParse(req.body);
-  if (!data.success) { invalid(res, "deposit", data.error.flatten()); return; }
-  const tid = tenantId(req);
-  const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { folio: { include: { lineItems: true, payments: true } } } });
-  if (!reservation || !reservation.folio) { res.status(404).json({ error: "Reservation not found" }); return; }
-  if (!["PENDING", "CONFIRMED", "CHECKED_IN"].includes(reservation.status)) { res.status(409).json({ error: "Payments can only be recorded before checkout or cancellation" }); return; }
-  const resolvedPayment = await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+// What a folio payment is for: "ROOM" (room & stay charges) or the id of a charged-bill
+// line. Left out = the whole folio, oldest charges first.
+const folioPaymentSchema = paymentSchema.extend({ appliesTo: optionalText(64) });
+type FolioPaymentInput = z.infer<typeof folioPaymentSchema>;
+
+/** A payment taken during a stay (before checkout). Shared by the folio's Record
+ * payment and by Receipts clearing a bill charged to the room. */
+async function recordStayPayment(tid: string, reservationId: string, input: FolioPaymentInput, req: { userId?: string; header?: (name: string) => string | undefined }) {
+  const reservation = await prisma.reservation.findFirst({ where: { id: reservationId, tenantId: tid }, include: { folio: { include: { lineItems: true, payments: true } } } });
+  if (!reservation || !reservation.folio) throw Object.assign(new Error("Reservation not found"), { status: 404 });
+  if (!["PENDING", "CONFIRMED", "CHECKED_IN"].includes(reservation.status)) throw Object.assign(new Error("Payments can only be recorded before checkout or cancellation"), { status: 409 });
+  const resolvedPayment = await resolvePaymentMethod(tid, input.paymentMethodId, input.reference);
   const tax = await taxDefaults(tid);
   const transactionNo = await nextTransactionNo(tid);
   const actor = await resolveActor(tid, req);
-  const payment = await prisma.$transaction(async (tx) => {
-    const liveFolio = await tx.folio.findUnique({ where: { id: reservation.folio!.id }, include: { lineItems: true, payments: true } });
+  const folioId = reservation.folio.id;
+  return prisma.$transaction(async (tx) => {
+    const liveFolio = await tx.folio.findUnique({ where: { id: folioId }, include: { lineItems: true, payments: true } });
     if (!liveFolio) throw Object.assign(new Error("This reservation has no folio on record"), { status: 500 });
     const balance = folioTotals(liveFolio, tax).balance;
-    if (data.data.amount > balance + 0.01) throw Object.assign(new Error(`Amount exceeds the balance due of ${round2(balance).toFixed(2)}`), { status: 400 });
+    if (input.amount > balance + 0.01) throw Object.assign(new Error(`Amount exceeds the balance due of ${round2(balance).toFixed(2)}`), { status: 400 });
+    const target = await paymentTarget(tx, folioId, input.appliesTo, input.amount, tax);
     const created = await tx.folioPayment.create({
-      data: { tenantId: tid, folioId: reservation.folio!.id, kind: "DEPOSIT", ...data.data, reference: resolvedPayment.reference, createdBy: req.userId },
+      data: { tenantId: tid, folioId, kind: "DEPOSIT", paymentMethodId: input.paymentMethodId, amount: input.amount, reference: resolvedPayment.reference, createdBy: req.userId, ...target },
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
     await syncStayInvoicesForFolio(tx, created.folioId);
     await syncRoomBilledOrderPayments(tx, created.folioId);
+    // A bill this payment covers is marked paid on the POS right away, not only at checkout.
+    await reconcileRoomBilledPosPayments(tx, tid, folioId, tax, req.userId);
     await tx.transaction.create({
       data: {
         tenantId: tid,
@@ -1115,8 +1160,8 @@ receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
         direction: "IN",
         source: "FOLIO_DEPOSIT",
         locationId: await folioLocationId(tx, created.folioId),
-        amount: data.data.amount,
-        paymentMethodId: data.data.paymentMethodId,
+        amount: input.amount,
+        paymentMethodId: input.paymentMethodId,
         reference: resolvedPayment.reference,
         customerId: reservation.customerId,
         employeeId: req.userId,
@@ -1124,10 +1169,15 @@ receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
         sourceRefId: created.id,
       },
     });
-    await logActivity(tx, tid, reservation.id, "DEPOSIT_RECORDED", `Deposit recorded — ${data.data.amount}`, actor);
+    await logActivity(tx, tid, reservation.id, "DEPOSIT_RECORDED", `Deposit recorded — ${input.amount}`, actor);
     return created;
   });
-  res.status(201).json({ payment });
+}
+
+receptionRouter.post("/reservations/:id/folio/deposits", async (req, res) => {
+  const data = folioPaymentSchema.safeParse(req.body);
+  if (!data.success) { invalid(res, "deposit", data.error.flatten()); return; }
+  res.status(201).json({ payment: await recordStayPayment(tenantId(req), req.params.id, data.data, req) });
 });
 
 receptionRouter.get("/reservations/:id/folio", async (req, res) => {
@@ -1162,25 +1212,26 @@ receptionRouter.patch("/reservations/:id/room-terms", async (req, res) => {
 /** Receive payment against credit left when a stay was checked out on credit.
  * Records the payment on the (already settled) folio and the money in the
  * ledger, and brings the customer's balance down. */
-receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res) => {
-  if (!(await hasPermission(tenantId(req), req.userId, "CREDIT_COLLECT"))) { res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager", code: "CREDIT_COLLECT_REQUIRED" }); return; }
-  const data = paymentSchema.safeParse(req.body);
-  if (!data.success) { invalid(res, "payment", data.error.flatten()); return; }
-  const tid = tenantId(req);
-  const reservation = await prisma.reservation.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { folio: true } });
-  if (!reservation || !reservation.folio) { res.status(404).json({ error: "Reservation not found" }); return; }
-  const outstanding = (await folioCreditOutstanding(prisma, tid, [reservation.folio.id])).get(reservation.folio.id) ?? 0;
-  if (outstanding <= 0.01) { res.status(409).json({ error: "This stay has no credit left to pay" }); return; }
-  if (data.data.amount > outstanding + 0.01) { res.status(400).json({ error: `Amount exceeds the credit owing of ${outstanding.toFixed(2)}` }); return; }
-  const resolvedPayment = await resolvePaymentMethod(tid, data.data.paymentMethodId, data.data.reference);
+/** A payment against what a checked-out stay still owes on credit. Shared by the
+ * folio's credit payment and by Receipts clearing a bill charged to the room. */
+async function recordCreditPayment(tid: string, reservationId: string, input: FolioPaymentInput, req: { userId?: string; header?: (name: string) => string | undefined }) {
+  const reservation = await prisma.reservation.findFirst({ where: { id: reservationId, tenantId: tid }, include: { folio: true } });
+  if (!reservation || !reservation.folio) throw Object.assign(new Error("Reservation not found"), { status: 404 });
+  const folioId = reservation.folio.id;
+  const outstanding = (await folioCreditOutstanding(prisma, tid, [folioId])).get(folioId) ?? 0;
+  if (outstanding <= 0.01) throw Object.assign(new Error("This stay has no credit left to pay"), { status: 409 });
+  if (input.amount > outstanding + 0.01) throw Object.assign(new Error(`Amount exceeds the credit owing of ${outstanding.toFixed(2)}`), { status: 400 });
+  const resolvedPayment = await resolvePaymentMethod(tid, input.paymentMethodId, input.reference);
+  const tax = await taxDefaults(tid);
   const transactionNo = await nextTransactionNo(tid);
   const actor = await resolveActor(tid, req);
   // The credit sits on whoever it was charged to — for a stay in a group, the
   // group's billing customer, not the guest in the room.
-  const creditOwner = (await prisma.customerCreditEntry.findFirst({ where: { tenantId: tid, folioId: reservation.folio.id, type: "CREDIT" }, select: { customerId: true } }))?.customerId ?? reservation.customerId;
-  const payment = await prisma.$transaction(async (tx) => {
+  const creditOwner = (await prisma.customerCreditEntry.findFirst({ where: { tenantId: tid, folioId, type: "CREDIT" }, select: { customerId: true } }))?.customerId ?? reservation.customerId;
+  return prisma.$transaction(async (tx) => {
+    const target = await paymentTarget(tx, folioId, input.appliesTo, input.amount, tax);
     const created = await tx.folioPayment.create({
-      data: { tenantId: tid, folioId: reservation.folio!.id, kind: "SETTLEMENT", ...data.data, reference: resolvedPayment.reference, createdBy: req.userId },
+      data: { tenantId: tid, folioId, kind: "SETTLEMENT", paymentMethodId: input.paymentMethodId, amount: input.amount, reference: resolvedPayment.reference, createdBy: req.userId, ...target },
       include: { paymentMethod: { select: { id: true, name: true, requiresReference: true } } },
     });
     await syncStayInvoicesForFolio(tx, created.folioId);
@@ -1192,8 +1243,8 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
         direction: "IN",
         source: "FOLIO_SETTLEMENT",
         locationId: await folioLocationId(tx, created.folioId),
-        amount: data.data.amount,
-        paymentMethodId: data.data.paymentMethodId,
+        amount: input.amount,
+        paymentMethodId: input.paymentMethodId,
         reference: resolvedPayment.reference,
         customerId: creditOwner,
         employeeId: req.userId,
@@ -1201,12 +1252,44 @@ receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res)
         sourceRefId: created.id,
       },
     });
-    await applyCustomerBalance(tx, { tenantId: tid, customerId: creditOwner, folioId: reservation.folio!.id, delta: -data.data.amount, type: "REPAYMENT", note: `Payment against stay ${reservation.reservationNo}`, by: req.userId });
-    await reconcileRoomBilledPosPayments(tx, tid, reservation.folio!.id, await taxDefaults(tid), req.userId);
-    await logActivity(tx, tid, reservation.id, "CREDIT_PAYMENT", `Credit payment received — ${data.data.amount}`, actor);
+    await applyCustomerBalance(tx, { tenantId: tid, customerId: creditOwner, folioId, delta: -input.amount, type: "REPAYMENT", note: `Payment against stay ${reservation.reservationNo}`, by: req.userId });
+    await reconcileRoomBilledPosPayments(tx, tid, folioId, tax, req.userId);
+    await logActivity(tx, tid, reservation.id, "CREDIT_PAYMENT", `Credit payment received — ${input.amount}`, actor);
     return created;
   });
-  res.status(201).json({ payment });
+}
+
+receptionRouter.post("/reservations/:id/folio/credit-payments", async (req, res) => {
+  if (!(await hasPermission(tenantId(req), req.userId, "CREDIT_COLLECT"))) { res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager", code: "CREDIT_COLLECT_REQUIRED" }); return; }
+  const data = folioPaymentSchema.safeParse(req.body);
+  if (!data.success) { invalid(res, "payment", data.error.flatten()); return; }
+  res.status(201).json({ payment: await recordCreditPayment(tenantId(req), req.params.id, data.data, req) });
+});
+
+/** Receipts: a bill charged to a room, paid where it was served (e.g. the guest pays
+ * the barman). The accountant or a Super Admin records it here; it lands on the
+ * folio against that bill - a stay payment while the guest is in, a credit payment
+ * after checkout - so the folio shows the bill cleared and the POS marks it paid. */
+receptionRouter.post("/room-bills/:orderId/payments", async (req, res) => {
+  const tid = tenantId(req);
+  const allowed = (await isSuperAdminUser(tid, req.userId)) || (await hasPermission(tid, req.userId, "CREDIT_COLLECT"));
+  if (!allowed) { res.status(403).json({ error: "Only the accountant or a Super Admin can clear a room bill here" }); return; }
+  const data = paymentSchema.safeParse(req.body);
+  if (!data.success) { invalid(res, "payment", data.error.flatten()); return; }
+  const line = await prisma.folioLineItem.findFirst({
+    where: { tenantId: tid, source: "POS_ORDER", sourceRefId: req.params.orderId },
+    select: { id: true, folio: { select: { reservation: { select: { id: true, status: true } } } } },
+  });
+  if (!line?.folio.reservation) { res.status(404).json({ error: "This bill isn't on a room folio" }); return; }
+  const { id: reservationId, status } = line.folio.reservation;
+  const input = { ...data.data, appliesTo: line.id };
+  if (["PENDING", "CONFIRMED", "CHECKED_IN"].includes(status)) {
+    res.status(201).json({ payment: await recordStayPayment(tid, reservationId, input, req) });
+  } else if (status === "CHECKED_OUT") {
+    res.status(201).json({ payment: await recordCreditPayment(tid, reservationId, input, req) });
+  } else {
+    res.status(409).json({ error: "This stay was cancelled; its room bills can't take payments" });
+  }
 });
 
 // ============================================================================

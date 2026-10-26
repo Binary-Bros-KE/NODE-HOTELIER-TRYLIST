@@ -1461,6 +1461,7 @@ model FolioLineItem {
   createdBy    String?
   tenant       Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   folio        Folio           @relation(fields: [folioId], references: [id], onDelete: Cascade)
+  payments     FolioPayment[]
 
   @@index([tenantId, folioId])
 }
@@ -1480,6 +1481,11 @@ model FolioPayment {
   reference       String?
   createdAt       DateTime         @default(now())
   createdBy       String?
+  // What the payment is for: one charged bill on the folio (a POS order line), the
+  // room & stay charges (appliesToRoom), or - neither set - the whole folio, oldest first.
+  appliesToLineId String?
+  appliesToLine   FolioLineItem?   @relation(fields: [appliesToLineId], references: [id], onDelete: SetNull)
+  appliesToRoom   Boolean          @default(false)
   tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   folio           Folio            @relation(fields: [folioId], references: [id], onDelete: Cascade)
   paymentMethod   PaymentMethod    @relation(fields: [paymentMethodId], references: [id], onDelete: Restrict)
