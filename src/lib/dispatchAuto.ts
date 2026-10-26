@@ -175,20 +175,27 @@ async function dishesFromItems(tenantId: string, fromLocationId: string | null |
  * the recipe behind it (so the storekeeper can correct it). What the storekeeper
  * reads on screen and on the printed slip.
  */
+/** Only while a request is waiting again (a reopened round) do the lines answered last
+ * time drop out; a dispatched / rejected / cancelled request shows everything it covered. */
+const openRoundSince = (request: { status?: string; respondedAt?: Date | null } | null) =>
+  request?.status === "REQUESTED" && request.respondedAt ? request.respondedAt : null;
+
 export async function requestDishes(tenantId: string, requestId: string) {
-  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId }, select: { fromLocationId: true, respondedAt: true } });
+  const request = await prisma.stockDispatchRequest.findFirst({ where: { id: requestId, tenantId }, select: { fromLocationId: true, respondedAt: true, status: true } });
+  const since = openRoundSince(request);
   const items = await prisma.posOrderItem.findMany({
-    where: { dispatchRequestId: requestId, ...(request?.respondedAt ? { createdAt: { gt: request.respondedAt } } : {}) },
+    where: { dispatchRequestId: requestId, ...(since ? { createdAt: { gt: since } } : {}) },
     include: stockLineInclude,
     orderBy: { createdAt: "asc" },
   });
   return dishesFromItems(tenantId, request?.fromLocationId, items);
 }
 
-export async function dispatchSlipDishSections(tenantId: string, request: { id: string; orderId: string; fromLocationId: string; respondedAt?: Date | null }) {
+export async function dispatchSlipDishSections(tenantId: string, request: { id: string; orderId: string; fromLocationId: string; status?: string; respondedAt?: Date | null }) {
   const items = await prisma.posOrderItem.findMany({ where: { orderId: request.orderId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
-  const current = items.filter((item) => item.dispatchRequestId === request.id && (!request.respondedAt || item.createdAt > request.respondedAt));
-  const existing = items.filter((item) => item.dispatchRequestId !== request.id || (request.respondedAt != null && item.createdAt <= request.respondedAt));
+  const since = openRoundSince(request);
+  const current = items.filter((item) => item.dispatchRequestId === request.id && (!since || item.createdAt > since));
+  const existing = items.filter((item) => item.dispatchRequestId !== request.id || (since != null && item.createdAt <= since));
   const [existingDishes, requestedDishes] = await Promise.all([
     dishesFromItems(tenantId, request.fromLocationId, existing),
     dishesFromItems(tenantId, request.fromLocationId, current),
