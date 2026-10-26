@@ -2175,10 +2175,12 @@ export async function applyOrderPayment(
   return { paidSoFar, newStatus };
 }
 
+// A cancelled part (e.g. rejected by the store) is no longer on the bill, so it
+// never blocks the rest from being viewed or paid.
 posRouter.get("/bill-groups/:billGroupId", async (req, res) => {
   const tid = tenantIdFor(req);
   const orders = await prisma.posOrder.findMany({
-    where: { tenantId: tid, billGroupId: req.params.billGroupId },
+    where: { tenantId: tid, billGroupId: req.params.billGroupId, status: { not: "CANCELLED" } },
     include: orderInclude,
     orderBy: { orderNumber: "asc" },
   });
@@ -2193,7 +2195,7 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
   if (!parsed.success) { res.status(400).json({ error: "Invalid payment", details: parsed.error.flatten() }); return; }
   const tid = tenantIdFor(req);
   const [orders, tax] = await Promise.all([
-    prisma.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId }, include: orderInclude, orderBy: { orderNumber: "asc" } }),
+    prisma.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId, status: { not: "CANCELLED" } }, include: orderInclude, orderBy: { orderNumber: "asc" } }),
     taxSettingsFor(tid),
   ]);
   if (orders.length === 0) { res.status(404).json({ error: "Linked bill not found" }); return; }
@@ -2235,7 +2237,7 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
           if (row.order.status === "SERVED" && row.order.tableId) await releaseTableIfIdle(tx, row.order.tableId);
           await mergeDuplicateOrderLines(tx, row.order.id, { includeFlagged: true });
         }
-        return tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId }, include: orderInclude, orderBy: { orderNumber: "asc" } });
+        return tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId, status: { not: "CANCELLED" } }, include: orderInclude, orderBy: { orderNumber: "asc" } });
       });
     } else {
       const resolvedPayment = await resolvePaymentMethod(tid, data.paymentMethodId, data.reference);
@@ -2258,7 +2260,7 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
             description: `Linked POS bill ${req.params.billGroupId} payment`,
           });
         }
-        return tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId }, include: orderInclude, orderBy: { orderNumber: "asc" } });
+        return tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId, status: { not: "CANCELLED" } }, include: orderInclude, orderBy: { orderNumber: "asc" } });
       });
     }
     res.status(201).json({ orders: updatedOrders.map((order) => withFinancials(order, tax)) });
