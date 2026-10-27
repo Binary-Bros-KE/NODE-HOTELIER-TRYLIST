@@ -314,6 +314,13 @@ type FolioLineForTax = { amount: unknown; quantity: unknown; taxRate?: unknown; 
 // `charges` (== fin.total) matches the old flat sum exactly for INCLUSIVE-tax
 // lines (the schema default) and only grows for EXCLUSIVE-tax lines, which is
 // the point: an exclusive-VAT room rate must add tax on top at the till.
+/** One folio line on its own, keeping its sign: priced alone, a credit line (a room-change
+ * adjustment of -2,000) would otherwise clamp to 0 and over-state what the room owes. */
+function lineCharge(line: FolioLineForTax, fallbackTax?: TaxFallback) {
+  const sign = Number(line.amount) < 0 ? -1 : 1;
+  return sign * folioTotals({ lineItems: [{ ...line, amount: Math.abs(Number(line.amount)) }], payments: [] }, fallbackTax).charges;
+}
+
 function folioTotals(folio: { lineItems: FolioLineForTax[]; payments: { amount: unknown }[] } | null, fallbackTax?: TaxFallback) {
   if (!folio) return { charges: 0, paid: 0, balance: 0, tax: null };
   const fin = computeOrderFinancials(
@@ -348,7 +355,7 @@ async function folioPots(db: Prisma.TransactionClient | typeof prisma, folioId: 
   return {
     lines: folio.lineItems,
     ...allocateFolio(
-      folio.lineItems.map((line) => ({ id: line.id, source: line.source, sourceRefId: line.sourceRefId, createdAt: line.createdAt, total: folioTotals({ lineItems: [line], payments: [] }, fallbackTax).charges })),
+      folio.lineItems.map((line) => ({ id: line.id, source: line.source, sourceRefId: line.sourceRefId, createdAt: line.createdAt, total: lineCharge(line, fallbackTax) })),
       folio.payments.map((payment) => ({ amount: Number(payment.amount), appliesToLineId: payment.appliesToLineId, appliesToRoom: payment.appliesToRoom })),
     ),
   };
@@ -368,7 +375,7 @@ async function paymentTarget(db: Prisma.TransactionClient | typeof prisma, folio
   return appliesTo === ROOM_POT ? { appliesToLineId: null as string | null, appliesToRoom: true } : { appliesToLineId: appliesTo as string | null, appliesToRoom: false };
 }
 
-async function reconcileRoomBilledPosPayments(
+export async function reconcileRoomBilledPosPayments(
   tx: Prisma.TransactionClient,
   tid: string,
   folioId: string,
@@ -386,7 +393,7 @@ async function reconcileRoomBilledPosPayments(
   if (!folio || folio.payments.length === 0) return;
   // Which charged bills the payments cover - the shared folio allocation rule.
   const { pots } = allocateFolio(
-    folio.lineItems.map((line) => ({ id: line.id, source: line.source, sourceRefId: line.sourceRefId, createdAt: line.createdAt, total: folioTotals({ lineItems: [line], payments: [] }, fallbackTax).charges })),
+    folio.lineItems.map((line) => ({ id: line.id, source: line.source, sourceRefId: line.sourceRefId, createdAt: line.createdAt, total: lineCharge(line, fallbackTax) })),
     folio.payments.map((payment) => ({ amount: Number(payment.amount), appliesToLineId: payment.appliesToLineId, appliesToRoom: payment.appliesToRoom })),
   );
   const desiredByOrder = new Map<string, number>();
