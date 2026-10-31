@@ -42,6 +42,8 @@ const createSchema = z.object({
   serveMode: z.enum(SERVE_MODES).default("KITCHEN"),
   // Kitchen must get its ingredients dispatched by a store before starting a ticket.
   requireStoreDispatch: z.boolean().default(false),
+  // No kitchen step: a dispatched order goes straight to READY for the waiter.
+  skipKitchenAfterDispatch: z.boolean().default(false),
   allowOutOfStockOrders: z.boolean().default(false),
   // Print the store's dispatch slip automatically when an order is posted (else the storekeeper prints it).
   dispatchAutoPrint: z.boolean().default(true),
@@ -84,6 +86,7 @@ const locationFields = {
   canSellProducts: true,
   serveMode: true,
   requireStoreDispatch: true,
+  skipKitchenAfterDispatch: true,
   allowOutOfStockOrders: true,
   dispatchAutoPrint: true,
   orderTicketAutoPrint: true,

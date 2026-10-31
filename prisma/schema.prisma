@@ -2529,6 +2529,10 @@ model Location {
   // before a ticket can be started. dispatchFromLocationId is the Store that
   // supplies this kitchen (falls back to the first STORE location).
   requireStoreDispatch   Boolean                @default(false)
+  // Store-dispatch locations only: no kitchen step. The moment the store dispatches an
+  // order's ingredients it is READY for the waiter (added rounds likewise), and it
+  // never appears on the kitchen screen.
+  skipKitchenAfterDispatch Boolean              @default(false)
   // Off by default: a store-dispatch kitchen can't post what the store doesn't hold.
   // On: orders post anyway and go to the store request; the store sends only what it has.
   allowOutOfStockOrders  Boolean                @default(false)

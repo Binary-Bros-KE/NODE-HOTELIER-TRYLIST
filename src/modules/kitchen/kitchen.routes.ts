@@ -97,9 +97,13 @@ async function withPreparers<T extends { preparingBy: string | null; readyBy: st
   }));
 }
 
+// A location that skips the kitchen (Location.skipKitchenAfterDispatch) never reaches this screen:
+// the store's dispatch makes its orders READY for the waiter.
+const notSkippingKitchen = { NOT: { location: { is: { skipKitchenAfterDispatch: true } } } } as const;
+
 /** Live queue created by POS, enriched with menu and linked product recipes. */
 kitchenRouter.get("/orders", handle(async (req, res) => {
-  const orders = await prisma.posOrder.findMany({ where: { tenantId: tenantId(req), channel: "FOOD", status: { in: ["OPEN", "PREPARING"] }, ...(await locationScope(req)) }, include: orderInclude, orderBy: { createdAt: "asc" } });
+  const orders = await prisma.posOrder.findMany({ where: { tenantId: tenantId(req), channel: "FOOD", status: { in: ["OPEN", "PREPARING"] }, ...notSkippingKitchen, ...(await locationScope(req)) }, include: orderInclude, orderBy: { createdAt: "asc" } });
   res.json({ orders: await withPreparers(await withDispatchAll(orders)) });
 }));
 
@@ -115,6 +119,7 @@ kitchenRouter.get("/orders/updated", handle(async (req, res) => {
       tenantId: tenantId(req), channel: "FOOD", status: { notIn: ["CANCELLED", "COMPLETED", "PENDING_CANCELLATION"] }, items: { some: { addedAfterSend: true } },
       // Counter (bar) additions are handed over by the barman at the POS, never by the kitchen.
       OR: [{ locationId: null }, { location: { is: { serveMode: "KITCHEN" } } }],
+      ...notSkippingKitchen,
       ...(await locationScope(req)),
     },
     include: orderInclude,

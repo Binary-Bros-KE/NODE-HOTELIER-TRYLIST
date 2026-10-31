@@ -5,10 +5,12 @@ import { z } from "zod";
 
 import { prisma } from "../../lib/prisma.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
-import { DispatchError, employeeName } from "../../lib/dispatch.js";
+import { DispatchError, dispatchRequired, employeeName, orderDispatchInfo, untrackedProductIds } from "../../lib/dispatch.js";
+import { settleServedAdditions } from "../../lib/orderStock.js";
+import { mergeDuplicateOrderLines } from "../../lib/orderLines.js";
 import { InsufficientStockError, recordStockMovement } from "../../lib/stockLedger.js";
 import { dispatchSlipDishSections, refreshOpenRequest, requestDishes, rungUpByName } from "../../lib/dispatchAuto.js";
-import { releaseTableIfIdle } from "../pos/pos.routes.js";
+import { orderInclude, releaseTableIfIdle } from "../pos/pos.routes.js";
 import { blankToUndefined, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
 
 // The store's side of a kitchen's ingredient request: see what the chef asked
@@ -199,9 +201,39 @@ dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
     }
     for (const l of lines) await tx.stockDispatchItem.updateMany({ where: { id: l.item.id }, data: { dispatchedQty: l.quantity } });
   });
+  await skipKitchenIfSet(tid, request.orderId, req);
   const fresh = await prisma.stockDispatchRequest.findUniqueOrThrow({ where: { id: request.id }, include: requestInclude });
   res.json({ request: fresh });
 }));
+
+/**
+ * A store-dispatch location set to skip the kitchen (Location.skipKitchenAfterDispatch):
+ * once everything on the order has been dispatched it does what the chef would - the
+ * order goes to READY for the waiter, and an added round is acknowledged (on a served
+ * order its stock is settled, as the kitchen's ack does). Never throws: the dispatch
+ * itself is already done, and a hitch here leaves the order where the kitchen can still
+ * move it.
+ */
+async function skipKitchenIfSet(tid: string, orderId: string | null, req: { userId?: string }) {
+  if (!orderId) return;
+  try {
+    const order = await prisma.posOrder.findFirst({ where: { id: orderId, tenantId: tid }, include: orderInclude });
+    if (!order?.location?.skipKitchenAfterDispatch || !dispatchRequired(order.location)) return;
+    if (!orderDispatchInfo(order, await untrackedProductIds(prisma, tid, order.items)).clear) return;
+    await prisma.$transaction(async (tx) => {
+      if (order.status === "OPEN" || order.status === "PREPARING") {
+        await tx.posOrder.updateMany({ where: { id: order.id, status: order.status }, data: { status: "READY", readyAt: new Date(), readyBy: req.userId ?? null } });
+      }
+      if (order.items.some((item) => item.addedAfterSend)) {
+        await settleServedAdditions(tx, tid, order, req);
+        await tx.posOrderItem.updateMany({ where: { orderId: order.id, addedAfterSend: true }, data: { addedAfterSend: false } });
+        await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: false });
+      }
+    });
+  } catch (error) {
+    console.error("[dispatch] could not skip the kitchen for order", orderId, error);
+  }
+}
 
 dispatchRouter.post("/:id/reject", handle(async (req, res) => {
   const parsed = z.object({ reason: z.string().trim().min(3).max(300) }).safeParse(req.body);
