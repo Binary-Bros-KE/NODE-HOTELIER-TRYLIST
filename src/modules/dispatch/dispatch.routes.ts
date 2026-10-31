@@ -241,26 +241,59 @@ dispatchRouter.post("/:id/reject", handle(async (req, res) => {
   const tid = tenantId(req);
   const request = await prisma.stockDispatchRequest.findFirst({
     where: { id: req.params.id as string, tenantId: tid },
-    select: { id: true, status: true, order: { select: { id: true, status: true, tableId: true } } },
+    select: { id: true, status: true, respondedAt: true, order: { select: { id: true, status: true, tableId: true, servedAt: true, notes: true } } },
   });
   if (!request) throw new DispatchError("Dispatch request not found", 404);
   const actorName = await employeeName(prisma, tid, req.userId);
+  const reason = parsed.data.reason;
   await prisma.$transaction(async (tx) => {
-    const claimed = await tx.stockDispatchRequest.updateMany({ where: { id: request.id, status: "REQUESTED" }, data: { status: "REJECTED", rejectReason: parsed.data.reason, respondedAt: new Date(), respondedBy: req.userId ?? null, respondedByName: actorName } });
+    const order = request.order;
+    // A round added to an order the store already supplied (an earlier dispatch, or the
+    // order is past OPEN / served) is rejected on its own: only that round's items come
+    // off and the rest of the order carries on to be served and paid. Cancelling the
+    // whole order there cancelled food already served (Omega #182). A brand-new order
+    // with nothing dispatched is still cancelled outright, with Update & Retry.
+    const otherDispatched = order ? await tx.stockDispatchRequest.count({ where: { orderId: order.id, status: "DISPATCHED", id: { not: request.id } } }) : 0;
+    const addedRound = Boolean(order && (request.respondedAt || otherDispatched > 0 || order.servedAt || order.status !== "OPEN"));
+
+    if (order && addedRound && order.status !== "CANCELLED" && order.status !== "COMPLETED") {
+      // This round's lines: everything on the request, or - on a reopened request - only
+      // what was added after its earlier dispatch.
+      const roundLines = await tx.posOrderItem.findMany({
+        where: { orderId: order.id, dispatchRequestId: request.id, ...(request.respondedAt ? { createdAt: { gt: request.respondedAt } } : {}) },
+        select: { id: true, quantity: true, menuItem: { select: { name: true } }, variant: { select: { name: true } } },
+      });
+      // Reopened request: its earlier round was dispatched, so it goes back to DISPATCHED
+      // (claimed conditionally, as everywhere here); otherwise it is REJECTED as normal.
+      const claimed = request.respondedAt
+        ? await tx.stockDispatchRequest.updateMany({ where: { id: request.id, status: "REQUESTED" }, data: { status: "DISPATCHED" } })
+        : await tx.stockDispatchRequest.updateMany({ where: { id: request.id, status: "REQUESTED" }, data: { status: "REJECTED", rejectReason: reason, respondedAt: new Date(), respondedBy: req.userId ?? null, respondedByName: actorName } });
+      if (claimed.count === 0) throw new DispatchError(`This request is already ${request.status.toLowerCase()}`, 409);
+      if (request.respondedAt) await tx.stockDispatchItem.deleteMany({ where: { requestId: request.id, dispatchedQty: null } });
+      // The rejected items were never prepared or taken off stock - they just come off the bill.
+      await tx.posOrderItem.deleteMany({ where: { id: { in: roundLines.map((l) => l.id) } } });
+      const names = roundLines.map((l) => `${l.quantity} x ${l.menuItem?.name ?? "item"}${l.variant ? ` (${l.variant.name})` : ""}`).join(", ")
+      await tx.posOrder.update({
+        where: { id: order.id },
+        data: { notes: [order.notes, `Store rejected ${names || "the added items"}: ${reason} (${actorName ?? "store"}).`].filter(Boolean).join("\n") },
+      });
+      return;
+    }
+
+    const claimed = await tx.stockDispatchRequest.updateMany({ where: { id: request.id, status: "REQUESTED" }, data: { status: "REJECTED", rejectReason: reason, respondedAt: new Date(), respondedBy: req.userId ?? null, respondedByName: actorName } });
     if (claimed.count === 0) throw new DispatchError(`This request is already ${request.status.toLowerCase()}`, 409);
     // Free the lines so the chef can request again (or the order can be cancelled).
     await tx.posOrderItem.updateMany({ where: { dispatchRequestId: request.id }, data: { dispatchRequestId: null } });
-    // The order can't be prepared without these ingredients - cancel it outright
+    // A new order can't be prepared without these ingredients - cancel it outright
     // rather than leaving it stuck showing a stale "waiting on store" state in
-    // the kitchen queue and Active Orders. Nothing has been served or paid at
-    // this stage, so there's no stock or payment to reverse.
-    const order = request.order;
+    // the kitchen queue and Active Orders. Nothing has been dispatched, served or
+    // paid yet, so there's no stock or payment to reverse.
     if (order && order.status !== "CANCELLED" && order.status !== "COMPLETED") {
       await tx.posOrder.updateMany({
         where: { id: order.id, tenantId: tid, status: order.status },
         data: {
           status: "CANCELLED",
-          cancelReason: `Rejected by store: ${parsed.data.reason}`,
+          cancelReason: `Rejected by store: ${reason}`,
           cancelRequestedBy: req.userId ?? null,
           cancelRequestedAt: new Date(),
           cancelDecidedBy: req.userId ?? null,
@@ -274,5 +307,7 @@ dispatchRouter.post("/:id/reject", handle(async (req, res) => {
       if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
     }
   });
+  // A skip-the-kitchen order whose only wait was the rejected round is now ready.
+  if (request.order) await skipKitchenIfSet(tid, request.order.id, req);
   res.json({ request: await prisma.stockDispatchRequest.findUniqueOrThrow({ where: { id: request.id }, include: requestInclude }) });
 }));
