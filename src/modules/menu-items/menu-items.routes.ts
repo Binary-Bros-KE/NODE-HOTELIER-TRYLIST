@@ -94,7 +94,8 @@ const itemFields = {
   locations: { select: { id: true, name: true } },
   createdAt: true,
   updatedAt: true,
-  variants: { select: { price: true } },
+  // stockProductId lets Products tell a product sold only through a size (a tot) is on the menu.
+  variants: { select: { price: true, name: true, stockProductId: true } },
   _count: { select: { orderItems: true, variants: true } },
 } as const;
 
