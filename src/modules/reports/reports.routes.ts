@@ -350,7 +350,9 @@ reportsRouter.get("/credit-debtors", async (req, res, next) => {
     const { locationId } = parsed.data;
     const search = parsed.data.search?.toLowerCase() ?? "";
     const tax = await taxSettingsFor(tid);
-    const orderScope = { tenantId: tid, status: "COMPLETED" as const, paymentStatus: { not: "PAID" as const }, saleType: "SALE" as const, ...(locationId ? { locationId } : {}) };
+    // A sale billed to a room is owed through that room's folio (open, or checked out on credit),
+    // which the rooms rows below already count — listing it here too would count it twice.
+    const orderScope = { tenantId: tid, status: "COMPLETED" as const, paymentStatus: { not: "PAID" as const }, saleType: "SALE" as const, billedToRoomAt: null, ...(locationId ? { locationId } : {}) };
     const [
       creditOrders,
       openFolios,
