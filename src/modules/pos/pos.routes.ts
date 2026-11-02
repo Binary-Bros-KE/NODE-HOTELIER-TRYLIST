@@ -501,10 +501,10 @@ async function shiftPastBusinessDayCutover(tid: string, userId: string | undefin
   return businessDayStart(startHour, new Date()).getTime() !== businessDayStart(startHour, session.approvedStartAt).getTime();
 }
 
-/** Super Admin is the one role that may reverse a bill it didn't ring up, or
- * one past the waiters' return window — for the genuine mistake nobody else
- * can fix. Used only by the cancel/return-request paths; it still goes
- * through normal approval, so stock and payments are unwound the same way. */
+/** Super Admin is the one role that may reverse or clear a bill it didn't ring
+ * up, or one past the waiters' return window — for the genuine mistake nobody
+ * else can fix. Cancels and returns still go through normal approval, so stock
+ * and payments are unwound the same way; a payment is recorded under the admin. */
 export async function isSuperAdminUser(tid: string, userId: string | undefined): Promise<boolean> {
   if (!userId) return false;
   const employee = await prisma.employee.findFirst({ where: { id: userId, tenantId: tid, status: "ACTIVE" }, select: { role: { select: { name: true } } } });
@@ -2176,7 +2176,9 @@ export async function applyOrderPayment(
 }
 
 // A cancelled part (e.g. rejected by the store) is no longer on the bill, so it
-// never blocks the rest from being viewed or paid.
+// never blocks the rest from being viewed or paid. Viewing is open like GET
+// /orders/:id, so whoever opens a part sees the whole bill's real total; paying
+// and completing it are what's restricted.
 posRouter.get("/bill-groups/:billGroupId", async (req, res) => {
   const tid = tenantIdFor(req);
   const orders = await prisma.posOrder.findMany({
@@ -2185,7 +2187,6 @@ posRouter.get("/bill-groups/:billGroupId", async (req, res) => {
     orderBy: { orderNumber: "asc" },
   });
   if (orders.length === 0) { res.status(404).json({ error: "Linked bill not found" }); return; }
-  if (orders.some((order) => !ownsOrder(order, req))) { res.status(403).json({ error: "You can only manage your own linked bills" }); return; }
   const tax = await taxSettingsFor(tid);
   res.status(200).json({ orders: orders.map((order) => withFinancials(order, tax)) });
 });
@@ -2199,7 +2200,6 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
     taxSettingsFor(tid),
   ]);
   if (orders.length === 0) { res.status(404).json({ error: "Linked bill not found" }); return; }
-  if (orders.some((order) => !ownsOrder(order, req))) { res.status(403).json({ error: "You can only take payment on your own linked bills" }); return; }
   if (orders.some((order) => order.saleType === "COMPLIMENTARY")) { res.status(409).json({ error: "Complimentary linked bills do not take payments" }); return; }
   if (orders.some(hasPendingReturnRequests)) { res.status(409).json({ error: "Approve or reject pending returns before taking payment" }); return; }
   if (orders.some(hasPendingAdditions)) { res.status(409).json({ error: "Some added items on this bill haven't been handed over yet" }); return; }
@@ -2212,8 +2212,17 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
   if (payable.length === 0) { res.status(409).json({ error: "This linked bill is already fully paid" }); return; }
   const notReady = payable.find(({ order }) => !(order.status === "SERVED" || (order.status === "COMPLETED" && order.paymentStatus !== "PAID")));
   if (notReady) { res.status(409).json({ error: `Order #${notReady.order.orderNumber} must be served before this linked bill can be paid` }); return; }
+  // Same rule as paying one order: a debt needs CREDIT_COLLECT, a live bill is its waiter's or a Super Admin's.
+  if (payable.every(({ order }) => order.status === "COMPLETED")) {
+    if (!(await hasPermission(tid, req.userId, "CREDIT_COLLECT"))) { res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager", code: "CREDIT_COLLECT_REQUIRED" }); return; }
+  } else if (orders.some((order) => !ownsOrder(order, req)) && !(await isSuperAdminUser(tid, req.userId))) {
+    res.status(403).json({ error: "You can only take payment on your own linked bills" });
+    return;
+  }
   const groupRemaining = money2(payable.reduce((sum, row) => sum + row.remaining, 0));
-  if (Math.abs(parsed.data.amount - groupRemaining) > 0.01) { res.status(400).json({ error: `Linked bills must be cleared in full: ${groupRemaining.toFixed(2)}` }); return; }
+  // Cash and each till can pay a part, oldest order first. A room charge still takes the whole balance.
+  if (parsed.data.amount > groupRemaining + 0.01) { res.status(400).json({ error: `Amount exceeds the remaining balance of ${groupRemaining.toFixed(2)}` }); return; }
+  if (parsed.data.method === "ROOM" && Math.abs(parsed.data.amount - groupRemaining) > 0.01) { res.status(400).json({ error: `Charge the full remaining balance of ${groupRemaining.toFixed(2)} to the room` }); return; }
   try {
     const data = parsed.data;
     let updatedOrders;
@@ -2280,14 +2289,14 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
   ]);
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   // Clearing a debt (an order already completed on credit) is the accountant's job: it needs CREDIT_COLLECT and,
-  // unlike ringing up or paying a live bill, is allowed on someone else's order. Anything else stays owner-only.
+  // unlike ringing up or paying a live bill, is allowed on someone else's order. Anything else is the owner's or a Super Admin's.
   const isDebtPayment = order.status === "COMPLETED" && order.paymentStatus !== "PAID";
   if (isDebtPayment) {
     if (!(await hasPermission(tid, req.userId, "CREDIT_COLLECT"))) {
       res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager", code: "CREDIT_COLLECT_REQUIRED" });
       return;
     }
-  } else if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only take payment on your own orders" }); return; }
+  } else if (!ownsOrder(order, req) && !(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "You can only take payment on your own orders" }); return; }
   if (order.saleType === "COMPLIMENTARY") {
     res.status(409).json({ error: "Complimentary orders do not take payments" });
     return;
@@ -2352,6 +2361,31 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
  * the customer's balance as credit. Needs a customer attached once anything
  * is left owing. Idempotent-ish: on an already-full order it just marks it
  * COMPLETED / PAID. */
+/** Marks a served order completed: paid in full, or with its shortfall on credit to customerId. */
+async function completeServedOrder(
+  tx: Prisma.TransactionClient,
+  tid: string,
+  order: { id: string; orderNumber: number; tableId: string | null; customerId: string | null },
+  args: { total: number; paid: number; customerId: string | null; creditReason?: string; creditExpectedAt?: Date; by?: string },
+) {
+  const { total, paid, customerId } = args;
+  const onCredit = money2(total - paid) > 0.01;
+  await tx.posOrder.update({
+    where: { id: order.id },
+    data: {
+      status: "COMPLETED",
+      completedAt: new Date(),
+      paymentStatus: paymentStatusFor(paid, total),
+      creditReason: onCredit ? args.creditReason : null,
+      creditExpectedAt: onCredit ? args.creditExpectedAt : null,
+      ...(onCredit && customerId !== order.customerId ? { customerId } : {}),
+    },
+  });
+  if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
+  await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
+  await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId, status: "COMPLETED", paid, total, by: args.by });
+}
+
 posRouter.post("/orders/:id/settle", async (req, res) => {
   const id = req.params.id as string;
   const parsed = settleSchema.safeParse(req.body ?? {});
@@ -2362,8 +2396,13 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
     taxSettingsFor(tid),
   ]);
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
-  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only complete your own orders" }); return; }
+  if (!ownsOrder(order, req) && !(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "You can only complete your own orders" }); return; }
   if (order.status !== "SERVED") { res.status(409).json({ error: "Only a served order can be completed" }); return; }
+  // Completing one part alone would leave the rest of the bill open: use /bill-groups/:id/settle.
+  if (order.billGroupId && await prisma.posOrder.count({ where: { tenantId: tid, billGroupId: order.billGroupId, id: { not: order.id }, status: { notIn: ["COMPLETED", "CANCELLED"] } } }) > 0) {
+    res.status(409).json({ error: "This order is part of a linked bill - complete the whole bill" });
+    return;
+  }
   if (hasPendingAdditions(order)) { res.status(409).json({ error: "The items added to this order haven't been handed over yet" }); return; }
   if (hasPendingReturnRequests(order)) {
     res.status(409).json({ error: "Approve or reject the pending return before completing this order" });
@@ -2381,22 +2420,41 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
     return;
   }
   const updated = await prisma.$transaction(async (tx) => {
-    await tx.posOrder.update({
-      where: { id: order.id },
-      data: {
-        status: "COMPLETED",
-        completedAt: new Date(),
-        paymentStatus: paymentStatusFor(paid, total),
-        creditReason: shortfall > 0.01 ? parsed.data.creditReason : null,
-        creditExpectedAt: shortfall > 0.01 ? parsed.data.creditExpectedAt : null,
-      },
-    });
-    if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
-    await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: true });
-    await reconcileOrderCredit(tx, { tenantId: tid, orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId, status: "COMPLETED", paid, total, by: req.userId });
+    await completeServedOrder(tx, tid, order, { total, paid, customerId: order.customerId, creditReason: parsed.data.creditReason, creditExpectedAt: parsed.data.creditExpectedAt, by: req.userId });
     return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
   });
   res.status(200).json({ order: withFinancials(updated, tax) });
+});
+
+/** Completes every served part of a linked bill together; whatever is still owed goes on credit to one customer. */
+posRouter.post("/bill-groups/:billGroupId/settle", async (req, res) => {
+  const parsed = settleSchema.safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: "Invalid settlement details", details: parsed.error.flatten() }); return; }
+  const tid = tenantIdFor(req);
+  const [orders, tax] = await Promise.all([
+    prisma.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId, status: { not: "CANCELLED" } }, include: orderInclude, orderBy: { orderNumber: "asc" } }),
+    taxSettingsFor(tid),
+  ]);
+  if (orders.length === 0) { res.status(404).json({ error: "Linked bill not found" }); return; }
+  if (orders.some((order) => !ownsOrder(order, req)) && !(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "You can only complete your own linked bills" }); return; }
+  const notReady = orders.find((order) => !["SERVED", "COMPLETED"].includes(order.status));
+  if (notReady) { res.status(409).json({ error: `Order #${notReady.orderNumber} must be served before this linked bill can be completed` }); return; }
+  const served = orders.filter((order) => order.status === "SERVED");
+  if (served.length === 0) { res.status(409).json({ error: "This linked bill is already completed" }); return; }
+  if (served.some(hasPendingAdditions)) { res.status(409).json({ error: "Some added items on this bill haven't been handed over yet" }); return; }
+  if (served.some(hasPendingReturnRequests)) { res.status(409).json({ error: "Approve or reject the pending return before completing this linked bill" }); return; }
+  const rows = served.map((order) => ({ order, total: computeOrderFinancials(order, tax).total, paid: order.payments.reduce((s, p) => s + Number(p.amount), 0) }));
+  const owing = rows.some((row) => money2(row.total - row.paid) > 0.01);
+  const billCustomerId = orders.find((order) => order.customerId)?.customerId ?? null;
+  if (owing && !billCustomerId) { res.status(400).json({ error: "Attach a customer before completing this linked bill on credit" }); return; }
+  if (owing && (!parsed.data.creditReason || !parsed.data.creditExpectedAt)) { res.status(400).json({ error: "Give a credit reason and expected payment date before completing on credit" }); return; }
+  const updated = await prisma.$transaction(async (tx) => {
+    for (const { order, total, paid } of rows) {
+      await completeServedOrder(tx, tid, order, { total, paid, customerId: order.customerId ?? billCustomerId, creditReason: parsed.data.creditReason, creditExpectedAt: parsed.data.creditExpectedAt, by: req.userId });
+    }
+    return tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId, status: { not: "CANCELLED" } }, include: orderInclude, orderBy: { orderNumber: "asc" } });
+  });
+  res.status(200).json({ orders: updated.map((order) => withFinancials(order, tax)) });
 });
 
 /** Attaches (or changes) the customer a POS order is for — used at
@@ -2409,7 +2467,7 @@ posRouter.post("/orders/:id/customer", async (req, res) => {
   const tid = tenantIdFor(req);
   const order = await prisma.posOrder.findFirst({ where: { id, tenantId: tid }, include: orderInclude });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
-  if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only manage your own orders" }); return; }
+  if (!ownsOrder(order, req) && !(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "You can only manage your own orders" }); return; }
   if (["CANCELLED", "PENDING_CANCELLATION"].includes(order.status)) { res.status(409).json({ error: "This order can't be changed" }); return; }
   const customer = await prisma.customer.findFirst({ where: { id: parsed.data.customerId, tenantId: tid }, select: { id: true } });
   if (!customer) { res.status(400).json({ error: "Choose a customer from this property" }); return; }

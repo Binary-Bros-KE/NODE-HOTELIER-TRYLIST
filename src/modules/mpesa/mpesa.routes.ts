@@ -7,7 +7,7 @@ import { env } from "../../config/env.js";
 import { initiateStkPush, normalizeMsisdn, describeResultCode, queryStkStatus, type MpesaCredentials } from "../../lib/mpesa.js";
 import { applyStkResult } from "../../lib/mpesaStk.js";
 import { resolveMpesaCredentials } from "../locations/locations.routes.js";
-import { hasPendingReturnRequests, orderInclude, ownsOrder, taxSettingsFor } from "../pos/pos.routes.js";
+import { hasPendingReturnRequests, isSuperAdminUser, orderInclude, ownsOrder, taxSettingsFor } from "../pos/pos.routes.js";
 import { hasPendingAdditions } from "../../lib/orderStock.js";
 
 export const mpesaRouter = Router();
@@ -44,7 +44,12 @@ mpesaRouter.post("/stk/orders/:orderId", async (req, res, next) => {
     const isDebtPayment = order.status === "COMPLETED" && order.paymentStatus !== "PAID";
     if (isDebtPayment) {
       if (!(await hasPermission(tid, req.userId, "CREDIT_COLLECT"))) { res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager" }); return; }
-    } else if (!ownsOrder(order, req)) { res.status(403).json({ error: "You can only take payment on your own orders" }); return; }
+    } else if (!ownsOrder(order, req) && !(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "You can only take payment on your own orders" }); return; }
+    // A push pays one order, but a linked bill is paid as a whole - take its code instead.
+    if (order.billGroupId && await prisma.posOrder.count({ where: { tenantId: tid, billGroupId: order.billGroupId, id: { not: order.id }, status: { not: "CANCELLED" } } }) > 0) {
+      res.status(409).json({ error: "STK push isn't available on a linked bill - enter the M-Pesa code instead" });
+      return;
+    }
     if (order.saleType === "COMPLIMENTARY") { res.status(409).json({ error: "Complimentary orders do not take payments" }); return; }
     if (hasPendingReturnRequests(order)) { res.status(409).json({ error: "Approve or reject the pending return before taking payment" }); return; }
     if (hasPendingAdditions(order)) { res.status(409).json({ error: "The items added to this order haven't been handed over yet" }); return; }
