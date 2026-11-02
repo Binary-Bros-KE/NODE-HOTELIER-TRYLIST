@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { prisma } from "../../lib/prisma.js";
-import { orderInclude, taxSettingsFor, withFinancials, withServedBy } from "../pos/pos.routes.js";
+import { orderInclude, receiptForOrder, taxSettingsFor } from "../pos/pos.routes.js";
 
 /**
  * Public, unauthenticated receipt lookup by opaque share token. Mounted before
@@ -31,7 +31,7 @@ publicReceiptsRouter.get("/:token", async (req, res, next) => {
       }),
     ]);
 
-    res.status(200).json({ order: await withServedBy(withFinancials(order, tax)), profile: profile ?? null });
+    res.status(200).json({ order: await receiptForOrder(order, tax), profile: profile ?? null });
   } catch (error) {
     next(error);
   }

@@ -350,6 +350,74 @@ export function withFinancials<T extends FinancialOrder>(order: T, tax: Awaited<
   return { ...order, financials, total: financials.total, paid: (order as { paymentStatus?: string }).paymentStatus === "PAID" ? Math.max(paid, financials.total) : paid };
 }
 
+/** Everything on a linked bill as one receipt, so it prints on one sheet: all items, one total, all
+ * payments, under the lowest order number and that order's location. Anything else stays as it is. */
+export async function receiptForOrder(order: PosOrderFull, tax: Awaited<ReturnType<typeof taxSettingsFor>>) {
+  const parts = order.billGroupId && order.status !== "CANCELLED"
+    ? await prisma.posOrder.findMany({ where: { tenantId: order.tenantId, billGroupId: order.billGroupId, status: { not: "CANCELLED" } }, include: orderInclude, orderBy: { orderNumber: "asc" } })
+    : [];
+  if (parts.length < 2) return withServedBy(withFinancials(order, tax));
+  const rows = parts.map((part) => withFinancials(part, tax));
+  const sum = (pick: (row: (typeof rows)[number]) => number) => money2(rows.reduce((total, row) => total + pick(row), 0));
+  const taxLines = new Map<string, (typeof rows)[number]["financials"]["taxLines"][number]>();
+  for (const line of rows.flatMap((row) => row.financials.taxLines)) {
+    const merged = taxLines.get(line.key);
+    taxLines.set(line.key, merged ? { ...merged, net: money2(merged.net + line.net), tax: money2(merged.tax + line.tax), gross: money2(merged.gross + line.gross) } : line);
+  }
+  const largest = rows.reduce((best, row) => (row.total > best.total ? row : best));
+  const stillOpen = rows.find((row) => row.status !== "COMPLETED");
+  const total = sum((row) => row.total);
+  const paid = sum((row) => row.paid);
+  return withServedBy({
+    ...rows[0],
+    items: rows.flatMap((row) => row.items),
+    payments: rows.flatMap((row) => row.payments).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()),
+    returnRequests: rows.flatMap((row) => row.returnRequests),
+    financials: {
+      ...largest.financials,
+      subtotal: sum((row) => row.financials.subtotal),
+      discount: sum((row) => row.financials.discount),
+      taxable: sum((row) => row.financials.taxable),
+      net: sum((row) => row.financials.net),
+      taxAmount: sum((row) => row.financials.taxAmount),
+      zeroRatedAmount: sum((row) => row.financials.zeroRatedAmount),
+      exemptAmount: sum((row) => row.financials.exemptAmount),
+      total,
+      complimentaryValue: sum((row) => row.financials.complimentaryValue),
+      taxLines: [...taxLines.values()],
+      taxLineItems: rows.flatMap((row) => row.financials.taxLineItems),
+    },
+    total,
+    paid,
+    status: stillOpen?.status ?? rows[0].status,
+    completedAt: stillOpen ? null : rows.reduce<Date | null>((latest, row) => (row.completedAt && (!latest || row.completedAt > latest) ? row.completedAt : latest), null),
+    paymentStatus: paymentStatusFor(paid, total),
+    customer: rows.find((row) => row.customer)?.customer ?? null,
+    reservation: rows.find((row) => row.reservation)?.reservation ?? null,
+    billedToRoomAt: rows.find((row) => row.billedToRoomAt)?.billedToRoomAt ?? null,
+    creditReason: rows.find((row) => row.creditReason)?.creditReason ?? null,
+    creditExpectedAt: rows.find((row) => row.creditExpectedAt)?.creditExpectedAt ?? null,
+    billParts: rows.map((row) => ({ orderNumber: row.orderNumber, locationName: row.location?.name ?? null })),
+  });
+}
+
+/** Tells each listed order about the whole bill it belongs to, even when a location filter or the
+ * caller's scope leaves its other parts off the list. */
+async function withBillParts<T extends { billGroupId: string | null }>(tid: string, rows: T[], tax: Awaited<ReturnType<typeof taxSettingsFor>>) {
+  const billGroupIds = [...new Set(rows.flatMap((row) => (row.billGroupId ? [row.billGroupId] : [])))];
+  if (billGroupIds.length === 0) return rows;
+  const parts = await prisma.posOrder.findMany({ where: { tenantId: tid, billGroupId: { in: billGroupIds }, status: { not: "CANCELLED" } }, include: orderInclude, orderBy: { orderNumber: "asc" } });
+  const byGroup = new Map<string, { id: string; orderNumber: number; status: string; locationName: string | null; total: number; paid: number }[]>();
+  for (const part of parts) {
+    const { total, paid } = withFinancials(part, tax);
+    byGroup.set(part.billGroupId!, [...(byGroup.get(part.billGroupId!) ?? []), { id: part.id, orderNumber: part.orderNumber, status: part.status, locationName: part.location?.name ?? null, total, paid }]);
+  }
+  return rows.map((row) => {
+    const billParts = row.billGroupId ? byGroup.get(row.billGroupId) : undefined;
+    return billParts && billParts.length > 1 ? { ...row, billParts } : row;
+  });
+}
+
 export function hasPendingReturnRequests(order: { returnRequests?: { status: string }[]; items?: { returnRequests?: { status: string }[] }[] }) {
   return Boolean(
     order.returnRequests?.some((request) => request.status === "PENDING")
@@ -601,7 +669,7 @@ posRouter.get("/orders", async (req, res) => {
     }),
     taxSettingsFor(tid),
   ]);
-  res.status(200).json({ orders: orders.map((order) => withFinancials(order, tax)) });
+  res.status(200).json({ orders: await withBillParts(tid, orders.map((order) => withFinancials(order, tax)), tax) });
 });
 
 /** The sales register (Receipts): completed and cancelled orders by order number, newest
@@ -649,7 +717,7 @@ posRouter.get("/orders/register", async (req, res) => {
     summary.collected += paid;
     summary.outstanding += Math.max(0, orderTotal - paid);
   }
-  res.status(200).json({ orders: pageRows.map((order) => withFinancials(order, tax)), total, page, pageSize, summary });
+  res.status(200).json({ orders: await withBillParts(tid, pageRows.map((order) => withFinancials(order, tax)), tax), total, page, pageSize, summary });
 });
 
 /** POS notification queue: Kitchen places finished orders here for serving.
@@ -2488,6 +2556,17 @@ posRouter.get("/orders/:id", async (req, res) => {
   ]);
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   res.status(200).json({ order: await withServedBy(withFinancials(order, tax)) });
+});
+
+/** What a receipt prints: the order, or its whole linked bill on one sheet. */
+posRouter.get("/orders/:id/receipt", async (req, res) => {
+  const tid = tenantIdFor(req);
+  const [order, tax] = await Promise.all([
+    prisma.posOrder.findFirst({ where: { id: req.params.id, tenantId: tid }, include: orderInclude }),
+    taxSettingsFor(tid),
+  ]);
+  if (!order) { res.status(404).json({ error: "Order not found" }); return; }
+  res.status(200).json({ order: await receiptForOrder(order, tax) });
 });
 
 /** Mint (once) and return a public, no-auth link to this order's receipt. The
