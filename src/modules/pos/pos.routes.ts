@@ -366,12 +366,19 @@ export async function receiptForOrder(order: PosOrderFull, tax: Awaited<ReturnTy
   }
   const largest = rows.reduce((best, row) => (row.total > best.total ? row : best));
   const stillOpen = rows.find((row) => row.status !== "COMPLETED");
+  // One payment spread across the parts (same method, same code, same moment) prints as the one payment it was.
+  const payments: (typeof rows)[number]["payments"] = [];
+  for (const payment of rows.flatMap((row) => row.payments).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
+    const same = payments.find((p) => p.paymentMethodId === payment.paymentMethodId && p.reference === payment.reference && Math.abs(p.createdAt.getTime() - payment.createdAt.getTime()) < 5000);
+    if (same) same.amount = same.amount.plus(payment.amount);
+    else payments.push({ ...payment });
+  }
   const total = sum((row) => row.total);
   const paid = sum((row) => row.paid);
   return withServedBy({
     ...rows[0],
     items: rows.flatMap((row) => row.items),
-    payments: rows.flatMap((row) => row.payments).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()),
+    payments,
     returnRequests: rows.flatMap((row) => row.returnRequests),
     financials: {
       ...largest.financials,
