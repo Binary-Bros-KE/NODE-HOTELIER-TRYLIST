@@ -50,6 +50,7 @@ import { employeeSalariesRouter } from "../modules/employee-salaries/employee-sa
 import { commercialDocumentsRouter } from "../modules/commercial-documents/commercial-documents.routes.js";
 import { enforceShiftAccess } from "../middleware/enforceShiftAccess.js";
 import { authenticate } from "../middleware/authenticate.js";
+import { activityRouter } from "../modules/activity/activity.routes.js";
 
 export const router = Router();
 
@@ -112,3 +113,4 @@ router.use("/shifts", shiftsRouter);
 router.use("/attendance", attendanceRouter);
 router.use("/employee-salaries", employeeSalariesRouter);
 router.use("/commercial-documents", commercialDocumentsRouter);
+router.use("/activity", activityRouter);

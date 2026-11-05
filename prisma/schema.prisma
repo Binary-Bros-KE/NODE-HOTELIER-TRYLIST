@@ -281,6 +281,9 @@ enum Permission {
   // Count stock on the Inventory Report's stock take: each entered count sets the
   // location's stock to it. Also opens that report without the Reports section.
   STOCK_TAKE
+  // See the Activity Log: who did what - voids, cancellations, adjustments,
+  // setting changes - and the history on an order, invoice, stay or product.
+  ACTIVITY_VIEW
 }
 
 enum ShiftSessionStatus {
@@ -473,6 +476,7 @@ model Tenant {
   businessProfile            BusinessProfile?
   roles                      Role[]
   sessions                   Session[]
+  activityLogs               ActivityLog[]
   paymentMethods             PaymentMethod[]
   transactions               Transaction[]
   expenseCategories          ExpenseCategory[]
@@ -3078,6 +3082,39 @@ model Printer {
 
 // A record of an order that was reverted (deleted from the sales). Kept so the
 // Approvals tab can show what was taken off the books, by whom, and what stock came back.
+// The audit trail of sensitive actions: who did what, to which record, why, and
+// what changed. Written in the same database transaction as the change itself,
+// and never updated or deleted by the app. The actor is a plain employee id (like
+// PosOrder.createdBy) with their name and role copied as they were at the time,
+// so the entry still reads right after a rename, role change or removal.
+model ActivityLog {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  occurredAt  DateTime @default(now())
+  actorId     String?
+  actorName   String?
+  actorRole   String?
+  // POS, STAYS, STOCK, MENU, DOCUMENTS, FINANCE, PAYROLL, PEOPLE, SETTINGS, SHIFTS, SERVICE_CENTER, AUTH
+  area        String
+  // Dotted key, e.g. "pos.order.void"
+  action      String
+  targetType  String?
+  targetId    String?
+  // How the record reads to a person: "Order #97", "INV-000014", "RES-000136"
+  targetLabel String?
+  summary     String
+  reason      String?
+  // [{ field, label, from, to }] for edits
+  changes     Json?
+  locationId  String?
+  ipAddress   String?
+
+  @@index([tenantId, occurredAt])
+  @@index([tenantId, targetType, targetId])
+  @@index([tenantId, actorId, occurredAt])
+}
+
 model PosOrderRevert {
   id             String   @id @default(cuid())
   tenantId       String

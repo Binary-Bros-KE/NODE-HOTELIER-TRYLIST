@@ -71,7 +71,8 @@ const REQUISITION_APPROVER_PERMISSIONS = ["REQUISITION_APPROVE"] as const;
 const BARMAN_PERMISSIONS = ["POS_VIEW_ALL_ORDERS", "POS_APPROVE_COUNTER", "POS_APPROVE_CANCELLATION"] as const;
 
 export const SYSTEM_ROLES = [
-  { name: "Super Admin", description: "Full access to every section of the workspace.", allowedSections: ALL_SECTIONS, permissions: ALL_PERMISSIONS },
+  // Seeing who did what is the Super Admin's by default; other roles get ACTIVITY_VIEW from Roles & Permissions.
+  { name: "Super Admin", description: "Full access to every section of the workspace.", allowedSections: ALL_SECTIONS, permissions: [...ALL_PERMISSIONS, "ACTIVITY_VIEW"] },
   { name: "Manager", description: "Oversees daily operations across the property.", allowedSections: ALL_SECTIONS, permissions: ALL_PERMISSIONS },
   { name: "Receptionist", description: "Front desk check-in, reservations, and guest billing.", allowedSections: ["OVERVIEW", "RECEPTION"], permissions: [] },
   { name: "Chef", description: "Kitchen orders, menu, and recipes.", allowedSections: ["OVERVIEW", "KITCHEN"], permissions: [] },
