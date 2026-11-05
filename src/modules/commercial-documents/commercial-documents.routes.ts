@@ -169,6 +169,8 @@ function folioLineGross(line: { amount: unknown; quantity: unknown; taxRate?: an
   return result.total;
 }
 
+const isCancelled = (status: string) => status === "CANCELLED" || status === "VOID";
+
 function paymentSum(payments: { amount: unknown }[]) {
   return round2(payments.reduce((sum, payment) => sum + Number(payment.amount), 0));
 }
@@ -431,11 +433,13 @@ commercialDocumentsRouter.get("/", async (req, res) => {
   };
   await refreshStayInvoices(tid);
   const documents = await presentStayDocuments(await prisma.commercialDocument.findMany({ where, include, orderBy: { createdAt: "desc" } }));
+  // A cancelled document stays listed for the record but no longer counts towards the totals.
+  const live = documents.filter((d) => !isCancelled(d.status));
   const summary = {
     total: documents.length,
-    value: round2(documents.reduce((sum, d) => sum + Number(d.total), 0)),
-    paid: round2(documents.reduce((sum, d) => sum + Number(d.paidAmount), 0)),
-    balance: round2(documents.reduce((sum, d) => sum + Number(d.balance), 0)),
+    value: round2(live.reduce((sum, d) => sum + Number(d.total), 0)),
+    paid: round2(live.reduce((sum, d) => sum + Number(d.paidAmount), 0)),
+    balance: round2(live.reduce((sum, d) => sum + Number(d.balance), 0)),
     overdue: documents.filter((d) => d.status === "OVERDUE").length,
   };
   res.json({ documents, summary });
@@ -928,9 +932,11 @@ commercialDocumentsRouter.post("/:id/status", async (req, res) => {
   const tid = tenantId(req);
   const current = await prisma.commercialDocument.findFirst({ where: { id: req.params.id, tenantId: tid } });
   if (!current) { res.status(404).json({ error: "Document not found" }); return; }
+  if (isCancelled(parsed.data.status)) { res.status(400).json({ error: `Use Cancel to cancel this ${current.type.toLowerCase()} - it records who cancelled it and why` }); return; }
+  if (isCancelled(current.status)) { res.status(409).json({ error: `This ${current.type.toLowerCase()} is cancelled` }); return; }
   const allowed = current.type === "QUOTATION"
-    ? ["DRAFT", "SENT", "ACCEPTED", "REJECTED", "EXPIRED", "CANCELLED"]
-    : ["DRAFT", "ISSUED", "CANCELLED", "VOID"];
+    ? ["DRAFT", "SENT", "ACCEPTED", "REJECTED", "EXPIRED"]
+    : ["DRAFT", "ISSUED"];
   if (!allowed.includes(parsed.data.status)) { res.status(400).json({ error: `That status is not valid for ${current.type.toLowerCase()}s` }); return; }
   const now = new Date();
   const document = await prisma.commercialDocument.update({
@@ -1001,7 +1007,7 @@ commercialDocumentsRouter.post("/:id/convert-to-invoice", async (req, res) => {
     await prisma.commercialDocument.update({ where: { id: quote.id }, data: { customerId: attached.customerId } });
     quote.customerId = attached.customerId;
   }
-  const existing = quote.convertedDocuments.find((d) => d.type === "INVOICE");
+  const existing = quote.convertedDocuments.find((d) => d.type === "INVOICE" && !isCancelled(d.status));
   if (existing) { res.status(409).json({ error: `Already converted to ${existing.documentNo}` }); return; }
   const invoiceNo = await nextInvoiceNo(tid);
   const invoice = await prisma.$transaction(async (tx) => {
@@ -1121,37 +1127,42 @@ commercialDocumentsRouter.post("/:id/payments", async (req, res) => {
 });
 
 /**
- * Deletes an invoice or quotation (Super Admin only). Money is never deleted:
+ * Cancels an invoice or quotation (Super Admin only). Nothing is deleted: the document stays
+ * in its register as CANCELLED, with who cancelled it, when and why. Money is handled as follows:
  *  - Payments recorded on the document itself (manual invoices, quotation
  *    deposits, payments taken on a converted invoice) have their transactions
  *    VOIDED, so they drop out of every report, cash-up and the payment-code
  *    check, and stay visible in Transactions as voided.
  *  - A stay invoice's payments are the folio's (FolioPayment + FOLIO_*
  *    transactions) and an order invoice's are the order's: those belong to the
- *    stay / sale, not the invoice, so they are left untouched. Only the
- *    document goes; the stay or order can be invoiced again.
+ *    stay / sale, not the invoice, so they are left untouched, and the stay or
+ *    order can be invoiced again.
  *  - An invoice converted from a quotation returns that quotation to ACCEPTED
- *    (the deposits it carried live on the quotation's own payments).
- *  - A quotation that was converted can't go while its invoice exists - the
+ *    (the deposits it carried live on the quotation's own payments), so it can
+ *    be converted again.
+ *  - A converted quotation can't be cancelled while its invoice is live - the
  *    invoice shows its deposits.
- * Lines and payment rows cascade with the document.
  */
-commercialDocumentsRouter.delete("/:id", async (req, res) => {
+commercialDocumentsRouter.post("/:id/cancel", async (req, res) => {
+  const parsed = z.object({ reason: z.string().trim().min(3, "Give a reason for cancelling").max(500) }).safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Give a reason for cancelling" }); return; }
   const tid = tenantId(req);
-  if (!(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can delete invoices and quotations" }); return; }
+  if (!(await isSuperAdminUser(tid, req.userId))) { res.status(403).json({ error: "Only a Super Admin can cancel invoices and quotations" }); return; }
   const doc = await prisma.commercialDocument.findFirst({
     where: { id: req.params.id, tenantId: tid },
     include: {
       payments: { select: { transactionId: true } },
-      convertedDocuments: { select: { documentNo: true, type: true } },
+      convertedDocuments: { select: { documentNo: true, type: true, status: true } },
     },
   });
   if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
-  const invoice = doc.convertedDocuments.find((d) => d.type === "INVOICE");
+  if (isCancelled(doc.status)) { res.status(409).json({ error: `${doc.documentNo} is already cancelled` }); return; }
+  const invoice = doc.convertedDocuments.find((d) => d.type === "INVOICE" && !isCancelled(d.status));
   if (doc.type === "QUOTATION" && invoice) {
-    res.status(409).json({ error: `This quotation was converted to invoice ${invoice.documentNo}. Delete that invoice first.` });
+    res.status(409).json({ error: `This quotation was converted to invoice ${invoice.documentNo}. Cancel that invoice first.` });
     return;
   }
+  const by = req.userId ? await prisma.employee.findFirst({ where: { id: req.userId, tenantId: tid }, select: { firstName: true, lastName: true } }) : null;
 
   const transactionIds = doc.payments.map((p) => p.transactionId).filter((id): id is string => Boolean(id));
   const result = await prisma.$transaction(async (tx) => {
@@ -1161,7 +1172,7 @@ commercialDocumentsRouter.delete("/:id", async (req, res) => {
     for (const t of transactions) {
       await tx.transaction.update({
         where: { id: t.id },
-        data: { status: "VOIDED", description: `${t.description ?? doc.documentNo} - voided: ${doc.documentNo} deleted` },
+        data: { status: "VOIDED", description: `${t.description ?? doc.documentNo} - voided: ${doc.documentNo} cancelled` },
       });
     }
     if (doc.type === "INVOICE" && doc.source === "QUOTATION" && doc.sourceDocumentId) {
@@ -1170,8 +1181,24 @@ commercialDocumentsRouter.delete("/:id", async (req, res) => {
         data: { status: "ACCEPTED", updatedBy: req.userId },
       });
     }
-    await tx.commercialDocument.delete({ where: { id: doc.id } });
+    await tx.commercialDocument.update({
+      where: { id: doc.id },
+      data: {
+        status: "CANCELLED",
+        cancelledAt: new Date(),
+        cancelledBy: req.userId ?? null,
+        cancelledByName: by ? `${by.firstName} ${by.lastName ?? ""}`.trim() : null,
+        cancelReason: parsed.data.reason,
+        updatedBy: req.userId,
+      },
+    });
     return { voidedPayments: transactions.length };
   });
-  res.json({ deleted: doc.documentNo, ...result });
+  const document = await prisma.commercialDocument.findUniqueOrThrow({ where: { id: doc.id }, include });
+  res.json({ document: (await presentStayDocuments([document]))[0], ...result });
+});
+
+// Deleting left no trace of the document or who removed it, so it's gone; an old screen still calling it is told why.
+commercialDocumentsRouter.delete("/:id", (_req, res) => {
+  res.status(405).json({ error: "Invoices and quotations can't be deleted. Cancel it instead - it stays on record." });
 });

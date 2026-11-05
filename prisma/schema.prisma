@@ -1615,6 +1615,12 @@ model CommercialDocument {
   depositRequired    Decimal                     @default(0) @db.Decimal(12, 2)
   createdBy          String?
   updatedBy          String?
+  // Invoices and quotations are never deleted, only cancelled: who did it, when and why stay on the record.
+  // cancelledBy is a plain employee id (like createdBy); the name is kept as it was at the time.
+  cancelledAt        DateTime?
+  cancelledBy        String?
+  cancelledByName    String?
+  cancelReason       String?                     @db.Text
   createdAt          DateTime                    @default(now())
   updatedAt          DateTime                    @updatedAt
   tenant             Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
