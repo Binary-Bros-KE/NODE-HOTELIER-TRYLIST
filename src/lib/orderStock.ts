@@ -84,6 +84,10 @@ const isUndeductedAdditionOrder = (order: SettleOrder) => Boolean(order.servedAt
 
 /** Payment / completion must wait until added lines on a served order have been handed over:
  * by the kitchen at a store-dispatch location, or by the barman at a counter location
- * (otherwise the bill closes and the barman's "serve the added items" prompt is lost). */
+ * (otherwise the bill closes and the barman's "serve the added items" prompt is lost).
+ * A completed order has closed already, so a line still flagged on it (a bill closed before
+ * this rule existed) never stops its debt being cleared. */
 export const hasPendingAdditions = (order: SettleOrder) =>
-  (isUndeductedAdditionOrder(order) || order.location?.serveMode === "COUNTER") && order.items.some((item) => item.addedAfterSend);
+  order.status !== "COMPLETED"
+  && (isUndeductedAdditionOrder(order) || order.location?.serveMode === "COUNTER")
+  && order.items.some((item) => item.addedAfterSend);
