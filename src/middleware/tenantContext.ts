@@ -4,9 +4,9 @@ import type { ModuleKey, Permission } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 
 /**
- * Reads the `x-tenant-id` header and attaches it to `req.tenantId`.
- * There is no auth layer yet, so this is a simple pass-through that
- * lets downstream middleware (e.g. requireModule) resolve tenant scope.
+ * Reads the `x-tenant-id` header and attaches it to `req.tenantId`. The
+ * x-user-id it also reads is only a claim: under /api, authenticate replaces it
+ * with the signed-in session's employee before any route sees it.
  */
 export function tenantContext(req: Request, _res: Response, next: NextFunction): void {
   const tenantId = req.header("x-tenant-id");

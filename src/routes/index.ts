@@ -49,6 +49,7 @@ import { attendanceRouter } from "../modules/attendance/attendance.routes.js";
 import { employeeSalariesRouter } from "../modules/employee-salaries/employee-salaries.routes.js";
 import { commercialDocumentsRouter } from "../modules/commercial-documents/commercial-documents.routes.js";
 import { enforceShiftAccess } from "../middleware/enforceShiftAccess.js";
+import { authenticate } from "../middleware/authenticate.js";
 
 export const router = Router();
 
@@ -60,6 +61,8 @@ router.get("/health", (_req, res) => {
 // shift check before issuing a session, and /me + /logout must stay
 // reachable even for an employee the gate would otherwise block.
 router.use("/auth", authRouter);
+// Everything below acts as the signed-in session's employee (see authenticate).
+router.use(authenticate);
 router.use(enforceShiftAccess);
 
 router.use("/pos", posRouter);
