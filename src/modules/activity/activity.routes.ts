@@ -73,7 +73,7 @@ const sources: Source[] = [
           ...(f.target ? { id: f.target.id } : {}),
           ...(f.search ? { orderNumber: orderNumberOf(f.search) ?? -1 } : {}),
         },
-        select: { id: true, orderNumber: true, total: true, statusBeforeCancel: true, cancelReason: true, cancelDecidedAt: true, cancelDecidedBy: true, cancelRequestedBy: true, location: { select: { name: true } } },
+        select: { id: true, orderNumber: true, statusBeforeCancel: true, cancelReason: true, cancelDecidedAt: true, cancelDecidedBy: true, cancelRequestedBy: true, location: { select: { name: true } } },
         orderBy: { cancelDecidedAt: "desc" }, take,
       });
       return orders.map((o) => {
