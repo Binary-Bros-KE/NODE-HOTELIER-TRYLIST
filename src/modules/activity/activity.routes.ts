@@ -1,5 +1,5 @@
 import { Router } from "express";
-import type { Prisma } from "@prisma/client";
+import type { Prisma, ReservationActivityAction } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
@@ -57,6 +57,8 @@ function window(f: Filter, until?: Date): Prisma.DateTimeFilter | undefined {
 
 // Set a source's date here when the action it covers starts writing ActivityLog.
 const LEGACY_UNTIL: Partial<Record<string, Date>> = {};
+
+const SENSITIVE_STAY_ACTIONS: ReservationActivityAction[] = ["UPDATED", "CANCELLED", "NO_SHOW", "EXTENDED", "CHARGE_REMOVED", "GUEST_REMOVED", "ROOM_TERMS_CHANGED", "ROOM_CHARGE_CHANGED", "ROOM_CHANGED"];
 
 type Source = { key: string; area: ActivityArea; targetTypes?: string[]; load: (tid: string, f: Filter, take: number) => Promise<Row[]> };
 
@@ -166,7 +168,9 @@ const sources: Source[] = [
         where: {
           tenantId: tid, ...(window(f, LEGACY_UNTIL.stays) ? { occurredAt: window(f, LEGACY_UNTIL.stays) } : {}),
           ...(f.actorId ? { performedBy: f.actorId } : {}),
-          ...(f.target ? { reservationId: f.target.id } : {}),
+          // A stay's own History shows everything; the log shows only changes to someone's booking or bill,
+          // not the routine desk work (booking, checking in, taking a deposit) whose author is plain.
+          ...(f.target ? { reservationId: f.target.id } : { action: { in: SENSITIVE_STAY_ACTIONS } }),
           ...(f.search ? { OR: [{ reservation: { reservationNo: insensitive(f.search) } }, { summary: insensitive(f.search) }] } : {}),
         },
         select: { id: true, action: true, summary: true, occurredAt: true, performedBy: true, reservationId: true, reservation: { select: { reservationNo: true } } },
