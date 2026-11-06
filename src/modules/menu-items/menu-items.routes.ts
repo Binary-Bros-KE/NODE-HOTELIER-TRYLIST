@@ -4,6 +4,9 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { partialNoDefaults } from "../../lib/zod.js";
+import { logActivityAfter, changedFields } from "../../lib/activity.js";
+
+const menuTarget = (m: { id: string; name: string }) => ({ type: "MenuItem", id: m.id, label: m.name });
 
 // Menu ▸ Items (Phase 2). The new, richer menu-item CRUD built on the
 // dedicated MenuCategory table. `isActive` (in the menu at all) and
@@ -237,13 +240,15 @@ menuItemsRouter.patch("/:id", async (req, res, next) => {
     if (locationIds) await assertLocations(tid, locationIds);
     await assertProduct(tid, rest.productId);
     await assertRecipe(tid, rest.recipeId);
-    const existing = await prisma.menuItem.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
+    const existing = await prisma.menuItem.findFirst({ where: { id: req.params.id, tenantId: tid } });
     if (!existing) { res.status(404).json({ error: "Menu item not found" }); return; }
+    const changes = changedFields(existing as unknown as Record<string, unknown>, rest as Record<string, unknown>, { name: "Name", price: "Price", productId: "Uses product", recipeId: "Uses recipe", stockQtyPerUnit: "Uses per sale", isActive: "On the menu", menuCategoryId: "Category", taxRate: "Tax rate", taxMode: "Tax mode", taxTreatment: "Tax treatment" });
     const item = await prisma.menuItem.update({
       where: { id: existing.id },
       data: { ...rest, ...(locationIds ? { locations: { set: locationIds.map((id) => ({ id })) } } : {}) },
       select: itemFields,
     });
+    if (changes.length) await logActivityAfter(req, { area: "MENU", action: "menu_item.edit", target: menuTarget(existing), changes, summary: `Changed menu item ${existing.name} (${changes.map((c) => c.label.toLowerCase()).join(", ")})` });
     res.json({ item });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "A menu item with this SKU already exists" }); return; }
@@ -269,7 +274,7 @@ menuItemsRouter.post("/reorder", async (req, res, next) => {
 
 menuItemsRouter.delete("/:id", async (req, res, next) => {
   try {
-    const existing = await prisma.menuItem.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, _count: { select: { orderItems: true } } } });
+    const existing = await prisma.menuItem.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, name: true, price: true, _count: { select: { orderItems: true } } } });
     if (!existing) { res.status(404).json({ error: "Menu item not found" }); return; }
     if (existing._count.orderItems > 0) {
       res.status(409).json({ error: `This item is on ${existing._count.orderItems} order${existing._count.orderItems === 1 ? "" : "s"} — deactivate it instead` });
@@ -277,6 +282,7 @@ menuItemsRouter.delete("/:id", async (req, res, next) => {
     }
     // Also clears its variants, add-on and location links.
     await prisma.menuItem.delete({ where: { id: existing.id } });
+    await logActivityAfter(req, { area: "MENU", action: "menu_item.delete", target: menuTarget(existing), summary: `Deleted menu item ${existing.name} (KSh ${Number(existing.price).toLocaleString("en-KE")})` });
     res.status(204).send();
   } catch (error) {
     next(error);
@@ -373,7 +379,7 @@ menuItemsRouter.patch("/:menuItemId/variants/:id", async (req, res, next) => {
     await assertVariantSkuFree(tid, data.data.sku, req.params.id);
     await assertProduct(tid, data.data.stockProductId);
     // The recipe a variant ends up with (the one sent, or the one it already has) decides whether overrides make sense.
-    const current = await prisma.menuItemVariant.findUniqueOrThrow({ where: { id: req.params.id }, select: { recipeId: true, stockProductId: true } });
+    const current = await prisma.menuItemVariant.findUniqueOrThrow({ where: { id: req.params.id }, include: { menuItem: { select: { id: true, name: true } } } });
     const finalRecipeId = data.data.recipeId !== undefined ? data.data.recipeId : current.recipeId;
     const finalProductId = data.data.stockProductId !== undefined ? data.data.stockProductId : current.stockProductId;
     if (finalRecipeId && finalProductId) { res.status(400).json({ error: "Use a product or a recipe for a variant's stock, not both" }); return; }
@@ -388,6 +394,8 @@ menuItemsRouter.patch("/:menuItemId/variants/:id", async (req, res, next) => {
       }
     });
     const variant = await prisma.menuItemVariant.findUniqueOrThrow({ where: { id: req.params.id }, select: variantFields });
+    const changes = changedFields(current as unknown as Record<string, unknown>, variantData as Record<string, unknown>, { name: "Name", price: "Price", stockProductId: "Uses product", stockQtyPerUnit: "Uses per sale", recipeId: "Uses recipe", isActive: "Active" });
+    if (changes.length) await logActivityAfter(req, { area: "MENU", action: "menu_variant.edit", target: menuTarget(current.menuItem), changes, summary: `Changed ${current.menuItem.name} (${current.name}) - ${changes.map((c) => c.label.toLowerCase()).join(", ")}` });
     res.json({ variant });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "This item already has a variant with that name" }); return; }
@@ -413,8 +421,10 @@ menuItemsRouter.post("/:menuItemId/variants/reorder", async (req, res, next) => 
 
 menuItemsRouter.delete("/:menuItemId/variants/:id", async (req, res, next) => {
   try {
+    const gone = await prisma.menuItemVariant.findFirst({ where: { id: req.params.id, tenantId: tenantId(req), menuItemId: req.params.menuItemId }, select: { name: true, price: true, menuItem: { select: { id: true, name: true } } } });
     const deleted = await prisma.menuItemVariant.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req), menuItemId: req.params.menuItemId } });
-    if (!deleted.count) { res.status(404).json({ error: "Variant not found" }); return; }
+    if (!deleted.count || !gone) { res.status(404).json({ error: "Variant not found" }); return; }
+    await logActivityAfter(req, { area: "MENU", action: "menu_variant.delete", target: menuTarget(gone.menuItem), summary: `Deleted the ${gone.name} size of ${gone.menuItem.name} (KSh ${Number(gone.price).toLocaleString("en-KE")})` });
     res.status(204).send();
   } catch (error) {
     next(error);

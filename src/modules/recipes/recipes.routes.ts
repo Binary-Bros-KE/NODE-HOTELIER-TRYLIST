@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivityAfter } from "../../lib/activity.js";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
@@ -84,7 +85,7 @@ recipesRouter.patch("/:id", async (req, res, next) => {
   const tid = tenantId(req);
   const { ingredients, ...rest } = data.data;
   try {
-    const existing = await prisma.recipe.findFirst({ where: { id: req.params.id, tenantId: tid } });
+    const existing = await prisma.recipe.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { ingredients: { select: { productId: true, quantity: true, product: { select: { name: true, unit: true } } } } } });
     if (!existing) { res.status(404).json({ error: "Recipe not found" }); return; }
     if (ingredients) await assertIngredientsBelongToTenant(tid, ingredients);
     const recipe = await prisma.$transaction(async (tx) => {
@@ -94,6 +95,14 @@ recipesRouter.patch("/:id", async (req, res, next) => {
       }
       return tx.recipe.update({ where: { id: existing.id }, data: rest, include: recipeInclude });
     });
+    if (ingredients) {
+      // What each sale uses changes stock and cost, so the ingredient list is shown before and after.
+      const names = new Map((await prisma.product.findMany({ where: { tenantId: tid, id: { in: ingredients.map((i) => i.productId) } }, select: { id: true, name: true, unit: true } })).map((p) => [p.id, p]));
+      const was = existing.ingredients.map((i) => `${i.product.name} ${Number(i.quantity)} ${i.product.unit}`).sort().join(", ");
+      const now = ingredients.map((i) => `${names.get(i.productId)?.name ?? "?"} ${Number(i.quantity)} ${names.get(i.productId)?.unit ?? ""}`.trim()).sort().join(", ");
+      if (was !== now) await logActivityAfter(req, { area: "MENU", action: "recipe.edit", target: { type: "Recipe", id: existing.id, label: existing.name }, changes: [{ field: "ingredients", label: "Ingredients", from: was || "none", to: now || "none" }], summary: `Changed the ingredients of recipe ${existing.name}` });
+    }
+    if (rest.name && rest.name !== existing.name) await logActivityAfter(req, { area: "MENU", action: "recipe.rename", target: { type: "Recipe", id: existing.id, label: rest.name }, changes: [{ field: "name", label: "Name", from: existing.name, to: rest.name }], summary: `Renamed recipe ${existing.name} to ${rest.name}` });
     res.json({ recipe });
   } catch (error) {
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
@@ -103,7 +112,9 @@ recipesRouter.patch("/:id", async (req, res, next) => {
 });
 
 recipesRouter.delete("/:id", async (req, res) => {
+  const gone = await prisma.recipe.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, name: true } });
   const deleted = await prisma.recipe.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } });
-  if (!deleted.count) { res.status(404).json({ error: "Recipe not found" }); return; }
+  if (!deleted.count || !gone) { res.status(404).json({ error: "Recipe not found" }); return; }
+  await logActivityAfter(req, { area: "MENU", action: "recipe.delete", target: { type: "Recipe", id: gone.id, label: gone.name }, summary: `Deleted recipe ${gone.name}` });
   res.status(204).send();
 });

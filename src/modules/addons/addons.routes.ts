@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivityAfter, changedFields } from "../../lib/activity.js";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
@@ -182,11 +183,13 @@ addonsRouter.patch("/:id", async (req, res, next) => {
     await assertCategory(tid, data.data.menuCategoryId);
     await assertProduct(tid, data.data.stockProductId);
     await assertRecipe(tid, data.data.recipeId);
-    const current = await prisma.addon.findUniqueOrThrow({ where: { id: existing.id }, select: { recipeId: true, stockProductId: true } });
+    const current = await prisma.addon.findUniqueOrThrow({ where: { id: existing.id } });
     const finalRecipe = data.data.recipeId !== undefined ? data.data.recipeId : current.recipeId;
     const finalProduct = data.data.stockProductId !== undefined ? data.data.stockProductId : current.stockProductId;
     if (finalRecipe && finalProduct) { res.status(400).json({ error: "Use a product or a recipe for an add-on's stock, not both" }); return; }
     const addon = await prisma.addon.update({ where: { id: existing.id }, data: data.data, select: addonFields });
+    const changes = changedFields(current as unknown as Record<string, unknown>, data.data as Record<string, unknown>, { name: "Name", price: "Price", stockProductId: "Uses product", stockQtyPerUnit: "Uses per sale", recipeId: "Uses recipe", isActive: "Active" });
+    if (changes.length) await logActivityAfter(req, { area: "MENU", action: "addon.edit", target: { type: "Addon", id: current.id, label: current.name }, changes, summary: `Changed add-on ${current.name} (${changes.map((c) => c.label.toLowerCase()).join(", ")})` });
     res.json({ addon });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "An add-on with this name already exists" }); return; }
@@ -197,13 +200,14 @@ addonsRouter.patch("/:id", async (req, res, next) => {
 
 addonsRouter.delete("/:id", async (req, res, next) => {
   try {
-    const existing = await prisma.addon.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, _count: { select: { orderItems: true } } } });
+    const existing = await prisma.addon.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, name: true, _count: { select: { orderItems: true } } } });
     if (!existing) { res.status(404).json({ error: "Add-on not found" }); return; }
     if (existing._count.orderItems > 0) {
       res.status(409).json({ error: `This add-on is on ${existing._count.orderItems} order${existing._count.orderItems === 1 ? "" : "s"} — deactivate it instead` });
       return;
     }
     await prisma.addon.delete({ where: { id: existing.id } });
+    await logActivityAfter(req, { area: "MENU", action: "addon.delete", target: { type: "Addon", id: existing.id, label: existing.name }, summary: `Deleted add-on ${existing.name}` });
     res.status(204).send();
   } catch (error) {
     next(error);

@@ -5,6 +5,10 @@ import { prisma } from "../../lib/prisma.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { partialNoDefaults } from "../../lib/zod.js";
 import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedger.js";
+import { logActivityAfter, changedFields } from "../../lib/activity.js";
+
+const PRODUCT_FIELDS = { name: "Name", unitCost: "Cost", sellingPrice: "Selling price", sellsDirectly: "Sold directly", isActive: "Active", unit: "Unit", packSize: "Pack size", packLabel: "Pack", trackingMode: "Stock tracking", isExpenseItem: "Expense item", expenseCategoryId: "Expense category", taxRate: "Tax rate", taxMode: "Tax mode", taxTreatment: "Tax treatment", reorderLevel: "Reorder level" } as const;
+const productTarget = (p: { id: string; name: string }) => ({ type: "Product", id: p.id, label: p.name });
 
 export const productsRouter = Router();
 productsRouter.use(requireModule("PRODUCTS"));
@@ -342,9 +346,14 @@ productsRouter.patch("/:id", async (req, res, next) => {
     }
     if (data.data.packUnitId) await assertPackUnit(data.data.packUnitId, tid);
     const resolvedUnit = data.data.unit !== undefined ? await unitIdFor(tid, data.data.unit) : undefined;
+    const before = await prisma.product.findFirst({ where: { id: req.params.id, tenantId: tid } });
     const updated = await prisma.product.updateMany({ where: { id: req.params.id, tenantId: tid }, data: { ...data.data, ...(resolvedUnit !== undefined ? { unit: resolvedUnit.name ?? data.data.unit, unitId: resolvedUnit.id } : {}) } });
     if (!updated.count) { res.status(404).json({ error: "Product not found" }); return; }
     const product = await prisma.product.findUniqueOrThrow({ where: { id: req.params.id }, select: productFields });
+    if (before) {
+      const changes = changedFields(before as unknown as Record<string, unknown>, { ...data.data, ...(resolvedUnit !== undefined ? { unit: resolvedUnit.name } : {}) } as Record<string, unknown>, PRODUCT_FIELDS);
+      if (changes.length) await logActivityAfter(req, { area: "STOCK", action: "product.edit", target: productTarget(before), changes, summary: `Changed product ${before.name} (${changes.map((c) => c.label.toLowerCase()).join(", ")})` });
+    }
     res.json({ product: withTotal(product) });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "A product with this SKU or barcode already exists" }); return; }
@@ -354,8 +363,10 @@ productsRouter.patch("/:id", async (req, res, next) => {
 
 productsRouter.delete("/:id", async (req, res, next) => {
   try {
+    const before = await prisma.product.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, name: true } });
     const deleted = await prisma.product.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } });
-    if (!deleted.count) { res.status(404).json({ error: "Product not found" }); return; }
+    if (!deleted.count || !before) { res.status(404).json({ error: "Product not found" }); return; }
+    await logActivityAfter(req, { area: "STOCK", action: "product.delete", target: productTarget(before), summary: `Deleted product ${before.name}` });
     res.status(204).send();
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") { res.status(409).json({ error: "This product has history (purchases, stock requests, recipes or orders) and can't be deleted — deactivate it instead" }); return; }
@@ -453,6 +464,7 @@ productsRouter.post("/:id/transfer", async (req, res, next) => {
     return;
   }
   const updatedProduct = await prisma.product.findUniqueOrThrow({ where: { id: product.id }, select: productFields });
+  await logActivityAfter(req, { area: "STOCK", action: "stock.transfer", target: productTarget(product), reason: note ?? null, summary: `Moved ${quantity.toLocaleString("en-KE")} ${product.unit} of ${product.name} from ${fromLocation.name} to ${toLocation.name}` });
   res.status(201).json({ product: withTotal(updatedProduct) });
 });
 

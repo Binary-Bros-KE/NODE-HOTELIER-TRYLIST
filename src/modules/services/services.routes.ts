@@ -1,4 +1,7 @@
 import { Router } from "express";
+import { logActivityAfter, changedFields } from "../../lib/activity.js";
+
+const serviceTarget = (s: { id: string; name: string }) => ({ type: "Service", id: s.id, label: s.name });
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
@@ -141,7 +144,7 @@ servicesRouter.patch("/:id", async (req, res, next) => {
     await assertProduct(tid, data.data.productId);
     await assertRecipe(tid, data.data.recipeId);
     const { locationIds, ...fields } = data.data;
-    const existing = await prisma.service.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, productId: true, recipeId: true } });
+    const existing = await prisma.service.findFirst({ where: { id: req.params.id, tenantId: tid } });
     if (!existing) { res.status(404).json({ error: "Service not found" }); return; }
     const finalProduct = fields.productId !== undefined ? fields.productId : existing.productId;
     const finalRecipe = fields.recipeId !== undefined ? fields.recipeId : existing.recipeId;
@@ -151,6 +154,8 @@ servicesRouter.patch("/:id", async (req, res, next) => {
       data: { ...fields, ...(locationIds ? { locations: { set: locationIds.map((id) => ({ id })) } } : {}) },
       include: serviceInclude,
     });
+    const changes = changedFields(existing as unknown as Record<string, unknown>, fields as Record<string, unknown>, { name: "Name", price: "Price", cost: "Cost", productId: "Uses product", recipeId: "Uses recipe", stockQtyPerUnit: "Uses per sale", isActive: "Active", taxRate: "Tax rate", taxMode: "Tax mode", taxTreatment: "Tax treatment" });
+    if (changes.length) await logActivityAfter(req, { area: "MENU", action: "service.edit", target: serviceTarget(existing), changes, summary: `Changed service ${existing.name} (${changes.map((c) => c.label.toLowerCase()).join(", ")})` });
     res.json({ service });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "A service with this name already exists" }); return; }
@@ -165,8 +170,10 @@ servicesRouter.delete("/:id", async (req, res, next) => {
     // Checked up front: the driver adapter doesn't surface a foreign-key violation as a Prisma known error.
     const sold = await prisma.posOrderItem.count({ where: { serviceId: req.params.id, order: { tenantId: tid } } });
     if (sold > 0) { res.status(409).json({ error: "This service has been sold, so it can't be deleted. Deactivate it instead." }); return; }
+    const gone = await prisma.service.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, name: true } });
     const deleted = await prisma.service.deleteMany({ where: { id: req.params.id, tenantId: tid } });
-    if (!deleted.count) { res.status(404).json({ error: "Service not found" }); return; }
+    if (!deleted.count || !gone) { res.status(404).json({ error: "Service not found" }); return; }
+    await logActivityAfter(req, { area: "MENU", action: "service.delete", target: serviceTarget(gone), summary: `Deleted service ${gone.name}` });
     res.status(204).send();
   } catch (error) {
     next(error);
@@ -273,6 +280,7 @@ servicesRouter.patch("/:serviceId/variants/:id", async (req, res, next) => {
     if (finalRecipeId && finalProductId) { res.status(400).json({ error: "Use a product or a recipe for a variant's stock, not both" }); return; }
     const overrideRows = await checkVariantRecipe(tid, finalRecipeId, data.data.ingredientOverrides);
     const { ingredientOverrides, ...variantData } = data.data;
+    const snapshot = await prisma.serviceVariant.findUniqueOrThrow({ where: { id: current.id }, include: { service: { select: { id: true, name: true } } } });
     await prisma.$transaction(async (tx) => {
       await tx.serviceVariant.update({ where: { id: current.id }, data: variantData });
       // Overrides are replaced as a set when sent, and dropped when the variant stops using a recipe.
@@ -281,6 +289,8 @@ servicesRouter.patch("/:serviceId/variants/:id", async (req, res, next) => {
         if (finalRecipeId && overrideRows.length) await tx.serviceVariantIngredient.createMany({ data: overrideRows.map((row) => ({ ...row, variantId: current.id })) });
       }
     });
+    const changes = changedFields(snapshot as unknown as Record<string, unknown>, variantData as Record<string, unknown>, { name: "Name", price: "Price", stockProductId: "Uses product", stockQtyPerUnit: "Uses per sale", recipeId: "Uses recipe", isActive: "Active" });
+    if (changes.length) await logActivityAfter(req, { area: "MENU", action: "service_variant.edit", target: serviceTarget(snapshot.service), changes, summary: `Changed ${snapshot.service.name} (${snapshot.name}) - ${changes.map((c) => c.label.toLowerCase()).join(", ")}` });
     res.json({ variant: await prisma.serviceVariant.findUniqueOrThrow({ where: { id: current.id }, select: variantFields }) });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "This service already has a variant with that name" }); return; }
@@ -305,8 +315,10 @@ servicesRouter.delete("/:serviceId/variants/:id", async (req, res, next) => {
   try {
     const sold = await prisma.posOrderItem.count({ where: { serviceVariantId: req.params.id, order: { tenantId: tid } } });
     if (sold > 0) { res.status(409).json({ error: "This variant has been sold, so it can't be deleted. Deactivate it instead." }); return; }
+    const gone = await prisma.serviceVariant.findFirst({ where: { id: req.params.id, tenantId: tid, serviceId: req.params.serviceId }, select: { name: true, service: { select: { id: true, name: true } } } });
     const deleted = await prisma.serviceVariant.deleteMany({ where: { id: req.params.id, tenantId: tid, serviceId: req.params.serviceId } });
-    if (!deleted.count) { res.status(404).json({ error: "Variant not found" }); return; }
+    if (!deleted.count || !gone) { res.status(404).json({ error: "Variant not found" }); return; }
+    await logActivityAfter(req, { area: "MENU", action: "service_variant.delete", target: serviceTarget(gone.service), summary: `Deleted the ${gone.name} option of ${gone.service.name}` });
     res.status(204).send();
   } catch (error) { next(error); }
 });
