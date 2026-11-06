@@ -18,9 +18,10 @@ import { publicSiteRouter } from "./modules/public-site/public-site.routes.js";
 
 export function createApp(): Application {
   const app = express();
-  // nginx on this machine forwards the caller's address; trusting only the local hop makes
-  // req.ip the real device (for the activity log) without letting an outside caller forge it.
-  app.set("trust proxy", "loopback");
+  // Requests reach the app through Cloudflare and then nginx, each adding to X-Forwarded-For.
+  // Trusting those two hops makes req.ip the caller's device (for the activity log). Someone
+  // bypassing Cloudflare to call the server directly could fake it, so it's a clue, never a key.
+  app.set("trust proxy", 2);
 
   app.use(helmet());
 
