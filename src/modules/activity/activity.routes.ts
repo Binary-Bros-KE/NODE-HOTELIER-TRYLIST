@@ -84,7 +84,10 @@ const sources: Source[] = [
           id: `posCancel:${o.id}`, occurredAt: o.cancelDecidedAt!, actorId: o.cancelDecidedBy, area: "POS",
           action: voided ? "pos.order.void" : "pos.order.cancel",
           targetType: "PosOrder", targetId: o.id, targetLabel: `Order #${o.orderNumber}`,
-          summary: `${voided ? "Voided the completed sale" : "Approved cancelling"} Order #${o.orderNumber}${o.location ? ` at ${o.location.name}` : ""}`,
+          // A store rejecting the kitchen's request cancels the order by itself (dispatch.routes.ts).
+          summary: o.cancelReason?.startsWith("Rejected by store")
+            ? `Rejected the store request for Order #${o.orderNumber}${o.location ? ` at ${o.location.name}` : ""}, which cancelled it`
+            : `${voided ? "Voided the completed sale" : "Approved cancelling"} Order #${o.orderNumber}${o.location ? ` at ${o.location.name}` : ""}`,
           reason: o.cancelReason,
         });
       });
