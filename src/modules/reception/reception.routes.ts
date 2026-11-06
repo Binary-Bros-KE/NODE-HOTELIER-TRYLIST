@@ -18,6 +18,7 @@ import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 import { nairobiParts } from "../../lib/shifts.js";
 import { roomIsAvailable } from "../../lib/roomAvailability.js";
 import { notify, roomBookingConfirmed } from "../../lib/websiteNotifications.js";
+import { logActivity as writeActivity, changedFields, type ActivityChange } from "../../lib/activity.js";
 
 export const receptionRouter = Router();
 
@@ -158,19 +159,24 @@ async function taxDefaults(tid: string): Promise<TaxFallback> {
 }
 function invalid(res: { status: (code: number) => { json: (value: unknown) => unknown } }, label: string, details: unknown) { return res.status(400).json({ error: `Invalid ${label}`, details }); }
 
-type ActorContext = { locationId: string | null; performedBy: string | undefined; name: string };
+type ActorContext = { locationId: string | null; performedBy: string | undefined; name: string; ip?: string };
 
 // Best-effort "who/where" for the activity log — an employee's fixed
 // location (RECEP1 -> RECEPTION, etc.) when known, null otherwise. Never
 // blocks the action: forcing every receptionist to pick a location on every
 // click would be new friction nobody asked for, unlike POS where a sale's
 // location is load-bearing for stock/sales logic.
-async function resolveActor(tid: string, req: { userId?: string; header?: (name: string) => string | undefined }): Promise<ActorContext> {
-  if (!req.userId) return { locationId: null, performedBy: undefined, name: "System" };
+async function resolveActor(tid: string, req: { userId?: string; ip?: string; header?: (name: string) => string | undefined }): Promise<ActorContext> {
+  if (!req.userId) return { locationId: null, performedBy: undefined, name: "System", ip: req.ip };
   const employee = await prisma.employee.findFirst({ where: { id: req.userId, tenantId: tid }, select: { firstName: true, lastName: true } });
-  if (!employee) return { locationId: null, performedBy: req.userId, name: "System" };
-  return { locationId: await resolveActorLocationWithHint(tid, req.userId, req.header?.("x-location-id") || undefined), performedBy: req.userId, name: `${employee.firstName} ${employee.lastName}` };
+  if (!employee) return { locationId: null, performedBy: req.userId, name: "System", ip: req.ip };
+  return { locationId: await resolveActorLocationWithHint(tid, req.userId, req.header?.("x-location-id") || undefined), performedBy: req.userId, name: `${employee.firstName} ${employee.lastName}`, ip: req.ip };
 }
+
+// Stay actions that change someone's booking or bill also go to the Activity Log; the
+// routine desk work (booking, checking in, taking a deposit) stays in the stay's own history.
+const LOGGED_STAY_ACTIONS: ReservationActivityAction[] = ["UPDATED", "CANCELLED", "NO_SHOW", "EXTENDED", "CHARGE_REMOVED", "GUEST_REMOVED", "ROOM_TERMS_CHANGED", "ROOM_CHARGE_CHANGED", "ROOM_CHANGED", "CREDIT_PAYMENT"];
+type StayLogExtra = { reason?: string | null; changes?: ActivityChange[]; alwaysLog?: boolean };
 
 async function logActivity(
   tx: Prisma.TransactionClient,
@@ -179,11 +185,23 @@ async function logActivity(
   action: ReservationActivityAction,
   label: string,
   actor: ActorContext,
+  extra: StayLogExtra = {},
 ) {
   await tx.reservationActivity.create({
     data: { tenantId: tid, reservationId, action, summary: `${label} by ${actor.name}`, performedBy: actor.performedBy, locationId: actor.locationId },
   });
+  if (!extra.alwaysLog && !LOGGED_STAY_ACTIONS.includes(action)) return;
+  const stay = await tx.reservation.findUnique({ where: { id: reservationId }, select: { reservationNo: true, room: { select: { number: true } }, customer: { select: { firstName: true, lastName: true } } } });
+  const who = stay ? `${stay.customer.firstName} ${stay.customer.lastName ?? ""}`.trim() : null;
+  await writeActivity(tx, { tenantId: tid, userId: actor.performedBy, ip: actor.ip }, {
+    area: "STAYS", action: `stay.${action.toLowerCase()}`, target: { type: "Reservation", id: reservationId, label: stay?.reservationNo ?? null }, locationId: actor.locationId,
+    summary: `${stay?.reservationNo ?? "Stay"}${who ? ` (${who}${stay?.room ? `, room ${stay.room.number}` : ""})` : ""}: ${label}`,
+    reason: extra.reason ?? null, changes: extra.changes,
+  });
 }
+
+const STAY_FIELDS = { checkIn: "Check-in", checkOut: "Check-out", roomId: "Room", customerId: "Guest", adults: "Adults", children: "Children", mealPlan: "Meal plan", source: "Source", bookingDate: "Booking date", notes: "Notes" } as const;
+const TERMS_FIELDS = { roomSaleType: "Room sale", complimentaryReason: "Complimentary reason", discountType: "Discount type", discountValue: "Discount", discountBasis: "Discount applies to", discountReason: "Discount reason" } as const;
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 function paymentStatusFor(paid: number, total: number): "UNPAID" | "PARTIAL" | "PAID" {
@@ -567,7 +585,7 @@ receptionRouter.patch("/reservations/:id", async (req, res) => {
   const actor = await resolveActor(tid, req);
   const reservation = await prisma.$transaction(async (tx) => {
     await tx.reservation.update({ where: { id: current.id }, data: { ...data.data, updatedBy: req.userId } });
-    await logActivity(tx, tid, current.id, "UPDATED", "Reservation details updated", actor);
+    await logActivity(tx, tid, current.id, "UPDATED", "Reservation details updated", actor, { changes: changedFields(current as unknown as Record<string, unknown>, data.data as Record<string, unknown>, STAY_FIELDS) });
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation });
@@ -594,7 +612,7 @@ receptionRouter.patch("/reservations/:id/guests-count", async (req, res) => {
       await tx.folioLineItem.update({ where: { id: roomLines[0].id }, data: { quantity: charge.quantity } });
       await syncRoomAdjustment(tx, tid, current.id, req.userId);
     }
-    await logActivity(tx, tid, current.id, "UPDATED", `Guests changed to ${data.data.adults} adult(s), ${data.data.children} child(ren)`, actor);
+    await logActivity(tx, tid, current.id, "UPDATED", `Guests changed to ${data.data.adults} adult(s), ${data.data.children} child(ren)`, actor, { changes: changedFields(current as unknown as Record<string, unknown>, data.data as Record<string, unknown>, { adults: "Adults", children: "Children" }) });
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation });
@@ -691,7 +709,7 @@ receptionRouter.patch("/reservations/:id/cancel", async (req, res) => {
       data: { status: "CANCELLED", cancellationReason: data.data.cancellationReason, cancellationNotes: data.data.cancellationNotes, updatedBy: req.userId },
     });
     if (current.status === "CHECKED_IN") await freeRoom(tx, tid, current.roomId, `${current.customer.firstName} ${current.customer.lastName}`, "cancelled", current.id, { id: actor.performedBy ?? "", name: actor.name });
-    await logActivity(tx, tid, current.id, "CANCELLED", `Cancelled (${data.data.cancellationReason.replace(/_/g, " ").toLowerCase()})`, actor);
+    await logActivity(tx, tid, current.id, "CANCELLED", `Cancelled (${data.data.cancellationReason.replace(/_/g, " ").toLowerCase()})`, actor, { reason: data.data.cancellationNotes ?? null });
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation });
@@ -1014,7 +1032,7 @@ receptionRouter.patch("/reservations/:id/checkout", async (req, res) => {
     }
     await tx.reservation.update({ where: { id: current.id }, data: { status: "CHECKED_OUT", updatedBy: req.userId } });
     await freeRoom(tx, tid, current.roomId, `${current.customer.firstName} ${current.customer.lastName}`, "checked out", current.id);
-    await logActivity(tx, tid, current.id, "CHECKED_OUT", onCredit > 0.01 ? `Checked out on credit (${onCredit.toFixed(2)} owing)` : "Checked out", actor);
+    await logActivity(tx, tid, current.id, "CHECKED_OUT", onCredit > 0.01 ? `Checked out on credit (${onCredit.toFixed(2)} owing)` : "Checked out", actor, onCredit > 0.01 ? { alwaysLog: true, reason: data.data.creditReason ?? null } : {});
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation, totals: folioTotals(reservation.folio, tax) });
@@ -1125,7 +1143,7 @@ receptionRouter.delete("/reservations/:id/folio/charges/:lineItemId", async (req
     await tx.folioLineItem.delete({ where: { id: lineItem.id } });
     await syncStayInvoicesForFolio(tx, reservation.folio!.id);
     await syncRoomBilledOrderPayments(tx, reservation.folio!.id);
-    await logActivity(tx, tid, reservation.id, "CHARGE_REMOVED", `Charge removed — ${lineItem.label}`, actor);
+    await logActivity(tx, tid, reservation.id, "CHARGE_REMOVED", `Charge removed — ${lineItem.label} (KSh ${(Number(lineItem.amount) * Number(lineItem.quantity)).toLocaleString("en-KE", { maximumFractionDigits: 2 })})`, actor);
   });
   res.status(204).send();
 });
@@ -1210,7 +1228,10 @@ receptionRouter.patch("/reservations/:id/room-terms", async (req, res) => {
     await tx.reservation.update({ where: { id: current.id }, data: { ...terms, updatedBy: req.userId } });
     if (current.status === "CHECKED_IN") await syncRoomAdjustment(tx, tid, current.id, req.userId);
     const summary = terms.roomSaleType === "COMPLIMENTARY" ? "Room marked complimentary" : terms.discountType ? "Room discount applied" : "Room set to paid, no discount";
-    await logActivity(tx, tid, current.id, "ROOM_TERMS_CHANGED", summary, actor);
+    await logActivity(tx, tid, current.id, "ROOM_TERMS_CHANGED", summary, actor, {
+      reason: terms.complimentaryReason ?? terms.discountReason ?? null,
+      changes: changedFields(current as unknown as Record<string, unknown>, terms as unknown as Record<string, unknown>, TERMS_FIELDS),
+    });
     return tx.reservation.findUniqueOrThrow({ where: { id: current.id }, include: reservationInclude });
   });
   res.json({ reservation, totals: folioTotals(reservation.folio, await taxDefaults(tid)) });
@@ -1687,7 +1708,7 @@ receptionRouter.post("/groups/:id/checkout", async (req, res, next) => {
         }
         await tx.reservation.update({ where: { id: reservation.id }, data: { status: "CHECKED_OUT", updatedBy: req.userId } });
         await freeRoom(tx, tid, reservation.roomId, `${reservation.customer.firstName} ${reservation.customer.lastName}`, "checked out with the group", reservation.id);
-        await logActivity(tx, tid, reservation.id, "CHECKED_OUT", onCredit ? `Checked out with the group on credit (${credit.toFixed(2)} owing)` : "Checked out with the group", actor);
+        await logActivity(tx, tid, reservation.id, "CHECKED_OUT", onCredit ? `Checked out with the group on credit (${credit.toFixed(2)} owing)` : "Checked out with the group", actor, onCredit ? { alwaysLog: true, reason: data.data.creditReason ?? null } : {});
       }
     }, GROUP_TX);
     res.json({ group: await groupDetail(tid, group.id) });

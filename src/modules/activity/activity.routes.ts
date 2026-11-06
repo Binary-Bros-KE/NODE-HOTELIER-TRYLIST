@@ -58,7 +58,7 @@ function window(f: Filter, until?: Date): Prisma.DateTimeFilter | undefined {
 // Set a source's date here when the action it covers starts writing ActivityLog.
 const LEGACY_UNTIL: Partial<Record<string, Date>> = {};
 
-const SENSITIVE_STAY_ACTIONS: ReservationActivityAction[] = ["UPDATED", "CANCELLED", "NO_SHOW", "EXTENDED", "CHARGE_REMOVED", "GUEST_REMOVED", "ROOM_TERMS_CHANGED", "ROOM_CHARGE_CHANGED", "ROOM_CHANGED"];
+const SENSITIVE_STAY_ACTIONS: ReservationActivityAction[] = ["UPDATED", "CANCELLED", "NO_SHOW", "EXTENDED", "CHARGE_REMOVED", "GUEST_REMOVED", "ROOM_TERMS_CHANGED", "ROOM_CHARGE_CHANGED", "ROOM_CHANGED", "CREDIT_PAYMENT"];
 
 type Source = { key: string; area: ActivityArea; targetTypes?: string[]; load: (tid: string, f: Filter, take: number) => Promise<Row[]> };
 
