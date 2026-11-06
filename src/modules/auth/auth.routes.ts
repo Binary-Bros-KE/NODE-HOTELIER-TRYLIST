@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { verifySecret } from "../../lib/hash.js";
+import { logActivityAfter } from "../../lib/activity.js";
 
 export const authRouter = Router();
 
@@ -72,12 +73,18 @@ authRouter.post("/login", async (req, res, next) => {
       employee = matches[0] ?? null;
     }
     if (!employee || employee.status !== "ACTIVE" || !employee.hasSystemAccess || employee.pin == null || !verifySecret(data.data.pin, employee.pin)) {
+      // Never the PIN itself: which code was tried (if any), on whose account, from where.
+      await logActivityAfter({ tenantId: tid, ip: req.ip }, {
+        area: "AUTH", action: "auth.login_failed", ...(employee ? { target: { type: "Employee", id: employee.id, label: `${employee.firstName} ${employee.lastName}`.trim() } } : {}),
+        summary: employee ? `Failed sign-in to ${employee.firstName} ${employee.lastName}'s account${employee.status !== "ACTIVE" ? " (not active)" : ""}` : employeeCode ? `Failed sign-in with employee code ${employeeCode}` : "Failed sign-in with a PIN that matches no one",
+      });
       res.status(401).json({ error: employeeCode ? "Incorrect employee code or PIN" : "Incorrect PIN" });
       return;
     }
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
     await prisma.session.create({ data: { token, employeeId: employee.id, tenantId: tid, expiresAt } });
+    await logActivityAfter({ tenantId: tid, userId: employee.id, ip: req.ip }, { area: "AUTH", action: "auth.login", target: { type: "Employee", id: employee.id, label: `${employee.firstName} ${employee.lastName}`.trim() }, summary: "Signed in" });
     res.json({ token, expiresAt, user: publicEmployee(employee) });
   } catch (error) {
     next(error);
@@ -94,7 +101,11 @@ authRouter.get("/me", async (req, res) => {
 
 authRouter.post("/logout", async (req, res) => {
   const token = bearerToken(req);
-  if (token) await prisma.session.deleteMany({ where: { token } });
+  if (token) {
+    const session = await prisma.session.findUnique({ where: { token }, select: { tenantId: true, employeeId: true } });
+    await prisma.session.deleteMany({ where: { token } });
+    if (session) await logActivityAfter({ tenantId: session.tenantId, userId: session.employeeId, ip: req.ip }, { area: "AUTH", action: "auth.logout", target: { type: "Employee", id: session.employeeId }, summary: "Signed out" });
+  }
   res.status(204).send();
 });
 

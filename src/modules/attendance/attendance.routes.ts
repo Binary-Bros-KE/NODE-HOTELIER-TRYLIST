@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivityAfter } from "../../lib/activity.js";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { requireModule, requirePermission } from "../../middleware/tenantContext.js";
@@ -45,14 +46,16 @@ attendanceRouter.put("/mark", requirePermission("ATTENDANCE_MANAGE"), async (req
   const tid = tenantId(req);
   const data = markSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid attendance entry", details: data.error.flatten() }); return; }
-  const employee = await prisma.employee.findFirst({ where: { id: data.data.employeeId, tenantId: tid }, select: { id: true } });
+  const employee = await prisma.employee.findFirst({ where: { id: data.data.employeeId, tenantId: tid }, select: { id: true, firstName: true, lastName: true } });
   if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
   try {
+    const before = await prisma.attendanceRecord.findUnique({ where: { employeeId_date: { employeeId: data.data.employeeId, date: data.data.date } }, select: { status: true } });
     const record = await prisma.attendanceRecord.upsert({
       where: { employeeId_date: { employeeId: data.data.employeeId, date: data.data.date } },
       create: { tenantId: tid, employeeId: data.data.employeeId, date: data.data.date, status: data.data.status, notes: data.data.notes, markedBy: req.userId ?? null },
       update: { status: data.data.status, notes: data.data.notes, markedBy: req.userId ?? null },
     });
+    if (before && before.status !== data.data.status) await logActivityAfter(req, { area: "SHIFTS", action: "attendance.change", target: { type: "Employee", id: employee.id, label: `${employee.firstName} ${employee.lastName}`.trim() }, reason: data.data.notes ?? null, changes: [{ field: "status", label: "Attendance", from: before.status, to: data.data.status }], summary: `Changed ${employee.firstName} ${employee.lastName}'s attendance for ${data.data.date.toISOString().slice(0, 10)}` });
     res.json({ record });
   } catch (error) {
     next(error);
@@ -63,6 +66,8 @@ attendanceRouter.delete("/:employeeId/:date", requirePermission("ATTENDANCE_MANA
   const tid = tenantId(req);
   const date = z.coerce.date().safeParse(req.params.date);
   if (!date.success) { res.status(400).json({ error: "Invalid date" }); return; }
+  const removed = await prisma.attendanceRecord.findFirst({ where: { tenantId: tid, employeeId: req.params.employeeId as string, date: date.data }, select: { status: true, employee: { select: { id: true, firstName: true, lastName: true } } } });
   await prisma.attendanceRecord.deleteMany({ where: { tenantId: tid, employeeId: req.params.employeeId as string, date: date.data } });
+  if (removed) await logActivityAfter(req, { area: "SHIFTS", action: "attendance.remove", target: { type: "Employee", id: removed.employee.id, label: `${removed.employee.firstName} ${removed.employee.lastName}`.trim() }, summary: `Removed ${removed.employee.firstName} ${removed.employee.lastName}'s attendance (${removed.status.toLowerCase()}) for ${date.data.toISOString().slice(0, 10)}` });
   res.status(204).send();
 });

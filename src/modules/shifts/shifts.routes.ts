@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivityAfter } from "../../lib/activity.js";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
@@ -689,6 +690,7 @@ shiftsRouter.post("/:id/force-end", async (req, res, next) => {
       });
       return row;
     });
+    await logActivityAfter(req, { area: "SHIFTS", action: "shift.force_end", target: { type: "ShiftSession", id: session.id, label: `${session.employee.firstName} ${session.employee.lastName}`.trim() }, reason: data.data.note ?? null, summary: `Ended ${session.employee.firstName} ${session.employee.lastName}'s shift for them` });
     res.json({ session: updated, summary: await shiftSummary(tid, session.employeeId, session.approvedStartAt, now) });
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
@@ -741,6 +743,11 @@ shiftsRouter.patch("/:id/review", requirePermission("SHIFT_REVIEW"), async (req,
         });
       }
       return row;
+    });
+    const discrepancy = data.data.cashVariance;
+    await logActivityAfter(req, {
+      area: "SHIFTS", action: "shift.review", target: { type: "ShiftSession", id: session.id, label: `${session.employee.firstName} ${session.employee.lastName}`.trim() }, reason: data.data.reason,
+      summary: `Re-reviewed ${session.employee.firstName} ${session.employee.lastName}'s shift: now ${cleared ? "cleared" : "rejected"}${discrepancy ? `, discrepancy KSh ${Number(discrepancy).toLocaleString("en-KE")}` : ""}`,
     });
     res.json({ session: updated });
   } catch (error) {

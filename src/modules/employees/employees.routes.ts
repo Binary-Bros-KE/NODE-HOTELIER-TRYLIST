@@ -5,6 +5,9 @@ import { prisma } from "../../lib/prisma.js";
 import { hashSecret, verifySecret } from "../../lib/hash.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { partialNoDefaults } from "../../lib/zod.js";
+import { logActivityAfter, changedFields, fieldLabels } from "../../lib/activity.js";
+
+const staffTarget = (e: { id: string; firstName: string; lastName: string }) => ({ type: "Employee", id: e.id, label: `${e.firstName} ${e.lastName}`.trim() });
 
 export const employeesRouter = Router();
 employeesRouter.use(requireModule("HR"));
@@ -230,6 +233,7 @@ employeesRouter.post("/", async (req, res, next) => {
       },
       select: publicFields,
     });
+    await logActivityAfter(req, { area: "PEOPLE", action: "employee.create", target: staffTarget({ id: employee.id, firstName: employeeData.firstName, lastName: employeeData.lastName }), summary: `Added employee ${employeeData.firstName} ${employeeData.lastName}${hasSystemAccess ? " who can sign in" : ""}` });
     res.status(201).json({ employee });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "An employee with this code already exists" }); return; }
@@ -250,7 +254,7 @@ employeesRouter.patch("/:id", async (req, res, next) => {
     if (pin) await assertPinUnique(pin, tenantId(req), req.params.id);
     const existing = await prisma.employee.findFirst({
       where: { id: req.params.id, tenantId: tenantId(req) },
-      select: { id: true, defaultLocationId: true, hasSystemAccess: true, pin: true, roleId: true, worksAnywhere: true, locations: { select: { id: true } } },
+      include: { locations: { select: { id: true, name: true } } },
     });
     if (!existing) { res.status(404).json({ error: "Employee not found" }); return; }
     const nextAccess = hasSystemAccess ?? existing.hasSystemAccess;
@@ -282,6 +286,17 @@ employeesRouter.patch("/:id", async (req, res, next) => {
       },
     });
     if (!nextAccess) await prisma.session.deleteMany({ where: { employeeId: existing.id } });
+    // Who changed whose access, role, pay or PIN is the thing to be able to answer later.
+    const changes = changedFields(existing as unknown as Record<string, unknown>, { ...employeeData, ...(roleId !== undefined ? { roleId } : {}), ...(supervisorId !== undefined ? { supervisorId } : {}), ...(hasSystemAccess !== undefined ? { hasSystemAccess } : {}) } as Record<string, unknown>, {
+      ...fieldLabels(Object.keys(employeeData).filter((k) => !["notes", "address", "photoUrl"].includes(k))), roleId: "Role", supervisorId: "Supervisor", hasSystemAccess: "Can sign in",
+    });
+    if (locationIds !== undefined) {
+      const was = existing.locations.map((l) => l.name).sort().join(", ");
+      const now = (await prisma.location.findMany({ where: { id: { in: locationIds } }, select: { name: true } })).map((l) => l.name).sort().join(", ");
+      if (was !== now) changes.push({ field: "locations", label: "Locations", from: was || "none", to: now || "none" });
+    }
+    if (pin) changes.push({ field: "pin", label: "PIN", from: "(hidden)", to: "(reset)" });
+    if (changes.length) await logActivityAfter(req, { area: "PEOPLE", action: "employee.edit", target: staffTarget(existing), changes, summary: `Changed employee ${existing.firstName} ${existing.lastName} (${changes.map((c) => c.label.toLowerCase()).join(", ")})` });
     res.json({ employee: await prisma.employee.findUniqueOrThrow({ where: { id: req.params.id }, select: publicFields }) });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "An employee with this code already exists" }); return; }
@@ -291,7 +306,9 @@ employeesRouter.patch("/:id", async (req, res, next) => {
 });
 
 employeesRouter.delete("/:id", async (req, res) => {
+  const gone = await prisma.employee.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, firstName: true, lastName: true } });
   const deleted = await prisma.employee.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } });
-  if (!deleted.count) { res.status(404).json({ error: "Employee not found" }); return; }
+  if (!deleted.count || !gone) { res.status(404).json({ error: "Employee not found" }); return; }
+  await logActivityAfter(req, { area: "PEOPLE", action: "employee.delete", target: staffTarget(gone), summary: `Deleted employee ${gone.firstName} ${gone.lastName}` });
   res.status(204).send();
 });

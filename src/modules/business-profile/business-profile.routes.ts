@@ -5,6 +5,7 @@ import multer from "multer";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { requireAdmin } from "../../middleware/tenantContext.js";
+import { logActivityAfter, changedFields, fieldLabels } from "../../lib/activity.js";
 import { logoUpload } from "./logoUpload.js";
 
 // Core tenant/business identity — available regardless of which operational
@@ -164,11 +165,14 @@ businessProfileRouter.put("/", async (req, res, next) => {
   const data = profileSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid business profile", details: data.error.flatten() }); return; }
   try {
+    const before = await prisma.businessProfile.findUnique({ where: { tenantId: tenantId(req) } });
     const profile = await prisma.businessProfile.upsert({
       where: { tenantId: tenantId(req) },
       create: { tenantId: tenantId(req), ...data.data },
       update: data.data,
     });
+    const changes = before ? changedFields(before as unknown as Record<string, unknown>, data.data as Record<string, unknown>, fieldLabels(Object.keys(data.data))) : [];
+    if (!before || changes.length) await logActivityAfter(req, { area: "SETTINGS", action: "business.edit", target: { type: "BusinessProfile", id: profile.id, label: "Business information" }, changes, summary: before ? `Changed business information (${changes.map((c) => c.label.toLowerCase()).join(", ")})` : "Set up business information" });
     res.json({ profile });
   } catch (error) {
     next(error);

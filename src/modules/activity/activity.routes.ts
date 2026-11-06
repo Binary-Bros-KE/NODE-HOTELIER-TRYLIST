@@ -238,7 +238,7 @@ const sources: Source[] = [
       });
       return reviewed.map((s) => row({
         id: `shiftReview:${s.id}`, occurredAt: s.reviewedAt!, actorId: s.reviewedBy, area: "SHIFTS", action: "shift.review",
-        targetType: null, targetId: null, targetLabel: fullName(s.employee),
+        targetType: "ShiftSession", targetId: s.id, targetLabel: fullName(s.employee),
         summary: `Re-reviewed the shift of ${fullName(s.employee)} (now ${s.status.toLowerCase().replaceAll("_", " ")})`, reason: s.reviewReason,
       }));
     },
@@ -299,7 +299,7 @@ export async function activityFeed(tid: string, q: z.infer<typeof listQuery>) {
   const byId = new Map(people.map((p) => [p.id, p]));
   const entries = pageRows.map((r) => {
     const person = r.actorId ? byId.get(r.actorId) : undefined;
-    return { ...r, actorName: r.actorName ?? fullName(person) ?? (r.actorId ? "Removed employee" : "System"), actorRole: r.actorRole ?? person?.role?.name ?? null };
+    return { ...r, actorName: r.actorName ?? fullName(person) ?? (r.actorId ? "Removed employee" : r.action === "auth.login_failed" ? "Not signed in" : "System"), actorRole: r.actorRole ?? person?.role?.name ?? null };
   });
   return { entries, page: q.page, pageSize: q.pageSize, hasMore: merged.length > q.page * q.pageSize };
 }

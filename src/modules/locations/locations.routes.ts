@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { logActivityAfter, changedFields } from "../../lib/activity.js";
+import { logActivityAfter, changedFields, fieldLabels } from "../../lib/activity.js";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
@@ -130,6 +130,7 @@ locationsRouter.post("/", async (req, res, next) => {
     await assertManagerInTenant(data.data.managerId, tid);
     await assertSupplyingStore(data.data.dispatchFromLocationId, tid);
     const location = await prisma.location.create({ data: { tenantId: tid, ...data.data }, select: locationFields });
+    await logActivityAfter(req, { area: "SETTINGS", action: "location.create", target: { type: "Location", id: location.id, label: location.name }, locationId: location.id, summary: `Added location ${location.name}` });
     res.status(201).json({ location });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "A location with this name already exists" }); return; }
@@ -145,9 +146,12 @@ locationsRouter.patch("/:id", async (req, res, next) => {
   try {
     if (data.data.managerId !== undefined) await assertManagerInTenant(data.data.managerId, tid);
     await assertSupplyingStore(data.data.dispatchFromLocationId, tid, req.params.id);
+    const before = await prisma.location.findFirst({ where: { id: req.params.id, tenantId: tid } });
     const updated = await prisma.location.updateMany({ where: { id: req.params.id, tenantId: tid }, data: data.data });
-    if (!updated.count) { res.status(404).json({ error: "Location not found" }); return; }
+    if (!updated.count || !before) { res.status(404).json({ error: "Location not found" }); return; }
     const location = await prisma.location.findUniqueOrThrow({ where: { id: req.params.id }, select: locationFields });
+    const changes = changedFields(before as unknown as Record<string, unknown>, data.data as Record<string, unknown>, fieldLabels(Object.keys(data.data)));
+    if (changes.length) await logActivityAfter(req, { area: "SETTINGS", action: "location.edit", target: { type: "Location", id: before.id, label: before.name }, locationId: before.id, changes, summary: `Changed location ${before.name} (${changes.map((c) => c.label.toLowerCase()).join(", ")})` });
     res.json({ location });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "A location with this name already exists" }); return; }
@@ -160,7 +164,7 @@ locationsRouter.delete("/:id", async (req, res) => {
   const tid = tenantId(req);
   const existing = await prisma.location.findFirst({
     where: { id: req.params.id, tenantId: tid },
-    select: { id: true, _count: { select: { employees: true, productStocks: true, inventoryMovements: true } } },
+    select: { id: true, name: true, _count: { select: { employees: true, productStocks: true, inventoryMovements: true } } },
   });
   if (!existing) { res.status(404).json({ error: "Location not found" }); return; }
   if (existing._count.employees > 0) { res.status(409).json({ error: "Reassign or unassign its employees first" }); return; }
@@ -175,6 +179,7 @@ locationsRouter.delete("/:id", async (req, res) => {
   // (SetNull) — an item with no locations is unallocated (sellable
   // everywhere), and historical orders keep their own record regardless.
   await prisma.location.delete({ where: { id: existing.id } });
+  await logActivityAfter(req, { area: "SETTINGS", action: "location.delete", target: { type: "Location", id: existing.id, label: (existing as { name?: string }).name ?? null }, summary: `Deleted location ${(existing as { name?: string }).name ?? ""}`.trim() });
   res.status(204).send();
 });
 

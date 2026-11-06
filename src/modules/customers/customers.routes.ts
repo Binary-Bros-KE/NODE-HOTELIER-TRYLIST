@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivityAfter } from "../../lib/activity.js";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
@@ -198,8 +199,10 @@ customersRouter.patch("/:id", async (req, res, next) => {
 customersRouter.delete("/:id", async (req, res, next) => {
   const tid = tenantId(req);
   try {
+    const gone = await prisma.customer.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, firstName: true, lastName: true, phone: true, balance: true } });
     const deleted = await prisma.customer.deleteMany({ where: { id: req.params.id, tenantId: tid } });
-    if (!deleted.count) { res.status(404).json({ error: "Customer not found" }); return; }
+    if (!deleted.count || !gone) { res.status(404).json({ error: "Customer not found" }); return; }
+    await logActivityAfter(req, { area: "PEOPLE", action: "customer.delete", target: { type: "Customer", id: gone.id, label: `${gone.firstName} ${gone.lastName ?? ""}`.trim() }, summary: `Deleted customer ${gone.firstName} ${gone.lastName ?? ""}${gone.phone ? ` (${gone.phone})` : ""}${Number(gone.balance) ? `, who owed KSh ${Number(gone.balance).toLocaleString("en-KE")}` : ""}`.replace(/\s+/g, " ") });
     res.status(204).send();
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") { res.status(409).json({ error: "This customer has reservations on file and can't be deleted" }); return; }

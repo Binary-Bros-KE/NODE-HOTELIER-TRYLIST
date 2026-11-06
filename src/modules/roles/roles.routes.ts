@@ -3,6 +3,16 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { partialNoDefaults } from "../../lib/zod.js";
+import { logActivityAfter } from "../../lib/activity.js";
+
+/** A permission or section list change as what was added and taken away. */
+function listChange(field: string, label: string, before: string[], after: string[] | undefined) {
+  if (!after) return [];
+  const added = after.filter((x) => !before.includes(x));
+  const removed = before.filter((x) => !after.includes(x));
+  if (!added.length && !removed.length) return [];
+  return [{ field, label, from: removed.length ? `removed ${removed.join(", ")}` : "-", to: added.length ? `added ${added.join(", ")}` : "-" }];
+}
 
 export const rolesRouter = Router();
 
@@ -68,6 +78,7 @@ rolesRouter.post("/", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid role", details: data.error.flatten() }); return; }
   try {
     const role = await prisma.role.create({ data: { tenantId: tenantId(req), ...data.data }, select: publicFields });
+    await logActivityAfter(req, { area: "PEOPLE", action: "role.create", target: { type: "Role", id: role.id, label: role.name }, summary: `Created role ${role.name}${data.data.permissions?.length ? ` with ${data.data.permissions.join(", ")}` : ""}` });
     res.status(201).json({ role: serialize(role) });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "A role with this name already exists" }); return; }
@@ -90,6 +101,12 @@ rolesRouter.patch("/:id", async (req, res, next) => {
       return;
     }
     const role = await prisma.role.update({ where: { id: existing.id }, data: data.data, select: publicFields });
+    const changes = [
+      ...(data.data.name !== undefined && data.data.name !== existing.name ? [{ field: "name", label: "Name", from: existing.name, to: data.data.name }] : []),
+      ...listChange("permissions", "Capabilities", existing.permissions, data.data.permissions),
+      ...listChange("allowedSections", "Sections", existing.allowedSections, data.data.allowedSections),
+    ];
+    if (changes.length) await logActivityAfter(req, { area: "PEOPLE", action: "role.edit", target: { type: "Role", id: existing.id, label: existing.name }, changes, summary: `Changed role ${existing.name} (${changes.map((c) => c.label.toLowerCase()).join(", ")})` });
     res.json({ role: serialize(role) });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "A role with this name already exists" }); return; }
@@ -102,5 +119,6 @@ rolesRouter.delete("/:id", async (req, res) => {
   if (!role) { res.status(404).json({ error: "Role not found" }); return; }
   if (role.isSystemRole) { res.status(400).json({ error: "System roles cannot be deleted" }); return; }
   await prisma.role.delete({ where: { id: role.id } });
+  await logActivityAfter(req, { area: "PEOPLE", action: "role.delete", target: { type: "Role", id: role.id, label: role.name }, summary: `Deleted role ${role.name}` });
   res.status(204).send();
 });

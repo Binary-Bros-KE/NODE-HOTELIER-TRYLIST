@@ -32,6 +32,10 @@ const NAMED_FIELDS: Record<string, (db: Db, tenantId: string, ids: string[]) => 
   customerId: (db, tenantId, ids) => db.customer.findMany({ where: { tenantId, id: { in: ids } }, select: { id: true, firstName: true, lastName: true } }).then((rows) => rows.map((r) => ({ id: r.id, label: `${r.firstName} ${r.lastName ?? ""}`.trim() }))),
 };
 NAMED_FIELDS.stockProductId = NAMED_FIELDS.productId;
+NAMED_FIELDS.roleId = (db, tenantId, ids) => db.role.findMany({ where: { tenantId, id: { in: ids } }, select: { id: true, name: true } }).then((rows) => rows.map((r) => ({ id: r.id, label: r.name })));
+NAMED_FIELDS.departmentId = (db, tenantId, ids) => db.department.findMany({ where: { tenantId, id: { in: ids } }, select: { id: true, name: true } }).then((rows) => rows.map((r) => ({ id: r.id, label: r.name })));
+NAMED_FIELDS.dispatchFromLocationId = NAMED_FIELDS.locationId;
+NAMED_FIELDS.defaultLocationId = NAMED_FIELDS.locationId;
 NAMED_FIELDS.expenseCategoryId = (db, tenantId, ids) => db.expenseCategory.findMany({ where: { tenantId, id: { in: ids } }, select: { id: true, name: true } }).then((rows) => rows.map((r) => ({ id: r.id, label: r.name })));
 
 async function readableChanges(db: Db, tenantId: string, changes: ActivityChange[]) {
@@ -79,6 +83,11 @@ export async function logActivityAfter(req: { tenantId?: string; userId?: string
 }
 
 const comparable = (value: unknown) => (value instanceof Date ? value.toISOString() : value != null && typeof value === "object" && "toFixed" in value ? Number(value) : value ?? null);
+
+/** Labels for a settings form's fields as people read them: "requireStoreDispatch" -> "Require store dispatch". */
+export function fieldLabels(keys: string[]): Record<string, string> {
+  return Object.fromEntries(keys.map((key) => [key, key.replace(/Id$/, "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().replace(/^./, (c) => c.toUpperCase())]));
+}
 
 /** The fields that actually changed between two versions of a record, for an edit's entry. */
 export function changedFields<T extends Record<string, unknown>>(before: T, after: Partial<T>, labels: Partial<Record<keyof T & string, string>>): ActivityChange[] {

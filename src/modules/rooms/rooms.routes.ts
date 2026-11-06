@@ -1,5 +1,6 @@
 import { HousekeepingError, loadActor } from "../../lib/housekeeping.js";
 import { Router } from "express";
+import { logActivityAfter, changedFields, fieldLabels } from "../../lib/activity.js";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
@@ -161,7 +162,7 @@ roomsRouter.patch("/types/:id", async (req, res, next) => {
   if (!parsed.success) { res.status(400).json({ error: "Invalid room type", details: parsed.error.flatten() }); return; }
   const tid = tenantId(req);
   const { rates, baseRate, priceUnitId, ...data } = parsed.data;
-  const existing = await prisma.roomType.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { _count: { select: { rates: true } } } });
+  const existing = await prisma.roomType.findFirst({ where: { id: req.params.id, tenantId: tid }, include: { _count: { select: { rates: true } }, rates: { select: { name: true, price: true } } } });
   if (!existing) { res.status(404).json({ error: "Room type not found" }); return; }
   try {
     const willHaveRates = rates !== undefined ? rates.length > 0 : existing._count.rates > 0;
@@ -190,6 +191,13 @@ roomsRouter.patch("/types/:id", async (req, res, next) => {
       }
       return tx.roomType.findUniqueOrThrow({ where: { id: existing.id }, select: roomTypeFields });
     });
+    // Room prices are what a guest pays: show every rate before and after.
+    const rateList = (list: { name: string; price: unknown }[]) => list.map((r) => `${r.name} ${Number(r.price).toLocaleString("en-KE")}`).sort().join(", ");
+    const changes = [
+      ...changedFields(existing as unknown as Record<string, unknown>, { ...data, ...(baseRate !== undefined ? { baseRate } : {}) } as Record<string, unknown>, fieldLabels([...Object.keys(data), "baseRate"])),
+      ...(rates !== undefined && rateList(existing.rates) !== rateList(rates) ? [{ field: "rates", label: "Rates", from: rateList(existing.rates) || "none", to: rateList(rates) || "none" }] : []),
+    ];
+    if (changes.length) await logActivityAfter(req, { area: "SETTINGS", action: "room_type.edit", target: { type: "RoomType", id: existing.id, label: existing.name }, changes, summary: `Changed room type ${existing.name} (${changes.map((c) => c.label.toLowerCase()).join(", ")})` });
     res.json({ type });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "This room type already exists" }); return; }
@@ -205,6 +213,7 @@ roomsRouter.delete("/types/:id", async (req, res) => {
   const used = await prisma.room.count({ where: { tenantId: tid, roomTypeId: existing.id } });
   if (used) { res.status(409).json({ error: "This room type is assigned to rooms; deactivate it instead" }); return; }
   await prisma.roomType.delete({ where: { id: existing.id } });
+  await logActivityAfter(req, { area: "SETTINGS", action: "room_type.delete", target: { type: "RoomType", id: existing.id, label: existing.name }, summary: `Deleted room type ${existing.name}` });
   res.status(204).send();
 });
 
@@ -302,6 +311,6 @@ roomsRouter.patch("/rooms/:id", async (req, res, next) => {
 });
 
 roomsRouter.delete("/rooms/:id", async (req, res, next) => {
-  try { const deleted = await prisma.room.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } }); if (!deleted.count) { res.status(404).json({ error: "Room not found" }); return; } res.status(204).send(); }
+  try { const gone = await prisma.room.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, number: true } }); const deleted = await prisma.room.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } }); if (deleted.count && gone) await logActivityAfter(req, { area: "SETTINGS", action: "room.delete", target: { type: "Room", id: gone.id, label: `Room ${gone.number}` }, summary: `Deleted room ${gone.number}` }); if (!deleted.count) { res.status(404).json({ error: "Room not found" }); return; } res.status(204).send(); }
   catch (error) { if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") { res.status(409).json({ error: "Rooms with reservation history cannot be deleted; mark it out of service instead" }); return; } next(error); }
 });

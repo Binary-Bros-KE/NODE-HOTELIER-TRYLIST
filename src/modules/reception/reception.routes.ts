@@ -296,7 +296,13 @@ async function withCreditOutstanding<T extends { folio: { id: string; creditAmou
 receptionRouter.get("/customers", async (req, res) => res.json({ customers: await prisma.customer.findMany({ where: { tenantId: tenantId(req) }, orderBy: [{ lastName: "asc" }, { firstName: "asc" }] }) }));
 receptionRouter.post("/customers", async (req, res) => { const data = customerSchema.safeParse(req.body); if (!data.success) { invalid(res, "customer", data.error.flatten()); return; } const tid = tenantId(req); const customerNo = await nextCustomerNo(tid); const actor = await resolveActor(tid, req); res.status(201).json({ customer: await prisma.customer.create({ data: { tenantId: tid, customerNo, createdBy: actor.performedBy, locationId: actor.locationId, ...data.data } }) }); });
 receptionRouter.patch("/customers/:id", async (req, res) => { const data = partialNoDefaults(customerSchema).safeParse(req.body); if (!data.success) { invalid(res, "customer", data.error.flatten()); return; } const customer = await prisma.customer.updateMany({ where: { id: req.params.id, tenantId: tenantId(req) }, data: { ...data.data, updatedBy: req.userId } }); if (!customer.count) { res.status(404).json({ error: "Customer not found" }); return; } res.json({ customer: await prisma.customer.findUniqueOrThrow({ where: { id: req.params.id } }) }); });
-receptionRouter.delete("/customers/:id", async (req, res) => { const customer = await prisma.customer.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } }); if (!customer.count) { res.status(404).json({ error: "Customer not found" }); return; } res.status(204).send(); });
+receptionRouter.delete("/customers/:id", async (req, res) => {
+  const gone = await prisma.customer.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, firstName: true, lastName: true, phone: true } });
+  const customer = await prisma.customer.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } });
+  if (!customer.count || !gone) { res.status(404).json({ error: "Customer not found" }); return; }
+  await writeActivity(prisma, req, { area: "PEOPLE", action: "customer.delete", target: { type: "Customer", id: gone.id, label: `${gone.firstName} ${gone.lastName ?? ""}`.trim() }, summary: `Deleted customer ${gone.firstName} ${gone.lastName ?? ""}${gone.phone ? ` (${gone.phone})` : ""}`.replace(/\s+/g, " ") }).catch(() => {});
+  res.status(204).send();
+});
 
 // Full Room/RoomType CRUD lives in rooms.routes.ts (mounted at /rooms) — this
 // is read-only, kept here only for the reservation form's room picker.
