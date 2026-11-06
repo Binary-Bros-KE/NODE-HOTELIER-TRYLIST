@@ -6,6 +6,13 @@ import { nextPayslipNo, nextTransactionNo } from "../../lib/sequence.js";
 import { nairobiParts } from "../../lib/shifts.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
 import { assertPaymentReferenceUnused, normalizePaymentReference } from "../../lib/paymentReferences.js";
+import { logActivityAfter } from "../../lib/activity.js";
+
+const kes = (n: unknown) => `KSh ${Number(n).toLocaleString("en-KE", { maximumFractionDigits: 2 })}`;
+type LoggedSalary = { id: string; payslipNo: string | null; payPeriod: Date; netPay: unknown; employee: { firstName: string; lastName: string | null } };
+/** "Jane Doe's November 2026 salary (KSh 25,000 net)" */
+const salaryLine = (s: LoggedSalary) => `${`${s.employee.firstName} ${s.employee.lastName ?? ""}`.trim()}'s ${MONTH_NAMES[s.payPeriod.getUTCMonth()]} ${s.payPeriod.getUTCFullYear()} salary (${kes(s.netPay)} net)`;
+const salaryTarget = (s: LoggedSalary) => ({ type: "EmployeeSalary", id: s.id, label: s.payslipNo ?? `${s.employee.firstName} ${s.employee.lastName ?? ""}`.trim() });
 
 export const employeeSalariesRouter = Router();
 
@@ -445,6 +452,7 @@ employeeSalariesRouter.post("/advance", async (req, res, next) => {
       });
       return recalculateSalary(tx, draft.id);
     });
+    await logActivityAfter(req, { area: "PAYROLL", action: "salary.advance", target: salaryTarget(salary), summary: `Added ${[...data.data.allowances.map((i) => `allowance "${i.label}" ${kes(i.amount)}`), ...data.data.deductions.map((i) => `deduction "${i.label}" ${kes(i.amount)}`)].join(", ")} to ${salaryLine(salary)}` });
     res.status(201).json({ salary });
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
@@ -500,6 +508,7 @@ employeeSalariesRouter.post("/process", async (req, res, next) => {
       await createSalaryPayment(tx, tid, draft.id, transactionNo, req.userId);
       return tx.employeeSalary.findUniqueOrThrow({ where: { id: draft.id }, include: salaryInclude });
     });
+    await logActivityAfter(req, { area: "PAYROLL", action: data.data.complete ? "salary.pay" : "salary.draft", target: salaryTarget(salary), summary: data.data.complete ? `Paid ${salaryLine(salary)}` : `Saved the draft of ${salaryLine(salary)}` });
     res.status(201).json({ salary });
   } catch (error) {
     if (sendSalaryError(res, error)) return;
@@ -519,6 +528,7 @@ employeeSalariesRouter.post("/:id/items", async (req, res, next) => {
       await tx.employeeSalaryItem.create({ data: { salaryId: existing.id, type: data.data.type, label: data.data.label, amount: toMoney(data.data.amount) } });
       return recalculateSalary(tx, existing.id);
     });
+    await logActivityAfter(req, { area: "PAYROLL", action: "salary.item_add", target: salaryTarget(salary), summary: `Added ${data.data.type.toLowerCase()} "${data.data.label}" ${kes(data.data.amount)} to ${salaryLine(salary)}` });
     res.status(201).json({ salary });
   } catch (error) { next(error); }
 });
@@ -529,10 +539,12 @@ employeeSalariesRouter.delete("/:id/items/:itemId", async (req, res, next) => {
     const existing = await prisma.employeeSalary.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, status: true } });
     if (!existing) { res.status(404).json({ error: "Salary record not found" }); return; }
     if (existing.status !== "DRAFT") { res.status(409).json({ error: "Only draft salaries can be changed" }); return; }
+    const removed = await prisma.employeeSalaryItem.findFirst({ where: { id: req.params.itemId, salaryId: existing.id }, select: { type: true, label: true, amount: true } });
     const salary = await prisma.$transaction(async (tx) => {
       await tx.employeeSalaryItem.deleteMany({ where: { id: req.params.itemId, salaryId: existing.id } });
       return recalculateSalary(tx, existing.id);
     });
+    if (removed) await logActivityAfter(req, { area: "PAYROLL", action: "salary.item_remove", target: salaryTarget(salary), summary: `Removed ${removed.type.toLowerCase()} "${removed.label}" ${kes(removed.amount)} from ${salaryLine(salary)}` });
     res.json({ salary });
   } catch (error) { next(error); }
 });
@@ -552,6 +564,7 @@ employeeSalariesRouter.post("/:id/complete", async (req, res, next) => {
       await createSalaryPayment(tx, tid, existing.id, transactionNo, req.userId);
       return tx.employeeSalary.findUniqueOrThrow({ where: { id: existing.id }, include: salaryInclude });
     });
+    await logActivityAfter(req, { area: "PAYROLL", action: "salary.pay", target: salaryTarget(salary), summary: `Paid ${salaryLine(salary)}` });
     res.json({ salary });
   } catch (error) {
     if (sendSalaryError(res, error)) return;
@@ -584,6 +597,7 @@ employeeSalariesRouter.post("/:id/void", async (req, res, next) => {
       await tx.transaction.updateMany({ where: { tenantId: tid, source: "SALARY_PAYMENT", sourceRefId: existing.id }, data: { status: "VOIDED" } });
       return tx.employeeSalary.findUniqueOrThrow({ where: { id: existing.id }, include: salaryInclude });
     });
+    await logActivityAfter(req, { area: "PAYROLL", action: "salary.void", target: salaryTarget(salary), reason: data.data.reason, summary: `Voided ${salaryLine(salary)}` });
     res.json({ salary });
   } catch (error) {
     if (sendSalaryError(res, error)) return;
@@ -604,6 +618,7 @@ employeeSalariesRouter.post("/:id/unvoid", async (req, res, next) => {
       if (back === "COMPLETE") await tx.transaction.updateMany({ where: { tenantId: tid, source: "SALARY_PAYMENT", sourceRefId: row.id }, data: { status: "COMPLETE" } });
       return tx.employeeSalary.findUniqueOrThrow({ where: { id: row.id }, include: salaryInclude });
     });
+    await logActivityAfter(req, { area: "PAYROLL", action: "salary.unvoid", target: salaryTarget(salary), summary: `Restored the voided ${salaryLine(salary)} as ${salary.status === "COMPLETE" ? "paid" : "a draft"}` });
     res.json({ salary });
   } catch (error) {
     if (sendSalaryError(res, error)) return;
@@ -630,6 +645,7 @@ employeeSalariesRouter.patch("/:id/period", async (req, res, next) => {
       await tx.employeeSalary.update({ where: { id: row.id }, data: { payPeriod: target } });
       return tx.employeeSalary.findUniqueOrThrow({ where: { id: row.id }, include: salaryInclude });
     });
+    await logActivityAfter(req, { area: "PAYROLL", action: "salary.move_month", target: salaryTarget(salary), summary: `Moved a payslip to ${salaryLine(salary)}` });
     res.json({ salary });
   } catch (error) {
     if (sendSalaryError(res, error)) return;
@@ -680,6 +696,7 @@ employeeSalariesRouter.post("/from-shift", requirePermission("SALARY_MANAGE"), a
       await tx.employeeSalaryItem.create({ data: { salaryId: draft.id, type: data.data.type, label, amount: toMoney(data.data.amount), shiftSessionId: shift.id } });
       return recalculateSalary(tx, draft.id);
     });
+    await logActivityAfter(req, { area: "PAYROLL", action: "salary.from_shift", target: salaryTarget(salary), summary: `${existing ? "Changed" : "Added"} ${data.data.type.toLowerCase()} "${label}" ${kes(data.data.amount)} on ${salaryLine(salary)} from a shift` });
     res.status(existing ? 200 : 201).json({ salary });
   } catch (error) {
     if (sendSalaryError(res, error)) return;

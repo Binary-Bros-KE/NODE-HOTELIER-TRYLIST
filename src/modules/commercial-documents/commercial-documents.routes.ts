@@ -8,6 +8,7 @@ import { resolveEffectiveLocation } from "../../lib/location.js";
 import { nextCommercialDocumentPaymentNo, nextCustomerNo, nextInvoiceNo, nextQuotationNo, nextTransactionNo } from "../../lib/sequence.js";
 import { isSuperAdminUser, orderInclude, taxSettingsFor, withFinancials } from "../pos/pos.routes.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
+import { logActivity } from "../../lib/activity.js";
 
 const docTypes = ["QUOTATION", "INVOICE"] as const;
 const docStatuses = ["DRAFT", "SENT", "ACCEPTED", "REJECTED", "EXPIRED", "CANCELLED", "CONVERTED", "ISSUED", "PARTIALLY_PAID", "PAID", "OVERDUE", "VOID"] as const;
@@ -1191,6 +1192,11 @@ commercialDocumentsRouter.post("/:id/cancel", async (req, res) => {
         cancelReason: parsed.data.reason,
         updatedBy: req.userId,
       },
+    });
+    const kind = doc.type === "INVOICE" ? "invoice" : "quotation";
+    await logActivity(tx, req, {
+      area: "DOCUMENTS", action: `${kind}.cancel`, target: { type: "CommercialDocument", id: doc.id, label: doc.documentNo }, locationId: doc.locationId, reason: parsed.data.reason,
+      summary: `Cancelled ${kind} ${doc.documentNo} (KSh ${Number(doc.total).toLocaleString("en-KE", { maximumFractionDigits: 2 })})${transactions.length ? ` - ${transactions.length} payment${transactions.length === 1 ? "" : "s"} voided` : ""}`,
     });
     return { voidedPayments: transactions.length };
   });

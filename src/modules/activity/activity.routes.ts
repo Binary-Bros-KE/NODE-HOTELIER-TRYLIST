@@ -207,7 +207,7 @@ const sources: Source[] = [
     },
   },
   {
-    key: "salaryVoid", area: "PAYROLL", targetTypes: [],
+    key: "salaryVoid", area: "PAYROLL", targetTypes: ["EmployeeSalary"],
     load: async (tid, f, take) => {
       const voided = await prisma.employeeSalary.findMany({
         where: {
@@ -219,7 +219,7 @@ const sources: Source[] = [
       });
       return voided.map((s) => row({
         id: `salaryVoid:${s.id}`, occurredAt: s.updatedAt, actorId: s.voidedBy, area: "PAYROLL", action: "salary.void",
-        targetType: null, targetId: null, targetLabel: fullName(s.employee),
+        targetType: "EmployeeSalary", targetId: s.id, targetLabel: fullName(s.employee),
         summary: `Voided the salary of ${fullName(s.employee)} (${money(s.netPay)} net)`, reason: s.voidReason,
       }));
     },
@@ -286,7 +286,11 @@ export async function activityFeed(tid: string, q: z.infer<typeof listQuery>) {
   const take = q.page * q.pageSize + 1;
   const active = sources.filter((s) => (!f.area || s.area === f.area) && (!f.target || s.targetTypes?.includes(f.target.type)));
   const batches = await Promise.all([loggedRows(tid, f, take), ...active.map((s) => s.load(tid, f, take))]);
-  const merged = batches.flat().sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
+  // An action that now logs itself still marks its record too (a void sets cancelDecidedBy, a cancelled
+  // invoice keeps cancelledBy): show it once, as the logged entry, which carries more.
+  const logged = batches[0];
+  const alsoLogged = (r: Row) => r.fromRecords && r.targetId != null && logged.some((e) => e.targetId === r.targetId && Math.abs(e.occurredAt.getTime() - r.occurredAt.getTime()) < 10_000);
+  const merged = batches.flat().filter((r) => !alsoLogged(r)).sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
   const pageRows = merged.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
 
   // Names (and roles) for rows that only carry an employee id.

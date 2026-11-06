@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivityAfter, changedFields } from "../../lib/activity.js";
 import { appointmentConfirmed, notify } from "../../lib/websiteNotifications.js";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
@@ -579,6 +580,7 @@ serviceCenterRouter.post("/payment-methods", async (req, res) => {
   if (duplicate) { res.status(409).json({ error: "A payment method with this name already exists" }); return; }
   const code = `SC_${parsed.data.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "")}`;
   const paymentMethod = await prisma.paymentMethod.create({ data: { tenantId: tid, code, ...parsed.data }, include: { _count: { select: { membershipPayments: true, appointments: true } } } });
+  await logActivityAfter(req, { area: "SETTINGS", action: "payment_method.create", target: { type: "PaymentMethod", id: paymentMethod.id, label: paymentMethod.name }, summary: `Added payment method ${paymentMethod.name} (service center)` });
   res.status(201).json({ paymentMethod });
 });
 
@@ -593,6 +595,8 @@ serviceCenterRouter.patch("/payment-methods/:id", async (req, res) => {
     if (duplicate) { res.status(409).json({ error: "A payment method with this name already exists" }); return; }
   }
   const paymentMethod = await prisma.paymentMethod.update({ where: { id: current.id }, data: parsed.data, include: { _count: { select: { membershipPayments: true, appointments: true } } } });
+  const changes = changedFields(current as unknown as Record<string, unknown>, paymentMethod as unknown as Record<string, unknown>, { name: "Name", code: "Code", isActive: "Active", requiresReference: "Needs a reference" });
+  if (changes.length) await logActivityAfter(req, { area: "SETTINGS", action: "payment_method.edit", target: { type: "PaymentMethod", id: current.id, label: current.name }, changes, summary: `Changed payment method ${current.name} (service center)` });
   res.json({ paymentMethod });
 });
 
@@ -604,6 +608,7 @@ serviceCenterRouter.delete("/payment-methods/:id", async (req, res) => {
     res.status(409).json({ error: "This method has transaction history. Deactivate it instead of deleting it." }); return;
   }
   await prisma.paymentMethod.delete({ where: { id: current.id } });
+  await logActivityAfter(req, { area: "SETTINGS", action: "payment_method.delete", target: { type: "PaymentMethod", id: current.id, label: current.name }, summary: `Deleted payment method ${current.name} (service center)` });
   res.status(204).send();
 });
 

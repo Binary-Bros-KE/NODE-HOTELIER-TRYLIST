@@ -46,6 +46,13 @@ export async function logActivity(db: Db, req: { tenantId?: string; userId?: str
   });
 }
 
+/** For an action whose change isn't one transaction the entry can join: log once it has
+ * happened, and never turn a done change into an error for the person who made it. */
+export async function logActivityAfter(req: { tenantId?: string; userId?: string; ip?: string }, entry: ActivityEntry) {
+  const { prisma } = await import("./prisma.js");
+  await logActivity(prisma, req, entry).catch((error) => console.error("Activity log write failed", entry.action, error));
+}
+
 const comparable = (value: unknown) => (value instanceof Date ? value.toISOString() : value != null && typeof value === "object" && "toFixed" in value ? Number(value) : value ?? null);
 
 /** The fields that actually changed between two versions of a record, for an edit's entry. */

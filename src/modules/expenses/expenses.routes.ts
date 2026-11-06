@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivity, changedFields } from "../../lib/activity.js";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { nextExpenseNo, nextTransactionNo } from "../../lib/sequence.js";
@@ -9,6 +10,8 @@ import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 // replacement part) — full CRUD on the category, but an expense itself is
 // never hard-deleted, only archived, matching the append-only discipline
 // already used for Reservation/Folio records.
+const kes = (n: unknown) => `KSh ${Number(n).toLocaleString("en-KE", { maximumFractionDigits: 2 })}`;
+
 export const expensesRouter = Router();
 
 const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
@@ -125,6 +128,7 @@ expensesRouter.post("/", async (req, res) => {
         sourceRefId: created.id,
       },
     });
+    await logActivity(tx, req, { area: "FINANCE", action: "expense.create", target: { type: "Expense", id: created.id, label: expenseNo }, locationId: data.data.locationId ?? null, summary: `Recorded expense ${expenseNo}: ${category.name} ${kes(data.data.amount)}${data.data.description ? ` - ${data.data.description}` : ""}` });
     return created;
   });
   res.status(201).json({ expense });
@@ -146,6 +150,8 @@ expensesRouter.patch("/:id", async (req, res) => {
   const updateData = resolvedPayment ? { ...data.data, reference: resolvedPayment.reference } : data.data;
   const expense = await prisma.$transaction(async (tx) => {
     const updated = await tx.expense.update({ where: { id: existing.id }, data: updateData, include: expenseInclude });
+    const changes = changedFields(existing as unknown as Record<string, unknown>, updated as unknown as Record<string, unknown>, { amount: "Amount", categoryId: "Category", description: "Description", expenseDate: "Date", paymentMethodId: "Payment method", reference: "Reference", locationId: "Location", status: "Status" });
+    if (changes.length) await logActivity(tx, req, { area: "FINANCE", action: "expense.edit", target: { type: "Expense", id: existing.id, label: existing.expenseNo }, locationId: updated.locationId ?? null, changes, summary: `Changed expense ${existing.expenseNo} (${changes.map((c) => c.label.toLowerCase()).join(", ")})` });
     if (data.data.amount !== undefined || data.data.paymentMethodId || data.data.reference !== undefined || data.data.locationId !== undefined) {
       await tx.transaction.updateMany({
         where: { tenantId: tid, source: "EXPENSE", sourceRefId: existing.id },

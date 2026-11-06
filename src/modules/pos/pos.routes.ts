@@ -24,6 +24,7 @@ import { perSaleRequirements } from "../../lib/trackingMode.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 import { businessDayStart, businessDayWindowForDateOnly } from "../../lib/businessDay.js";
 import { blankToUndefined, dateOnlyStamp, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
+import { logActivity } from "../../lib/activity.js";
 
 // POS configuration, stores, and stock all remain scoped to the tenant supplied
 // by the authenticated request context (currently x-tenant-id during scaffolding).
@@ -458,6 +459,10 @@ export async function releaseTableIfIdle(tx: Prisma.TransactionClient, tableId: 
 }
 
 const money2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+const kes = (n: number) => `KSh ${n.toLocaleString("en-KE", { maximumFractionDigits: 2 })}`;
+// How an order appears in the activity log.
+const orderTarget = (order: { id: string; orderNumber: number }) => ({ type: "PosOrder", id: order.id, label: `Order #${order.orderNumber}` });
+const customerName = (order: { customer?: { firstName: string; lastName: string | null } | null }) => (order.customer ? `${order.customer.firstName} ${order.customer.lastName ?? ""}`.trim() : null);
 
 /** UNPAID / PARTIAL / PAID from what's been paid against the order total. */
 function paymentStatusFor(paid: number, total: number): "UNPAID" | "PARTIAL" | "PAID" {
@@ -1543,6 +1548,7 @@ posRouter.post("/orders/:id/make-complimentary", async (req, res) => {
     });
     // What the serve recorded as sold is now recorded as given away.
     await tx.menuLedgerEntry.updateMany({ where: { tenantId: tid, orderId: order.id, type: "SALE" }, data: { type: "COMPLIMENTARY" } });
+    await logActivity(tx, req, { area: "POS", action: "pos.order.make_complimentary", target: orderTarget(order), locationId: order.locationId, reason: parsed.data.reason ?? null, summary: `Made Order #${order.orderNumber} complimentary - ${kes(computeOrderFinancials(order, tax).total)} no longer to be paid` });
     return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
   });
   res.status(200).json({ order: withFinancials(updated, tax) });
@@ -1574,6 +1580,7 @@ posRouter.post("/orders/:id/make-sale", async (req, res) => {
     });
     // What the serve recorded as given away is now recorded as sold.
     await tx.menuLedgerEntry.updateMany({ where: { tenantId: tid, orderId: order.id, type: "COMPLIMENTARY" }, data: { type: "SALE" } });
+    await logActivity(tx, req, { area: "POS", action: "pos.order.make_sale", target: orderTarget(order), locationId: order.locationId, summary: `Turned complimentary Order #${order.orderNumber} back into a sale` });
     return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
   });
   res.status(200).json({ order: withFinancials(updated, tax) });
@@ -1691,6 +1698,7 @@ posRouter.post("/orders/:id/split", async (req, res) => {
         where: { id: order.id },
         data: { notes: [order.notes, `Split into ${bills.map((b) => `#${b.orderNumber}`).join(", ")} by ${by} on ${new Date().toLocaleString("en-KE", { timeZone: "Africa/Nairobi" })}.`].filter(Boolean).join("\n") },
       });
+      await logActivity(tx, req, { area: "POS", action: "pos.order.split", target: orderTarget(order), locationId: order.locationId, summary: `Split Order #${order.orderNumber} into new bills ${bills.map((b) => `#${b.orderNumber}`).join(", ")}` });
       return bills;
     });
     const original = await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
@@ -1893,6 +1901,9 @@ posRouter.patch("/orders/:id/cancel", async (req, res) => {
         cancelDecisionNote: null,
       },
       include: orderInclude,
+    }).then(async (order) => {
+      await logActivity(tx, req, { area: "POS", action: "pos.order.cancel_request", target: orderTarget(order), locationId: order.locationId, reason: parsed.data.reason, summary: `Asked to cancel Order #${order.orderNumber} (${existing.status.toLowerCase()})` });
+      return order;
     });
   });
   const tax = await taxSettingsFor(tid);
@@ -1910,6 +1921,7 @@ posRouter.post("/orders/:id/void", async (req, res) => {
   try {
     const updated = await prisma.$transaction(async (tx) => {
       await voidCompletedOrder(tx, { tenantId: tid, order, reason: parsed.data.reason, userId: req.userId });
+      await logActivity(tx, req, { area: "POS", action: "pos.order.void", target: orderTarget(order), locationId: order.locationId, reason: parsed.data.reason, summary: `Voided the completed sale Order #${order.orderNumber} (${kes(computeOrderFinancials(order, await taxSettingsFor(tid)).total)})` });
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
     const tax = await taxSettingsFor(tid);
@@ -1961,6 +1973,13 @@ posRouter.post("/orders/:id/cancel/approve", requirePermission("POS_APPROVE_CANC
         data: { status: "REJECTED", decidedBy: req.userId ?? null, decidedAt: new Date(), decisionNote: "Order was returned in full" },
       });
       await tx.posOrder.update({ where: { id: order.id }, data: { status: "CANCELLED", cancelDecidedBy: req.userId ?? null, cancelDecidedAt: new Date() } });
+      const requester = await employeeName(tx, tid, order.cancelRequestedBy);
+      await logActivity(tx, req, {
+        area: "POS", action: "pos.order.cancel_approve", target: orderTarget(order), locationId: order.locationId, reason: order.cancelReason,
+        summary: order.cancelReason?.startsWith("Rejected by store")
+          ? `Rejected the store request for Order #${order.orderNumber}, which cancelled it`
+          : `Approved cancelling Order #${order.orderNumber}${requester ? `, asked by ${requester}` : ""}${order.payments.length ? " - its payments were voided" : ""}`,
+      });
       // A cancelled order no longer needs ingredients: withdraw any request still waiting at the store.
       await tx.stockDispatchRequest.updateMany({ where: { orderId: order.id, status: "REQUESTED" }, data: { status: "CANCELLED", respondedAt: new Date(), respondedBy: req.userId ?? null } });
       if (order.tableId) await releaseTableIfIdle(tx, order.tableId);
@@ -1987,16 +2006,20 @@ posRouter.post("/orders/:id/cancel/reject", requirePermission("POS_APPROVE_CANCE
   const order = await prisma.posOrder.findFirst({ where: { id, tenantId: tid } });
   if (!order) { res.status(404).json({ error: "Order not found" }); return; }
   if (order.status !== "PENDING_CANCELLATION") { res.status(409).json({ error: "This order isn't waiting for a cancellation decision" }); return; }
-  const updated = await prisma.posOrder.update({
-    where: { id: order.id },
-    data: {
-      status: order.statusBeforeCancel ?? "OPEN",
-      statusBeforeCancel: null,
-      cancelDecidedBy: req.userId ?? null,
-      cancelDecidedAt: new Date(),
-      cancelDecisionNote: parsed.data.note ?? null,
-    },
-    include: orderInclude,
+  const updated = await prisma.$transaction(async (tx) => {
+    const kept = await tx.posOrder.update({
+      where: { id: order.id },
+      data: {
+        status: order.statusBeforeCancel ?? "OPEN",
+        statusBeforeCancel: null,
+        cancelDecidedBy: req.userId ?? null,
+        cancelDecidedAt: new Date(),
+        cancelDecisionNote: parsed.data.note ?? null,
+      },
+      include: orderInclude,
+    });
+    await logActivity(tx, req, { area: "POS", action: "pos.order.cancel_reject", target: orderTarget(order), locationId: order.locationId, reason: [order.cancelReason, parsed.data.note].filter(Boolean).join(" - ") || null, summary: `Refused to cancel Order #${order.orderNumber}` });
+    return kept;
   });
   const tax = await taxSettingsFor(tid);
   res.status(200).json({ order: withFinancials(updated, tax) });
@@ -2043,6 +2066,7 @@ async function createReturnRequestsForOrder(args: {
   items: { orderItemId: string; quantity: number }[];
   reason: string;
   userId?: string;
+  ip?: string;
 }) {
   const order = await prisma.posOrder.findFirst({ where: { id: args.orderId, tenantId: args.tenantId }, include: orderInclude });
   if (!order) throw Object.assign(new Error("Order not found"), { status: 404 });
@@ -2074,17 +2098,25 @@ async function createReturnRequestsForOrder(args: {
     if (requested + alreadyPending > row.quantity) throw Object.assign(new Error(`Return quantity is too high for ${row.menuItem?.name ?? "one item"}`), { status: 400 });
   }
 
-  return prisma.$transaction(orderItems.map((row) => prisma.posOrderReturnRequest.create({
-    data: {
-      tenantId: args.tenantId,
-      orderId: order.id,
-      orderItemId: row.id,
-      quantity: requestedByItem.get(row.id)!,
-      reason: args.reason,
-      requestedBy: args.userId ?? null,
-    },
-    include: { orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } }, service: { select: { name: true } }, serviceVariant: { select: { name: true } } } } },
-  })));
+  return prisma.$transaction(async (tx) => {
+    const created = [];
+    for (const row of orderItems) {
+      created.push(await tx.posOrderReturnRequest.create({
+        data: {
+          tenantId: args.tenantId,
+          orderId: order.id,
+          orderItemId: row.id,
+          quantity: requestedByItem.get(row.id)!,
+          reason: args.reason,
+          requestedBy: args.userId ?? null,
+        },
+        include: { orderItem: { include: { menuItem: { select: { name: true } }, variant: { select: { name: true } }, service: { select: { name: true } }, serviceVariant: { select: { name: true } } } } },
+      }));
+    }
+    const lines = orderItems.map((row) => `${requestedByItem.get(row.id)} x ${row.menuItem?.name ?? "item"}`).join(", ");
+    await logActivity(tx, { tenantId: args.tenantId, userId: args.userId, ip: args.ip }, { area: "POS", action: "pos.return.request", target: orderTarget(order), locationId: order.locationId, reason: args.reason, summary: `Asked to return ${lines} from Order #${order.orderNumber}` });
+    return created;
+  });
 }
 
 posRouter.post("/orders/:id/return-request", async (req, res) => {
@@ -2097,6 +2129,7 @@ posRouter.post("/orders/:id/return-request", async (req, res) => {
       items: parsed.data.items,
       reason: parsed.data.reason,
       userId: req.userId,
+      ip: req.ip,
     });
     res.status(201).json({ requests });
   } catch (error) {
@@ -2115,6 +2148,7 @@ posRouter.post("/orders/:id/items/:itemId/return-request", async (req, res) => {
       items: [{ orderItemId: req.params.itemId, quantity: parsed.data.quantity }],
       reason: parsed.data.reason,
       userId: req.userId,
+      ip: req.ip,
     });
     res.status(201).json({ request });
   } catch (error) {
@@ -2174,6 +2208,8 @@ posRouter.post("/return-requests/:id/approve", requirePermission("POS_APPROVE_CA
       });
       await tx.posOrderItem.update({ where: { id: request.orderItemId }, data: { quantity: { decrement: request.quantity } } });
       await tx.posOrderReturnRequest.update({ where: { id: request.id }, data: { status: "APPROVED", decidedBy: req.userId ?? null, decidedAt: new Date(), decisionNote: parsed.data.note ?? null } });
+      const item = request.orderItem.menuItem?.name ?? request.orderItem.service?.name ?? "item";
+      await logActivity(tx, req, { area: "POS", action: "pos.return.approve", target: orderTarget(request.order), locationId: request.order.locationId, reason: [request.reason, parsed.data.note].filter(Boolean).join(" - ") || null, summary: `Approved returning ${request.quantity} x ${item} on Order #${request.order.orderNumber} - ${kes(request.quantity * Number(request.orderItem.unitPrice))} off the bill` });
       const order = await tx.posOrder.findUniqueOrThrow({ where: { id: request.orderId }, include: orderInclude });
       const withTotals = withFinancials(order, tax);
       await tx.posOrder.update({ where: { id: order.id }, data: { paymentStatus: paymentStatusFor(withTotals.paid, withTotals.total) } });
@@ -2194,9 +2230,16 @@ posRouter.post("/return-requests/:id/reject", requirePermission("POS_APPROVE_CAN
   const parsed = returnDecisionSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Invalid return rejection", details: parsed.error.flatten() }); return; }
   const id = req.params.id as string;
-  const updated = await prisma.posOrderReturnRequest.updateMany({
-    where: { id, tenantId: tenantIdFor(req), status: "PENDING" },
-    data: { status: "REJECTED", decidedBy: req.userId ?? null, decidedAt: new Date(), decisionNote: parsed.data.note ?? null },
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.posOrderReturnRequest.updateMany({
+      where: { id, tenantId: tenantIdFor(req), status: "PENDING" },
+      data: { status: "REJECTED", decidedBy: req.userId ?? null, decidedAt: new Date(), decisionNote: parsed.data.note ?? null },
+    });
+    if (result.count) {
+      const request = await tx.posOrderReturnRequest.findUniqueOrThrow({ where: { id }, include: { order: { select: { id: true, orderNumber: true, locationId: true } }, orderItem: { select: { menuItem: { select: { name: true } }, service: { select: { name: true } } } } } });
+      await logActivity(tx, req, { area: "POS", action: "pos.return.reject", target: orderTarget(request.order), locationId: request.order.locationId, reason: [request.reason, parsed.data.note].filter(Boolean).join(" - ") || null, summary: `Refused returning ${request.quantity} x ${request.orderItem.menuItem?.name ?? request.orderItem.service?.name ?? "item"} on Order #${request.order.orderNumber}` });
+    }
+    return result;
   });
   if (!updated.count) { res.status(404).json({ error: "Pending return request not found" }); return; }
   res.status(200).json({ request: await prisma.posOrderReturnRequest.findUniqueOrThrow({ where: { id } }) });
@@ -2288,9 +2331,11 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
   const notReady = payable.find(({ order }) => !(order.status === "SERVED" || (order.status === "COMPLETED" && order.paymentStatus !== "PAID")));
   if (notReady) { res.status(409).json({ error: `Order #${notReady.order.orderNumber} must be served before this linked bill can be paid` }); return; }
   // Same rule as paying one order: a debt needs CREDIT_COLLECT, a live bill is its waiter's or a Super Admin's.
-  if (payable.every(({ order }) => order.status === "COMPLETED")) {
+  const groupIsDebt = payable.every(({ order }) => order.status === "COMPLETED");
+  const notTheirs = orders.some((order) => !ownsOrder(order, req));
+  if (groupIsDebt) {
     if (!(await hasPermission(tid, req.userId, "CREDIT_COLLECT"))) { res.status(403).json({ error: "You are not allowed to clear customer debts - ask the accountant or a manager", code: "CREDIT_COLLECT_REQUIRED" }); return; }
-  } else if (orders.some((order) => !ownsOrder(order, req)) && !(await isSuperAdminUser(tid, req.userId))) {
+  } else if (notTheirs && !(await isSuperAdminUser(tid, req.userId))) {
     res.status(403).json({ error: "You can only take payment on your own linked bills" });
     return;
   }
@@ -2345,6 +2390,15 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
           });
         }
         return tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId, status: { not: "CANCELLED" } }, include: orderInclude, orderBy: { orderNumber: "asc" } });
+      });
+    }
+    if (groupIsDebt || notTheirs) {
+      const label = `Bill ${orders.map((o) => `#${o.orderNumber}`).join(" + ")}`;
+      await logActivity(prisma, req, {
+        area: "POS", action: groupIsDebt ? "pos.debt.collect" : "pos.payment.others_bill", target: orderTarget(orders[0]), locationId: orders[0].locationId,
+        summary: groupIsDebt
+          ? `Collected ${kes(parsed.data.amount)} owed on ${label}${customerName(orders[0]) ? ` from ${customerName(orders[0])}` : ""}`
+          : `Took ${kes(parsed.data.amount)} on ${label}, rung up by ${(await employeeName(prisma, tid, orders[0].createdBy)) ?? "another employee"}`,
       });
     }
     res.status(201).json({ orders: updatedOrders.map((order) => withFinancials(order, tax)) });
@@ -2425,6 +2479,14 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
         return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
       });
     }
+    if (isDebtPayment || !ownsOrder(order, req)) {
+      await logActivity(prisma, req, {
+        area: "POS", action: isDebtPayment ? "pos.debt.collect" : "pos.payment.others_bill", target: orderTarget(order), locationId: order.locationId,
+        summary: isDebtPayment
+          ? `Collected ${kes(parsed.data.amount)} owed on Order #${order.orderNumber}${customerName(order) ? ` from ${customerName(order)}` : ""}`
+          : `${parsed.data.method === "ROOM" ? "Charged" : "Took"} ${kes(parsed.data.amount)} on Order #${order.orderNumber}${parsed.data.method === "ROOM" ? " to a room" : ""}, rung up by ${(await employeeName(prisma, tid, order.createdBy)) ?? "another employee"}`,
+      });
+    }
     res.status(201).json({ order: withFinancials(updatedOrder, tax) });
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
@@ -2496,6 +2558,7 @@ posRouter.post("/orders/:id/settle", async (req, res) => {
   }
   const updated = await prisma.$transaction(async (tx) => {
     await completeServedOrder(tx, tid, order, { total, paid, customerId: order.customerId, creditReason: parsed.data.creditReason, creditExpectedAt: parsed.data.creditExpectedAt, by: req.userId });
+    if (shortfall > 0.01) await logActivity(tx, req, { area: "POS", action: "pos.order.credit", target: orderTarget(order), locationId: order.locationId, reason: parsed.data.creditReason, summary: `Completed Order #${order.orderNumber} on credit - ${kes(shortfall)} owed by ${customerName(order) ?? "the customer"}` });
     return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
   });
   res.status(200).json({ order: withFinancials(updated, tax) });
@@ -2526,6 +2589,11 @@ posRouter.post("/bill-groups/:billGroupId/settle", async (req, res) => {
   const updated = await prisma.$transaction(async (tx) => {
     for (const { order, total, paid } of rows) {
       await completeServedOrder(tx, tid, order, { total, paid, customerId: order.customerId ?? billCustomerId, creditReason: parsed.data.creditReason, creditExpectedAt: parsed.data.creditExpectedAt, by: req.userId });
+    }
+    if (owing) {
+      const owed = money2(rows.reduce((sum, row) => sum + row.total - row.paid, 0));
+      const holder = orders.find((o) => o.customerId);
+      await logActivity(tx, req, { area: "POS", action: "pos.order.credit", target: orderTarget(rows[0].order), locationId: rows[0].order.locationId, reason: parsed.data.creditReason, summary: `Completed Bill ${orders.map((o) => `#${o.orderNumber}`).join(" + ")} on credit - ${kes(owed)} owed by ${(holder && customerName(holder)) ?? "the customer"}` });
     }
     return tx.posOrder.findMany({ where: { tenantId: tid, billGroupId: req.params.billGroupId, status: { not: "CANCELLED" } }, include: orderInclude, orderBy: { orderNumber: "asc" } });
   });

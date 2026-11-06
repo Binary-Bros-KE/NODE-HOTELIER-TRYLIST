@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivityAfter, changedFields } from "../../lib/activity.js";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
@@ -240,7 +241,7 @@ locationsRouter.put("/:id/mpesa-config", async (req, res, next) => {
   try {
     await requireSupervisor(req);
     const tid = tenantId(req);
-    const location = await prisma.location.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true } });
+    const location = await prisma.location.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { id: true, name: true } });
     if (!location) { res.status(404).json({ error: "Location not found" }); return; }
     const existing = await prisma.locationMpesaConfig.findUnique({ where: { locationId: location.id } });
     if (!existing && (!data.data.passkey || !data.data.consumerKey || !data.data.consumerSecret)) {
@@ -263,6 +264,11 @@ locationsRouter.put("/:id/mpesa-config", async (req, res, next) => {
         updatedBy: req.userId,
       },
     });
+    const changes = [
+      ...(existing ? changedFields(existing as unknown as Record<string, unknown>, rest as unknown as Record<string, unknown>, Object.fromEntries(Object.keys(rest).map((k) => [k, k])) as Record<string, string>) : []),
+      ...([["passkey", passkey], ["consumerKey", consumerKey], ["consumerSecret", consumerSecret]] as const).filter(([, v]) => v).map(([field]) => ({ field, label: field, from: "(hidden)", to: "(replaced)" })),
+    ];
+    await logActivityAfter(req, { area: "SETTINGS", action: existing ? "mpesa.edit" : "mpesa.setup", target: { type: "Location", id: location.id, label: location.name }, locationId: location.id, changes, summary: `${existing ? "Changed" : "Set up"} M-Pesa for ${location.name}` });
     res.json({ config: maskedMpesaConfig(config) });
   } catch (error) {
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivityAfter, changedFields } from "../../lib/activity.js";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
@@ -56,6 +57,7 @@ paymentMethodsRouter.post("/", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid payment method", details: data.error.flatten() }); return; }
   try {
     const method = await prisma.paymentMethod.create({ data: { tenantId: tenantId(req), ...data.data }, select: publicFields });
+    await logActivityAfter(req, { area: "SETTINGS", action: "payment_method.create", target: { type: "PaymentMethod", id: method.id, label: method.name }, summary: `Added payment method ${method.name}` });
     res.status(201).json({ method });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "A payment method with this name or code already exists" }); return; }
@@ -68,9 +70,12 @@ paymentMethodsRouter.patch("/:id", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid payment method", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
+    const before = await prisma.paymentMethod.findFirst({ where: { id: req.params.id, tenantId: tid } });
     const updated = await prisma.paymentMethod.updateMany({ where: { id: req.params.id, tenantId: tid }, data: data.data });
-    if (!updated.count) { res.status(404).json({ error: "Payment method not found" }); return; }
+    if (!updated.count || !before) { res.status(404).json({ error: "Payment method not found" }); return; }
     const method = await prisma.paymentMethod.findUniqueOrThrow({ where: { id: req.params.id }, select: publicFields });
+    const changes = changedFields(before as unknown as Record<string, unknown>, method as unknown as Record<string, unknown>, { name: "Name", code: "Code", isActive: "Active", requiresReference: "Needs a reference" });
+    if (changes.length) await logActivityAfter(req, { area: "SETTINGS", action: "payment_method.edit", target: { type: "PaymentMethod", id: before.id, label: before.name }, changes, summary: `Changed payment method ${before.name}` });
     res.json({ method });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") { res.status(409).json({ error: "A payment method with this name already exists" }); return; }
@@ -88,5 +93,6 @@ paymentMethodsRouter.delete("/:id", async (req, res) => {
     return;
   }
   await prisma.paymentMethod.delete({ where: { id: existing.id } });
+  await logActivityAfter(req, { area: "SETTINGS", action: "payment_method.delete", target: { type: "PaymentMethod", id: existing.id, label: existing.name }, summary: `Deleted payment method ${existing.name}` });
   res.status(204).send();
 });

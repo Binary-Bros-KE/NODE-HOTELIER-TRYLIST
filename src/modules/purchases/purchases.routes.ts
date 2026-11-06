@@ -9,6 +9,7 @@ import { recordStockMovement, InsufficientStockError } from "../../lib/stockLedg
 import { stockQuantityToCostUnits } from "../../lib/stockValuation.js";
 import { recordSupplierBalanceEntry } from "../../lib/supplierBalance.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
+import { logActivity, logActivityAfter } from "../../lib/activity.js";
 
 // Mirrors the PurchaseStatus enum in schema.prisma — kept as a local literal
 // list to match how every other module validates enums (never importing the
@@ -457,6 +458,7 @@ purchasesRouter.post("/:id/status", async (req, res, next) => {
       },
       include: purchaseInclude,
     });
+    await logActivityAfter(req, { area: "FINANCE", action: `purchase.${status.toLowerCase()}`, target: { type: "Purchase", id: existing.id, label: existing.purchaseNo }, reason: note ?? null, summary: `Moved purchase ${existing.purchaseNo} from ${existing.status.toLowerCase().replaceAll("_", " ")} to ${status.toLowerCase().replaceAll("_", " ")}` });
     res.json({ purchase });
   } catch (error) {
     next(error);
@@ -766,6 +768,7 @@ purchasesRouter.post("/:id/payments", async (req, res, next) => {
         },
       });
       await recomputePurchasePaymentStatus(tx, purchase.id);
+      await logActivity(tx, req, { area: "FINANCE", action: "supplier.payment", target: { type: "Purchase", id: purchase.id, label: purchase.purchaseNo }, summary: `Paid ${purchase.supplier.name} KSh ${data.data.amount.toLocaleString("en-KE", { maximumFractionDigits: 2 })} for purchase ${purchase.purchaseNo}` });
       return payment;
     });
     const updatedPurchase = await prisma.purchase.findUniqueOrThrow({ where: { id: purchase.id }, include: purchaseInclude });

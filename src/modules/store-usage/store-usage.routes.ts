@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { logActivity } from "../../lib/activity.js";
 import type { NextFunction, Request, Response } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
@@ -231,6 +232,7 @@ storeUsageRouter.post("/:id/void", requirePermission("STORE_DISPATCH"), handle(a
         note: `${usage.usageNo} voided: ${body.reason}`, sourceType: "STORE_USAGE_VOID", sourceRefId: usage.id, performedBy: req.userId ?? null,
       });
     }
+    await logActivity(tx, req, { area: "STOCK", action: "store_usage.void", target: { type: "StoreUsage", id: usage.id, label: usage.usageNo }, locationId: usage.fromLocationId, reason: body.reason, summary: `Voided store usage ${usage.usageNo} - its ${usage.items.length} item${usage.items.length === 1 ? "" : "s"} went back into stock` });
     return tx.storeUsage.findUniqueOrThrow({ where: { id: usage.id }, include: usageInclude });
   });
   res.json({ usage: voided });

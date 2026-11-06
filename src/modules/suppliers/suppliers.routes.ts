@@ -7,6 +7,7 @@ import { nextSupplierPaymentNo, nextTransactionNo } from "../../lib/sequence.js"
 import { recordSupplierBalanceEntry } from "../../lib/supplierBalance.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 import { statementQuery, supplierStatement } from "../../lib/statements.js";
+import { logActivity } from "../../lib/activity.js";
 
 // Suppliers/vendors the property buys stock from. A plain definitional
 // lookup for now — Purchases / Goods Received will consume it later — so
@@ -284,6 +285,7 @@ suppliersRouter.post("/:id/payments", async (req, res, next) => {
         },
       });
       if (data.data.purchaseId) await recomputePurchasePaymentStatus(tx, data.data.purchaseId);
+      await logActivity(tx, req, { area: "FINANCE", action: "supplier.payment", target: { type: "Supplier", id: supplier.id, label: supplier.name }, summary: `Paid ${supplier.name} KSh ${data.data.amount.toLocaleString("en-KE", { maximumFractionDigits: 2 })}` });
       return created;
     });
     const updatedSupplier = await prisma.supplier.findUniqueOrThrow({ where: { id: supplier.id }, include: supplierInclude });
@@ -295,8 +297,11 @@ suppliersRouter.post("/:id/payments", async (req, res, next) => {
 });
 
 suppliersRouter.delete("/:id", async (req, res) => {
-  const supplier = await prisma.supplier.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true } });
+  const supplier = await prisma.supplier.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, name: true, balance: true } });
   if (!supplier) { res.status(404).json({ error: "Supplier not found" }); return; }
-  await prisma.supplier.delete({ where: { id: supplier.id } });
+  await prisma.$transaction(async (tx) => {
+    await tx.supplier.delete({ where: { id: supplier.id } });
+    await logActivity(tx, req, { area: "FINANCE", action: "supplier.delete", target: { type: "Supplier", id: supplier.id, label: supplier.name }, summary: `Deleted supplier ${supplier.name}${Number(supplier.balance) ? ` (balance KSh ${Number(supplier.balance).toLocaleString("en-KE")})` : ""}` });
+  });
   res.status(204).send();
 });
