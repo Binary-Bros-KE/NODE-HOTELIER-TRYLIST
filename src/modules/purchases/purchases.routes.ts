@@ -277,11 +277,50 @@ purchasesRouter.get("/", async (req, res, next) => {
   }
 });
 
+/** Stock before and after the purchase, per line. Received: the stock movements the
+ * deliveries posted record the balance on either side - before the first delivery of
+ * the item, after its last. Not received yet: today's stock at the purchase's location,
+ * and what it will be once the rest arrives (expected). Expense items are never stocked. */
+async function withStockLevels(tid: string, purchase: { locationId: string | null; items: { id: string; productId: string; quantity: unknown; receivedQuantity: unknown }[]; goodsReceipts: { id: string }[] }) {
+  const productIds = [...new Set(purchase.items.map((item) => item.productId))];
+  const [movements, stocks, expenseItems] = await Promise.all([
+    purchase.goodsReceipts.length
+      ? prisma.inventoryMovement.findMany({
+          where: { tenantId: tid, sourceType: "GOODS_RECEIVED", sourceRefId: { in: purchase.goodsReceipts.map((r) => r.id) }, productId: { in: productIds } },
+          select: { productId: true, balanceBefore: true, balanceAfter: true },
+          orderBy: { createdAt: "asc" },
+        })
+      : Promise.resolve([]),
+    purchase.locationId
+      ? prisma.productStock.findMany({ where: { tenantId: tid, locationId: purchase.locationId, productId: { in: productIds } }, select: { productId: true, quantity: true } })
+      : Promise.resolve([]),
+    prisma.product.findMany({ where: { tenantId: tid, id: { in: productIds }, isExpenseItem: true }, select: { id: true } }),
+  ]);
+  const expense = new Set(expenseItems.map((p) => p.id));
+  const current = new Map(stocks.map((s) => [s.productId, Number(s.quantity)]));
+  return purchase.items.map((item) => {
+    if (expense.has(item.productId)) return { ...item, stockBefore: null, stockAfter: null, stockExpected: false };
+    const posted = movements.filter((m) => m.productId === item.productId);
+    const outstanding = Math.max(0, Number(item.quantity) - Number(item.receivedQuantity));
+    if (posted.length && outstanding <= 0.0005) {
+      const before = posted[0].balanceBefore;
+      const after = posted[posted.length - 1].balanceAfter;
+      return { ...item, stockBefore: before == null ? null : Number(before), stockAfter: after == null ? null : Number(after), stockExpected: false };
+    }
+    // Nothing (or not everything) delivered yet: today's stock and what it will be after the rest arrives.
+    const now = current.get(item.productId);
+    if (now == null && !purchase.locationId) return { ...item, stockBefore: null, stockAfter: null, stockExpected: true };
+    const base = posted.length && posted[0].balanceBefore != null ? Number(posted[0].balanceBefore) : now ?? 0;
+    return { ...item, stockBefore: base, stockAfter: (now ?? 0) + outstanding, stockExpected: true };
+  });
+}
+
 purchasesRouter.get("/:id", async (req, res, next) => {
   try {
-    const purchase = await prisma.purchase.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, include: purchaseInclude });
+    const tid = tenantId(req);
+    const purchase = await prisma.purchase.findFirst({ where: { id: req.params.id, tenantId: tid }, include: purchaseInclude });
     if (!purchase) { res.status(404).json({ error: "Purchase not found" }); return; }
-    res.json({ purchase });
+    res.json({ purchase: { ...purchase, items: await withStockLevels(tid, purchase) } });
   } catch (error) {
     next(error);
   }
