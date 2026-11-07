@@ -8,6 +8,7 @@ import { prisma } from "../../lib/prisma.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
 import { nextStoreUsageNo } from "../../lib/sequence.js";
 import { InsufficientStockError, recordStockMovement } from "../../lib/stockLedger.js";
+import { computeStockRequirements, variantStockInclude } from "../../lib/stockRequirements.js";
 
 // Store usage: stock the store hands out to be used up there and then - staff
 // meals, a conference, a complimentary event - for any product, including ones
@@ -158,6 +159,57 @@ storeUsageRouter.get("/report", handle(async (req, res) => {
     byProduct: money([...byProduct.values()]).sort((a, b) => a.category.localeCompare(b.category) || b.value - a.value),
     usages,
   });
+}));
+
+// ---------------------------------------------------------------- from the menu
+// For an event or a staff meal served from the menu (an invoiced luncheon for 28): pick the
+// dish and how many, and get every product its recipe uses, as usage lines the storekeeper
+// can still adjust. Same maths as a sale, but nothing is sold and nothing is skipped: the
+// store hands out everything the dish needs, even ingredients counted at close.
+
+// A menu item only lands here if something tracks its stock: a product, a recipe, or a size that does.
+const tracksStock: Prisma.MenuItemWhereInput = {
+  OR: [{ productId: { not: null } }, { recipeId: { not: null } }, { variants: { some: { isActive: true, OR: [{ stockProductId: { not: null } }, { recipeId: { not: null } }] } } }],
+};
+
+storeUsageRouter.get("/menu-items", handle(async (req, res) => {
+  const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 80) : "";
+  const items = await prisma.menuItem.findMany({
+    where: { tenantId: tenantId(req), isActive: true, ...tracksStock, ...(search ? { name: { contains: search, mode: "insensitive" } } : {}) },
+    select: { id: true, name: true, menuCategory: { select: { name: true } }, variants: { where: { isActive: true }, select: { id: true, name: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } },
+    orderBy: { name: "asc" },
+    take: 40,
+  });
+  res.json({ items });
+}));
+
+const menuLinesSchema = z.object({
+  lines: z.array(z.object({
+    menuItemId: z.string().trim().min(1),
+    variantId: optionalId,
+    quantity: z.coerce.number().positive().max(100_000),
+  })).min(1, "Choose a menu item").max(50),
+});
+
+storeUsageRouter.post("/menu-lines", requirePermission("STORE_DISPATCH"), handle(async (req, res) => {
+  const body = parse(menuLinesSchema, req.body, res);
+  if (!body) return;
+  const tid = tenantId(req);
+  const menuItems = await prisma.menuItem.findMany({
+    where: { tenantId: tid, id: { in: body.lines.map((l) => l.menuItemId) } },
+    include: { product: true, recipe: { include: { ingredients: { include: { product: true } } } }, variants: { include: variantStockInclude } },
+  });
+  const byId = new Map(menuItems.map((m) => [m.id, m]));
+  const orderLike = body.lines.map((line) => {
+    const menuItem = byId.get(line.menuItemId);
+    if (!menuItem) throw httpError(400, "One of the menu items was not found");
+    const variant = line.variantId ? menuItem.variants.find((v) => v.id === line.variantId) : null;
+    if (line.variantId && !variant) throw httpError(400, `That size isn't on ${menuItem.name}`);
+    return { quantity: line.quantity, menuItem, variant: variant ?? null, addons: [] };
+  });
+  const requirements = computeStockRequirements(orderLike);
+  if (requirements.size === 0) throw httpError(409, "This menu item doesn't use any stock - add its products directly");
+  res.json({ lines: [...requirements].map(([productId, r]) => ({ productId, name: r.name, quantity: Math.round(r.quantity * 1000) / 1000 })) });
 }));
 
 const createSchema = z.object({
