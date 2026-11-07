@@ -10,8 +10,10 @@ const RENEW_WHEN_LEFT_MS = 12 * 60 * 60 * 1000;
 // Reached before anyone signs in: resolving the workspace and its branding.
 const PUBLIC_GETS = [/^\/health$/, /^\/tenant\/(resolve|modules|license)$/, /^\/business-profile$/];
 
-// Installed print bridges identify themselves with an employee id and no session (see
-// PRINT-BRIDGE/src/agent.js). Until they carry a printer key they keep that, for printing only.
+// Installed print bridges poll with no session and often no employee id (see
+// PRINT-BRIDGE/src/agent.js). Printing must never be blocked by sign-in, so these
+// routes are always let through: they only read or move print jobs for the tenant.
+// TODO: give bridges a printer key and check that instead.
 const BRIDGE_PATHS = /^\/pos\/print-jobs\/(pending|[^/]+\/(claim|complete|fail))$/;
 
 function bearerToken(req: Request): string | null {
@@ -33,7 +35,7 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
 
   if (!token) {
     if (req.method === "GET" && PUBLIC_GETS.some((pattern) => pattern.test(req.path))) { next(); return; }
-    if (claimedUserId && BRIDGE_PATHS.test(req.path)) { req.userId = claimedUserId; next(); return; }
+    if (BRIDGE_PATHS.test(req.path)) { req.userId = claimedUserId; next(); return; }
     res.status(401).json({ error: "Please sign in again", code: "AUTH_REQUIRED" });
     return;
   }
