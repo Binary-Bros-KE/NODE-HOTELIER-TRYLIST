@@ -167,20 +167,27 @@ storeUsageRouter.get("/report", handle(async (req, res) => {
 // can still adjust. Same maths as a sale, but nothing is sold and nothing is skipped: the
 // store hands out everything the dish needs, even ingredients counted at close.
 
-// A menu item only lands here if something tracks its stock: a product, a recipe, or a size that does.
-const tracksStock: Prisma.MenuItemWhereInput = {
-  OR: [{ productId: { not: null } }, { recipeId: { not: null } }, { variants: { some: { isActive: true, OR: [{ stockProductId: { not: null } }, { recipeId: { not: null } }] } } }],
-};
-
+// The whole active menu, by category. An item with nothing tracking its stock (no product, recipe, or
+// size that has one) is still listed, flagged, so the storekeeper sees why it adds nothing.
 storeUsageRouter.get("/menu-items", handle(async (req, res) => {
   const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 80) : "";
   const items = await prisma.menuItem.findMany({
-    where: { tenantId: tenantId(req), isActive: true, ...tracksStock, ...(search ? { name: { contains: search, mode: "insensitive" } } : {}) },
-    select: { id: true, name: true, menuCategory: { select: { name: true } }, variants: { where: { isActive: true }, select: { id: true, name: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } },
-    orderBy: { name: "asc" },
-    take: 40,
+    where: { tenantId: tenantId(req), isActive: true, ...(search ? { name: { contains: search, mode: "insensitive" } } : {}) },
+    select: {
+      id: true, name: true, productId: true, recipeId: true,
+      menuCategory: { select: { name: true, sortOrder: true } },
+      variants: { where: { isActive: true }, select: { id: true, name: true, stockProductId: true, recipeId: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] },
+    },
+    orderBy: [{ menuCategory: { sortOrder: "asc" } }, { menuCategory: { name: "asc" } }, { name: "asc" }],
   });
-  res.json({ items });
+  res.json({
+    items: items.map(({ productId, recipeId, variants, menuCategory, ...item }) => ({
+      ...item,
+      menuCategory: menuCategory ? { name: menuCategory.name } : null,
+      variants: variants.map((v) => ({ id: v.id, name: v.name })),
+      tracksStock: Boolean(productId || recipeId || variants.some((v) => v.stockProductId || v.recipeId)),
+    })),
+  });
 }));
 
 const menuLinesSchema = z.object({
