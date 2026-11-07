@@ -889,6 +889,12 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const transactionsInTotal = round2(newSaleTransactions.reduce((s, t) => s + Number(t.amount), 0));
     const byMethodMap = new Map<string, { name: string; count: number; total: number }>();
     const methodLocations = new Map<string, Set<string>>();
+    // Each method split by where the money was taken, with amounts - so money taken with no
+    // location (an invoice paid by an admin, a room deposit) shows as its own line saying what
+    // it was and who took it, instead of quietly swelling the method's total.
+    const methodByLocation = new Map<string, Map<string, { name: string; noLocation: boolean; count: number; total: number; details: string[] }>>();
+    const sourceLabel: Record<string, string> = { COMMERCIAL_DOCUMENT_PAYMENT: "Invoice payment", FOLIO_DEPOSIT: "Room deposit", FOLIO_SETTLEMENT: "Room bill", MEMBERSHIP_PAYMENT: "Membership", POS_SALE: "POS sale" };
+    const whoTook = new Map(employeesForBranch.map((e) => [e.id, `${e.firstName} ${e.lastName}`.trim()]));
     for (const t of newSaleTransactions) {
       const key = t.paymentMethodId ?? "unknown";
       const bucket = byMethodMap.get(key) ?? { name: t.paymentMethod?.name ?? "Unknown", count: 0, total: 0 };
@@ -896,6 +902,16 @@ reportsRouter.get("/sales", async (req, res, next) => {
       byMethodMap.set(key, bucket);
       // A transaction with no location (e.g. a room deposit) is labelled, not hidden.
       methodLocations.set(key, new Set([...(methodLocations.get(key) ?? []), t.location?.name ?? "No location"]));
+      const places = methodByLocation.get(key) ?? new Map();
+      const placeKey = t.locationId ?? "none";
+      const place = places.get(placeKey) ?? { name: t.location?.name ?? "No location", noLocation: !t.locationId, count: 0, total: 0, details: [] };
+      place.count += 1; place.total += Number(t.amount);
+      if (place.noLocation && place.details.length < 8) {
+        const what = t.description || sourceLabel[t.source] || t.source;
+        place.details.push(`${what} - KSh ${Number(t.amount).toLocaleString("en-KE")}${t.employeeId ? `, taken by ${whoTook.get(t.employeeId) ?? "a removed employee"}` : ""}`);
+      }
+      places.set(placeKey, place);
+      methodByLocation.set(key, places);
     }
     // Credit and complimentary sales never produce a Transaction row (nothing
     // was collected), so without adding them explicitly here they'd be
@@ -909,9 +925,11 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // breakdown adds up to what was sold.
     const unpaidValue = round2(Math.max(0, soldNetValue - transactionsInTotal));
     const soldBasisTotal = round2(transactionsInTotal + unpaidValue + complimentaryValue);
-    const rawMethodRows: { name: string; count: number; total: number; locationName?: string | null }[] = [...byMethodMap.entries()].map(([key, b]) => ({
+    type MethodPlace = { name: string; noLocation: boolean; count: number; total: number; details: string[] };
+    const rawMethodRows: { name: string; count: number; total: number; locationName?: string | null; byLocation?: MethodPlace[] }[] = [...byMethodMap.entries()].map(([key, b]) => ({
       ...b,
       locationName: [...(methodLocations.get(key) ?? [])].join(", ") || null,
+      byLocation: [...(methodByLocation.get(key)?.values() ?? [])].map((p) => ({ ...p, total: round2(p.total) })).sort((x, y) => Number(y.noLocation) - Number(x.noLocation) || y.total - x.total),
     }));
     if (unpaidValue > 0.01) rawMethodRows.push({ name: "Unpaid (credit & folio balances)", count: 0, total: unpaidValue, locationName: null });
     if (complimentaryValue > 0.01) rawMethodRows.push({ name: "Complimentary", count: complimentaryCount, total: complimentaryValue });
@@ -946,9 +964,17 @@ reportsRouter.get("/sales", async (req, res, next) => {
       addToEmployee(key === "unattributed" ? null : key, folioLinesFinancials(lines, tax).total, new Set(lines.map((l) => l.folioId)).size);
     }
     for (const t of transactionsIn) if (t.source === "MEMBERSHIP_PAYMENT") addToEmployee(t.employeeId, Number(t.amount), 1);
-    const byEmployee = [...byEmployeeMap.values()]
-      .map((b) => ({ ...b, total: round2(b.total), percentOfTotal: soldNetValue ? round2((b.total / soldNetValue) * 100) : 0 }))
-      .sort((a, b) => b.total - a.total);
+    // Collected: money each person actually took in this period, whatever it was for (sales,
+    // invoices, room deposits) - so anyone holding money appears, waiter or not, shift or not.
+    const collectedBy = new Map<string, number>();
+    for (const t of newSaleTransactions) {
+      const key = t.employeeId ?? "unattributed";
+      collectedBy.set(key, (collectedBy.get(key) ?? 0) + Number(t.amount));
+      if (!byEmployeeMap.has(key)) addToEmployee(t.employeeId, 0, 0);
+    }
+    const byEmployee = [...byEmployeeMap.entries()]
+      .map(([key, b]) => ({ ...b, total: round2(b.total), collected: round2(collectedBy.get(key) ?? 0), percentOfTotal: soldNetValue ? round2((b.total / soldNetValue) * 100) : 0 }))
+      .sort((a, b) => b.total - a.total || b.collected - a.collected);
 
     // ---- Sales by customer — sold-basis like Sales by Location (a credit
     // sale counts here even before it's paid), top 10 by revenue plus a
