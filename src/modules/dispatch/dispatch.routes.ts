@@ -23,7 +23,7 @@ dispatchRouter.use(requirePermission("STORE_DISPATCH"));
 const tenantId = (req: { tenantId?: string }) => { if (!req.tenantId) throw new Error("Tenant context is required"); return req.tenantId; };
 const handle = (fn: (req: Request, res: Response) => Promise<void>) => (req: Request, res: Response, next: NextFunction) => {
   fn(req, res).catch((error) => {
-    if (error instanceof DispatchError) { res.status(error.status).json({ error: error.message }); return; }
+    if (error instanceof DispatchError) { res.status(error.status).json({ error: error.message, ...(error.code ? { code: error.code } : {}) }); return; }
     if (error instanceof InsufficientStockError) { res.status(409).json({ error: `Not enough ${error.label} in the store to dispatch this` }); return; }
     next(error);
   });
@@ -172,16 +172,22 @@ dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
     select: { productId: true, quantity: true },
   });
   const stockByProduct = new Map(stocks.map((stock) => [stock.productId, Number(stock.quantity)]));
+  // What the storekeeper said to send is what is sent - never quietly cut down to what the
+  // store holds. A line asking for more than is there is refused, so they set it themselves
+  // (to what they're really sending, or 0); the system never decides nothing went.
   const usedByProduct = new Map<string, number>();
+  const shortLines: string[] = [];
   const lines = request.items.map((item) => {
-    const explicit = overrideByItem.get(item.id);
-    const desired = explicit ?? Number(item.requestedQty);
+    const quantity = Math.max(overrideByItem.get(item.id) ?? Number(item.requestedQty), 0);
     const alreadyUsed = usedByProduct.get(item.productId) ?? 0;
     const available = Math.max((stockByProduct.get(item.productId) ?? 0) - alreadyUsed, 0);
-    const quantity = explicit === undefined ? desired : Math.min(desired, available);
-    usedByProduct.set(item.productId, alreadyUsed + Math.max(quantity, 0));
+    if (quantity > available + 0.0005) shortLines.push(`${item.productName} (${+available.toFixed(3)} in store, ${+quantity.toFixed(3)} entered)`);
+    usedByProduct.set(item.productId, alreadyUsed + quantity);
     return { item, quantity };
   });
+  if (shortLines.length) {
+    throw new DispatchError(`Not enough in ${request.fromLocation.name}: ${shortLines.join(", ")}. Set what you're actually sending - 0 if none - then dispatch.`, 409, "SEND_MORE_THAN_STOCK");
+  }
   const toSend = lines.filter((l) => l.quantity > 0);
   if (toSend.length === 0) throw new DispatchError("Dispatch at least one item, or reject the request instead");
 
