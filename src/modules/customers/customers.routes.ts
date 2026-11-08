@@ -3,6 +3,7 @@ import { logActivityAfter } from "../../lib/activity.js";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
+import { assertCustomerRules, normalizeIdNumber } from "../../lib/customerRules.js";
 import { requireModule } from "../../middleware/tenantContext.js";
 import { nextCustomerNo } from "../../lib/sequence.js";
 import { partialNoDefaults } from "../../lib/zod.js";
@@ -25,14 +26,15 @@ const optionalEmail = z.preprocess(blankToUndefined, z.email().optional());
 const optionalDate = z.preprocess(blankToUndefined, z.coerce.date().optional());
 const optionalEnum = <T extends readonly [string, ...string[]]>(values: T) => z.preprocess(blankToUndefined, z.enum(values).optional());
 
-// Only first name + phone are required — everything else here just builds a
-// fuller customer profile over time, not something any sale depends on.
+// Only a first name is required here; the phone is required only when the
+// property says so (lib/customerRules) — everything else builds a fuller
+// customer profile over time, not something any sale depends on.
 const createSchema = z.object({
   customerType: z.enum(customerTypes).default("PERSONAL"),
   firstName: z.string().trim().min(1).max(60),
   lastName: optionalText(60),
   email: optionalEmail,
-  phone: z.string().trim().min(1).max(30),
+  phone: z.string().trim().max(30).default(""),
 
   nationality: optionalText(60),
   idNumber: optionalText(40),
@@ -167,6 +169,7 @@ customersRouter.post("/", async (req, res, next) => {
   if (!data.success) { res.status(400).json({ error: "Invalid customer", details: data.error.flatten() }); return; }
   const tid = tenantId(req);
   try {
+    await assertCustomerRules(prisma, tid, data.data, { checkPhone: true, checkIdNumber: true });
     const customerNo = await nextCustomerNo(tid);
     const locationId = await resolveActorLocation(tid, req.userId);
     const customer = await prisma.customer.create({ data: { tenantId: tid, customerNo, createdBy: req.userId, locationId, ...data.data }, include: auditInclude });
@@ -187,6 +190,13 @@ customersRouter.patch("/:id", async (req, res, next) => {
     // it can't linger and show up next to the business name everywhere the
     // app renders "firstName lastName".
     const clearLastName = data.data.customerType === "BUSINESS" ? { lastName: null } : {};
+    // The ID and phone are checked only when they change, so an older clash or a "0000"
+    // phone doesn't block editing anything else about the customer.
+    const current = await prisma.customer.findFirst({ where: { id: req.params.id, tenantId: tid }, select: { idNumber: true, phone: true } });
+    if (current) {
+      const idChanged = data.data.idNumber !== undefined && normalizeIdNumber(data.data.idNumber ?? "") !== normalizeIdNumber(current.idNumber ?? "");
+      await assertCustomerRules(prisma, tid, data.data, { excludeCustomerId: req.params.id, checkPhone: data.data.phone !== undefined && data.data.phone.trim() !== current.phone.trim(), checkIdNumber: idChanged });
+    }
     const updated = await prisma.customer.updateMany({ where: { id: req.params.id, tenantId: tid }, data: { ...data.data, ...clearLastName, updatedBy: req.userId } });
     if (!updated.count) { res.status(404).json({ error: "Customer not found" }); return; }
     const customer = await prisma.customer.findUniqueOrThrow({ where: { id: req.params.id }, include: auditInclude });

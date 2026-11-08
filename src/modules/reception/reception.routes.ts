@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Prisma, ReservationActivityAction } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
+import { assertCustomerRules, normalizeIdNumber } from "../../lib/customerRules.js";
 import { syncRoomBilledOrderPayments } from "../../lib/roomBilledOrders.js";
 import { allocateFolio, ROOM_POT } from "../../lib/folioAllocation.js";
 import { requireModule, hasPermission } from "../../middleware/tenantContext.js";
@@ -45,7 +46,8 @@ const customerSchema = z.object({
   firstName: z.string().trim().min(1),
   lastName: z.string().trim().min(1).optional(),
   email: z.email().optional(),
-  phone: z.string().trim().min(5).max(30),
+  // Required only when the property says so - see lib/customerRules.
+  phone: z.string().trim().max(30).default(""),
   idNumber: optionalText(40),
   businessName: optionalText(160),
   registrationNumber: optionalText(80),
@@ -294,8 +296,8 @@ async function withCreditOutstanding<T extends { folio: { id: string; creditAmou
 }
 
 receptionRouter.get("/customers", async (req, res) => res.json({ customers: await prisma.customer.findMany({ where: { tenantId: tenantId(req) }, orderBy: [{ lastName: "asc" }, { firstName: "asc" }] }) }));
-receptionRouter.post("/customers", async (req, res) => { const data = customerSchema.safeParse(req.body); if (!data.success) { invalid(res, "customer", data.error.flatten()); return; } const tid = tenantId(req); const customerNo = await nextCustomerNo(tid); const actor = await resolveActor(tid, req); res.status(201).json({ customer: await prisma.customer.create({ data: { tenantId: tid, customerNo, createdBy: actor.performedBy, locationId: actor.locationId, ...data.data } }) }); });
-receptionRouter.patch("/customers/:id", async (req, res) => { const data = partialNoDefaults(customerSchema).safeParse(req.body); if (!data.success) { invalid(res, "customer", data.error.flatten()); return; } const customer = await prisma.customer.updateMany({ where: { id: req.params.id, tenantId: tenantId(req) }, data: { ...data.data, updatedBy: req.userId } }); if (!customer.count) { res.status(404).json({ error: "Customer not found" }); return; } res.json({ customer: await prisma.customer.findUniqueOrThrow({ where: { id: req.params.id } }) }); });
+receptionRouter.post("/customers", async (req, res) => { const data = customerSchema.safeParse(req.body); if (!data.success) { invalid(res, "customer", data.error.flatten()); return; } const tid = tenantId(req); await assertCustomerRules(prisma, tid, data.data, { checkPhone: true, checkIdNumber: true }); const customerNo = await nextCustomerNo(tid); const actor = await resolveActor(tid, req); res.status(201).json({ customer: await prisma.customer.create({ data: { tenantId: tid, customerNo, createdBy: actor.performedBy, locationId: actor.locationId, ...data.data } }) }); });
+receptionRouter.patch("/customers/:id", async (req, res) => { const data = partialNoDefaults(customerSchema).safeParse(req.body); if (!data.success) { invalid(res, "customer", data.error.flatten()); return; } const current = await prisma.customer.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { idNumber: true, phone: true } }); if (current) await assertCustomerRules(prisma, tenantId(req), data.data, { excludeCustomerId: req.params.id, checkPhone: data.data.phone !== undefined && data.data.phone.trim() !== current.phone.trim(), checkIdNumber: data.data.idNumber !== undefined && normalizeIdNumber(data.data.idNumber ?? "") !== normalizeIdNumber(current.idNumber ?? "") }); const customer = await prisma.customer.updateMany({ where: { id: req.params.id, tenantId: tenantId(req) }, data: { ...data.data, updatedBy: req.userId } }); if (!customer.count) { res.status(404).json({ error: "Customer not found" }); return; } res.json({ customer: await prisma.customer.findUniqueOrThrow({ where: { id: req.params.id } }) }); });
 receptionRouter.delete("/customers/:id", async (req, res) => {
   const gone = await prisma.customer.findFirst({ where: { id: req.params.id, tenantId: tenantId(req) }, select: { id: true, firstName: true, lastName: true, phone: true } });
   const customer = await prisma.customer.deleteMany({ where: { id: req.params.id, tenantId: tenantId(req) } });

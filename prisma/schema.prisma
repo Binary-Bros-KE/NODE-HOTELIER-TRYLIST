@@ -3809,6 +3809,9 @@ model BusinessProfile {
   // technically open, instead of bleeding into "today." 0 (default)
   // reproduces plain midnight-to-midnight for everyone who never touches it.
   businessDayStartHour Int @default(0)
+  // Super Admin setting: new and edited customers must carry a real phone number
+  // (no "0000" placeholders). Off: the phone may be left blank.
+  requireCustomerPhone Boolean @default(false)
 
   primaryPhone     String?
   alternativePhone String?

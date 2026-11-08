@@ -161,6 +161,27 @@ async function handleDocumentLogoUpload(req: Request, res: Response, next: NextF
   }
 }
 
+/** Customer rules - Super Admin only. requireCustomerPhone: new and edited customers
+ * must carry a real phone number; off, the phone may be left blank. */
+businessProfileRouter.patch("/customer-rules", async (req, res, next) => {
+  const data = z.object({ requireCustomerPhone: z.boolean() }).safeParse(req.body);
+  if (!data.success) { res.status(400).json({ error: "Invalid setting" }); return; }
+  try {
+    const tid = tenantId(req);
+    const admin = req.userId ? await prisma.employee.findFirst({ where: { id: req.userId, tenantId: tid, status: "ACTIVE", role: { name: "Super Admin" } }, select: { id: true } }) : null;
+    if (!admin) { res.status(403).json({ error: "Only a Super Admin can change customer rules" }); return; }
+    const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { id: true, requireCustomerPhone: true } });
+    if (!profile) { res.status(409).json({ error: "Set up Business Information first" }); return; }
+    const updated = await prisma.businessProfile.update({ where: { tenantId: tid }, data: { requireCustomerPhone: data.data.requireCustomerPhone } });
+    if (profile.requireCustomerPhone !== data.data.requireCustomerPhone) {
+      await logActivityAfter(req, { area: "SETTINGS", action: "business.customer_rules", target: { type: "BusinessProfile", id: profile.id, label: "Customer rules" }, summary: data.data.requireCustomerPhone ? "Made a phone number required for customers" : "Made the customer phone number optional" });
+    }
+    res.json({ profile: updated });
+  } catch (error) {
+    next(error);
+  }
+});
+
 businessProfileRouter.put("/", async (req, res, next) => {
   const data = profileSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid business profile", details: data.error.flatten() }); return; }
