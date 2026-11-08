@@ -6,10 +6,10 @@ import { prisma } from "./prisma.js";
  * The rules every path that creates or edits a customer applies, so a waiter's quick
  * "new customer" can't do what the full form refuses:
  *  - an ID / passport number belongs to one customer only (blank is fine);
- *  - placeholder IDs ("000000") and phones ("0000", "8888") are refused;
+ *  - placeholder IDs ("000000") are refused;
  *  - a real phone is required only when the property's Super Admin has switched
  *    "Require a phone number" on (BusinessProfile.requireCustomerPhone); otherwise
- *    it may be left blank.
+ *    the phone is not checked at all (blank or zeros are fine).
  * Throws { status } errors the global error handler turns into responses.
  */
 
@@ -48,11 +48,7 @@ export async function assertCustomerRules(
   if (options.checkPhone) {
     const phone = String(input.phone ?? "").trim();
     const profile = await db.businessProfile.findUnique({ where: { tenantId }, select: { requireCustomerPhone: true } });
-    if (profile?.requireCustomerPhone) {
-      if (!isRealPhone(phone)) throw fail(400, "Please enter a valid phone number");
-    } else if (phone && /^\D*0*\D*$/.test(phone)) {
-      // Not required, but a row of zeros is never a number: leave it blank instead.
-      throw fail(400, "Leave the phone blank if the customer has none - don't type zeros");
-    }
+    // Off, anything goes - blank, zeros, whatever staff type.
+    if (profile?.requireCustomerPhone && !isRealPhone(phone)) throw fail(400, "Please enter a valid phone number");
   }
 }
