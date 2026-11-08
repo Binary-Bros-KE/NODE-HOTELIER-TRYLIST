@@ -48,6 +48,7 @@ const createSchema = z.object({
   allowOutOfStockOrders: z.boolean().default(false),
   // Print the store's dispatch slip automatically when an order is posted (else the storekeeper prints it).
   dispatchAutoPrint: z.boolean().default(true),
+  dispatchSlipCopies: z.number().int().min(1).max(5).default(1),
   // COUNTER mode: print an order ticket for the barman on every waiter post/change.
   orderTicketAutoPrint: z.boolean().default(false),
   dispatchFromLocationId: z.string().cuid().nullable().optional(),
@@ -90,6 +91,7 @@ const locationFields = {
   skipKitchenAfterDispatch: true,
   allowOutOfStockOrders: true,
   dispatchAutoPrint: true,
+  dispatchSlipCopies: true,
   orderTicketAutoPrint: true,
   dispatchFromLocationId: true,
   receiptHeader: true,

@@ -25,7 +25,7 @@ const stockLineInclude = {
  * out as a NEW ORDER listing everything (Omega #1070, #1074, #1081, #1102). */
 export async function queueDispatchSlip(
   client: Prisma.TransactionClient | typeof prisma,
-  args: { tenantId: string; requestId: string; orderId: string; storeLocationId: string; requestedBy: string | null | undefined; joinedPending?: boolean },
+  args: { tenantId: string; requestId: string; orderId: string; storeLocationId: string; requestedBy: string | null | undefined; joinedPending?: boolean; copies?: number },
 ) {
   const printer = await client.printer.findFirst({
     where: { tenantId: args.tenantId, locationId: args.storeLocationId, isActive: true },
@@ -38,7 +38,7 @@ export async function queueDispatchSlip(
   const lastSlip = args.joinedPending && await client.printJob.findFirst({ where: { tenantId: args.tenantId, kind: "DISPATCH", dispatchRequestId: args.requestId }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
   const slip = await dispatchSlipFor(args.tenantId, args.requestId, lastSlip ? lastSlip.createdAt : null);
   return client.printJob.create({
-    data: { tenantId: args.tenantId, locationId: args.storeLocationId, printerId: printer.id, orderId: args.orderId, kind: "DISPATCH", dispatchRequestId: args.requestId, requestedBy: args.requestedBy ?? null, ticket: slip ? (JSON.parse(JSON.stringify(slip)) as Prisma.InputJsonValue) : undefined },
+    data: { tenantId: args.tenantId, locationId: args.storeLocationId, printerId: printer.id, orderId: args.orderId, kind: "DISPATCH", dispatchRequestId: args.requestId, requestedBy: args.requestedBy ?? null, ticket: slip ? (JSON.parse(JSON.stringify({ ...slip, copies: args.copies ?? 1 })) as Prisma.InputJsonValue) : undefined },
     select: { id: true },
   });
 }
@@ -53,7 +53,7 @@ export async function autoRequestDispatch(tenantId: string, orderId: string, act
     const order = await prisma.posOrder.findFirst({
       where: { id: orderId, tenantId },
       include: {
-        location: { select: { id: true, serveMode: true, requireStoreDispatch: true, dispatchFromLocationId: true, dispatchAutoPrint: true } },
+        location: { select: { id: true, serveMode: true, requireStoreDispatch: true, dispatchFromLocationId: true, dispatchAutoPrint: true, dispatchSlipCopies: true } },
         items: { include: stockLineInclude },
       },
     });
@@ -63,7 +63,7 @@ export async function autoRequestDispatch(tenantId: string, orderId: string, act
     const waiting = await prisma.stockDispatchRequest.findFirst({ where: { tenantId, orderId }, orderBy: { requestedAt: "desc" }, select: { status: true } });
     const request = await createDispatchRequest({ ...order, tenantId }, actorId, "Sent to the store automatically when the order was posted");
     if (order.location?.dispatchAutoPrint) {
-      await queueDispatchSlip(prisma, { tenantId, requestId: request.id, orderId, storeLocationId: request.fromLocationId, requestedBy: actorId, joinedPending: waiting?.status === "REQUESTED" });
+      await queueDispatchSlip(prisma, { tenantId, requestId: request.id, orderId, storeLocationId: request.fromLocationId, requestedBy: actorId, joinedPending: waiting?.status === "REQUESTED", copies: order.location.dispatchSlipCopies });
     }
     return request;
   } catch (error) {

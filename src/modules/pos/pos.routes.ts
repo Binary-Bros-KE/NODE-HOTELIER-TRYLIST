@@ -3439,7 +3439,9 @@ posRouter.post("/print-jobs/:id/claim", async (req, res) => {
   const ticket = job.kind === "ORDER_TICKET" && job.ticket ? (job.ticket as unknown as OrderTicket) : null;
   const profile = slip || ticket ? await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessName: true } }) : null;
   const columns = printOptions.data.columns ?? 42;
-  const data = slip ? renderDispatchPrint(slip, columns, profile?.businessName ?? '').toString('base64')
+  // A slip can print several times (Location.dispatchSlipCopies) - each copy cut on its own.
+  const copies = Math.min(5, Math.max(1, Number((job.ticket as { copies?: number } | null)?.copies) || 1));
+  const data = slip ? Buffer.concat(Array.from({ length: copies }, () => renderDispatchPrint(slip, columns, profile?.businessName ?? ''))).toString('base64')
     : ticket ? renderOrderTicketPrint(ticket, columns, profile?.businessName ?? '').toString('base64')
     : null;
   const { ticket: _ticket, ...jobOut } = job;
