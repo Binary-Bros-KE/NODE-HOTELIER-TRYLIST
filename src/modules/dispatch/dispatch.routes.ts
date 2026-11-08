@@ -181,12 +181,12 @@ dispatchRouter.post("/:id/dispatch", handle(async (req, res) => {
     const quantity = Math.max(overrideByItem.get(item.id) ?? Number(item.requestedQty), 0);
     const alreadyUsed = usedByProduct.get(item.productId) ?? 0;
     const available = Math.max((stockByProduct.get(item.productId) ?? 0) - alreadyUsed, 0);
-    if (quantity > available + 0.0005) shortLines.push(`${item.productName} (${+available.toFixed(3)} in store, ${+quantity.toFixed(3)} entered)`);
+    if (quantity > available + 0.0005) shortLines.push(item.productName);
     usedByProduct.set(item.productId, alreadyUsed + quantity);
     return { item, quantity };
   });
   if (shortLines.length) {
-    throw new DispatchError(`Not enough in ${request.fromLocation.name}: ${shortLines.join(", ")}. Set what you're actually sending - 0 if none - then dispatch.`, 409, "SEND_MORE_THAN_STOCK");
+    throw new DispatchError(`Not enough in ${request.fromLocation.name} for ${shortLines.join(", ")} to dispatch`, 409, "SEND_MORE_THAN_STOCK");
   }
   const toSend = lines.filter((l) => l.quantity > 0);
   if (toSend.length === 0) throw new DispatchError("Dispatch at least one item, or reject the request instead");
