@@ -185,6 +185,8 @@ stockIssuesRouter.get("/requests", handle(async (req, res) => {
     status: z.enum(["REQUESTED", "DISPATCHED", "REJECTED", "CANCELLED"]).optional(),
     fromLocationId: z.string().min(1).optional(),
     toLocationId: z.string().min(1).optional(),
+    // The store inbox: requests made to any store.
+    fromStores: z.literal("1").optional(),
   }), req.query, res);
   if (!query) return;
   const requests = await prisma.stockRequest.findMany({
@@ -193,6 +195,7 @@ stockIssuesRouter.get("/requests", handle(async (req, res) => {
       ...(query.status ? { status: query.status } : {}),
       ...(query.fromLocationId ? { fromLocationId: query.fromLocationId } : {}),
       ...(query.toLocationId ? { toLocationId: query.toLocationId } : {}),
+      ...(query.fromStores ? { fromLocation: { type: "STORE" as const } } : {}),
     },
     include: stockRequestInclude,
     orderBy: { requestedAt: "desc" },
@@ -220,11 +223,19 @@ stockIssuesRouter.post("/requests/:id/dispatch", requirePermission("STORE_DISPAT
   if (!request) throw notFound("Stock request not found");
   if (request.status !== "REQUESTED") throw badRequest("This request has already been answered");
 
+  // Every line is answered by the storekeeper; nothing is assumed. A line the
+  // store can't cover is refused until they set what they really send (or 0).
   const quantityByItem = new Map(body.lines.map((line) => [line.itemId, line.quantity]));
-  const chosen = (request.items as StockRequestWithItems["items"])
-    .map((item) => ({ item, quantity: quantityByItem.get(item.id) ?? Number(item.requestedQty) }))
+  const items = request.items as StockRequestWithItems["items"];
+  const unanswered = items.filter((item) => !quantityByItem.has(item.id));
+  if (unanswered.length) throw badRequest(`Enter how much you are sending for: ${unanswered.map((i) => i.productName).join(", ")}`);
+  const onHand = await onHandAt(tid, request.fromLocationId, items.map((i) => i.productId));
+  const tooMuch = items.filter((item) => quantityByItem.get(item.id)! > Math.max(onHand.get(item.productId) ?? 0, 0));
+  if (tooMuch.length) throw badRequest(`The store doesn't have enough of: ${tooMuch.map((i) => `${i.productName} (has ${onHand.get(i.productId) ?? 0})`).join(", ")}. Set what you're really sending, or 0.`);
+  const chosen = items
+    .map((item) => ({ item, quantity: quantityByItem.get(item.id)! }))
     .filter((line) => line.quantity > 0);
-  if (chosen.length === 0) throw badRequest("Enter a dispatch quantity for at least one item");
+  if (chosen.length === 0) throw badRequest("Nothing is being sent. Reject the request instead.");
   for (const line of chosen) {
     const requested = Number(line.item.requestedQty);
     if (line.quantity > requested) throw badRequest(`You cannot dispatch more ${line.item.productName} than requested`);
@@ -275,7 +286,7 @@ stockIssuesRouter.post("/requests/:id/dispatch", requirePermission("STORE_DISPAT
 
     await Promise.all((request.items as StockRequestWithItems["items"]).map((item) => tx.stockRequestItem.update({
       where: { id: item.id },
-      data: { dispatchedQty: quantityByItem.get(item.id) ?? Number(item.requestedQty) },
+      data: { dispatchedQty: quantityByItem.get(item.id)! },
     })));
     if (createdTransferId) await tx.stockRequest.update({ where: { id: request.id }, data: { transferId: createdTransferId } });
     return createdTransferId;
