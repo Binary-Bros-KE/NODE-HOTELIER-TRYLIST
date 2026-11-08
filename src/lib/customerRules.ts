@@ -49,7 +49,7 @@ export async function assertCustomerRules(
     const phone = String(input.phone ?? "").trim();
     const profile = await db.businessProfile.findUnique({ where: { tenantId }, select: { requireCustomerPhone: true } });
     if (profile?.requireCustomerPhone) {
-      if (!isRealPhone(phone)) throw fail(400, "Enter the customer's real phone number (at least 9 digits) - this property requires one");
+      if (!isRealPhone(phone)) throw fail(400, "Please enter a valid phone number");
     } else if (phone && /^\D*0*\D*$/.test(phone)) {
       // Not required, but a row of zeros is never a number: leave it blank instead.
       throw fail(400, "Leave the phone blank if the customer has none - don't type zeros");
