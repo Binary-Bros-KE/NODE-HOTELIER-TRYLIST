@@ -72,6 +72,8 @@ async function stockRequestDto(tid: string, request: StockRequestWithItems) {
     respondedByName: request.respondedByName,
     respondedAt: request.respondedAt,
     rejectReason: request.rejectReason,
+    // The transfer a dispatch created, so the Store list shows it once, as this request.
+    transferId: request.transferId,
     fromLocation: request.fromLocation,
     toLocation: request.toLocation,
     items: request.items.map((item) => ({
@@ -189,6 +191,9 @@ stockIssuesRouter.get("/requests", handle(async (req, res) => {
     fromStores: z.literal("1").optional(),
     // Requests this employee made or answered.
     employeeId: z.string().min(1).optional(),
+    // Either end of the request, as the Store list filters.
+    locationId: z.string().min(1).optional(),
+    search: z.string().trim().max(100).optional(),
   }), req.query, res);
   if (!query) return;
   const requests = await prisma.stockRequest.findMany({
@@ -198,7 +203,15 @@ stockIssuesRouter.get("/requests", handle(async (req, res) => {
       ...(query.fromLocationId ? { fromLocationId: query.fromLocationId } : {}),
       ...(query.toLocationId ? { toLocationId: query.toLocationId } : {}),
       ...(query.fromStores ? { fromLocation: { type: "STORE" as const } } : {}),
-      ...(query.employeeId ? { OR: [{ requestedBy: query.employeeId }, { respondedBy: query.employeeId }] } : {}),
+      AND: [
+        ...(query.employeeId ? [{ OR: [{ requestedBy: query.employeeId }, { respondedBy: query.employeeId }] }] : []),
+        ...(query.locationId ? [{ OR: [{ fromLocationId: query.locationId }, { toLocationId: query.locationId }] }] : []),
+        ...(query.search ? [{ OR: [
+          { requestNo: { contains: query.search, mode: "insensitive" as const } },
+          { fromLocation: { name: { contains: query.search, mode: "insensitive" as const } } },
+          { toLocation: { name: { contains: query.search, mode: "insensitive" as const } } },
+        ] }] : []),
+      ],
     },
     include: stockRequestInclude,
     orderBy: { requestedAt: "desc" },

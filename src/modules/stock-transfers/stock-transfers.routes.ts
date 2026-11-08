@@ -58,12 +58,15 @@ stockTransfersRouter.get("/", async (req, res, next) => {
     const tid = tenantId(req);
     const where: Prisma.StockTransferWhereInput = {
       tenantId: tid,
-      ...(locationId ? { OR: [{ fromLocationId: locationId }, { toLocationId: locationId }] } : {}),
-      ...(search ? { OR: [
-        { transferNo: { contains: search, mode: "insensitive" } },
-        { fromLocation: { name: { contains: search, mode: "insensitive" } } },
-        { toLocation: { name: { contains: search, mode: "insensitive" } } },
-      ] } : {}),
+      // AND, so a search keeps the location filter instead of replacing it.
+      AND: [
+        ...(locationId ? [{ OR: [{ fromLocationId: locationId }, { toLocationId: locationId }] }] : []),
+        ...(search ? [{ OR: [
+          { transferNo: { contains: search, mode: "insensitive" as const } },
+          { fromLocation: { name: { contains: search, mode: "insensitive" as const } } },
+          { toLocation: { name: { contains: search, mode: "insensitive" as const } } },
+        ] }] : []),
+      ],
     };
     const transfers = await prisma.stockTransfer.findMany({ where, include: transferInclude, orderBy: { createdAt: "desc" } });
     const summary = {
