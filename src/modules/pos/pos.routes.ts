@@ -2398,7 +2398,7 @@ posRouter.post("/bill-groups/:billGroupId/payments", async (req, res) => {
         area: "POS", action: groupIsDebt ? "pos.debt.collect" : "pos.payment.others_bill", target: orderTarget(orders[0]), locationId: orders[0].locationId,
         summary: groupIsDebt
           ? `Collected ${kes(parsed.data.amount)} owed on ${label}${customerName(orders[0]) ? ` from ${customerName(orders[0])}` : ""}`
-          : `Took ${kes(parsed.data.amount)} on ${label}, rung up by ${(await employeeName(prisma, tid, orders[0].createdBy)) ?? "another employee"}`,
+          : `Recorded a payment of ${kes(parsed.data.amount)} on ${label}, rung up by ${(await employeeName(prisma, tid, orders[0].createdBy)) ?? "another employee"}`,
       });
     }
     res.status(201).json({ orders: updatedOrders.map((order) => withFinancials(order, tax)) });
@@ -2484,7 +2484,7 @@ posRouter.post("/orders/:id/payments", async (req, res) => {
         area: "POS", action: isDebtPayment ? "pos.debt.collect" : "pos.payment.others_bill", target: orderTarget(order), locationId: order.locationId,
         summary: isDebtPayment
           ? `Collected ${kes(parsed.data.amount)} owed on Order #${order.orderNumber}${customerName(order) ? ` from ${customerName(order)}` : ""}`
-          : `${parsed.data.method === "ROOM" ? "Charged" : "Took"} ${kes(parsed.data.amount)} on Order #${order.orderNumber}${parsed.data.method === "ROOM" ? " to a room" : ""}, rung up by ${(await employeeName(prisma, tid, order.createdBy)) ?? "another employee"}`,
+          : `${parsed.data.method === "ROOM" ? "Charged" : "Recorded a payment of"} ${kes(parsed.data.amount)} on Order #${order.orderNumber}${parsed.data.method === "ROOM" ? " to a room" : ""}, rung up by ${(await employeeName(prisma, tid, order.createdBy)) ?? "another employee"}`,
       });
     }
     res.status(201).json({ order: withFinancials(updatedOrder, tax) });

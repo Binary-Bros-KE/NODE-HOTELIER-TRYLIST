@@ -3,7 +3,8 @@ import type { Prisma, ReservationActivityAction } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { requirePermission } from "../../middleware/tenantContext.js";
-import { blankToUndefined, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
+import { blankToUndefined, dateOnlyStamp, localStamp, parseLocalStamp } from "../../lib/dateFilters.js";
+import { businessDayWindowForDateOnly } from "../../lib/businessDay.js";
 import type { ActivityArea } from "../../lib/activity.js";
 
 /**
@@ -257,10 +258,13 @@ async function loggedRows(tid: string, f: Filter, take: number): Promise<Row[]> 
     },
     orderBy: { occurredAt: "desc" }, take,
   });
-  return entries.map((e) => ({ ...e, area: e.area as ActivityArea, fromRecords: false }));
+  // Early entries said "Took KSh X on Order #N" for a payment on someone else's bill.
+  return entries.map((e) => ({ ...e, summary: e.summary.replace(/^Took (KSh [\d,.]+) on /, "Recorded a payment of $1 on "), area: e.area as ActivityArea, fromRecords: false }));
 }
 
 export const listQuery = z.object({
+  // One business day (the tenant's shift hours, e.g. 10am to 10am), or a from/to range.
+  date: dateOnlyStamp,
   from: localStamp,
   to: localStamp,
   actorId: z.preprocess(blankToUndefined, z.string().trim().max(40).optional()),
@@ -274,9 +278,15 @@ export const listQuery = z.object({
 
 /** One page of the merged feed, newest first. */
 export async function activityFeed(tid: string, q: z.infer<typeof listQuery>) {
+  // Plain dates are business days: they start at the tenant's day-start hour, like the reports.
+  const dateOnly = (v?: string) => (v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00.000Z`) : null);
+  const startHour = q.date || dateOnly(q.from) || dateOnly(q.to)
+    ? (await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessDayStartHour: true } }))?.businessDayStartHour ?? 0
+    : 0;
+  const dayWindow = (v?: string) => { const d = dateOnly(v); return d ? businessDayWindowForDateOnly(startHour, d) : null; };
   const f: Filter = {
-    start: q.from ? parseLocalStamp(q.from, false) : undefined,
-    end: q.to ? parseLocalStamp(q.to, true) : undefined,
+    start: q.date ? dayWindow(q.date)!.start : q.from ? dayWindow(q.from)?.start ?? parseLocalStamp(q.from, false) : undefined,
+    end: q.date ? dayWindow(q.date)!.end : q.to ? dayWindow(q.to)?.end ?? parseLocalStamp(q.to, true) : undefined,
     actorId: q.actorId,
     area: q.area,
     search: q.search,
