@@ -549,6 +549,30 @@ employeeSalariesRouter.delete("/:id/items/:itemId", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+/** An empty draft (nothing on it - no basic pay, no allowances or deductions) can be
+ * deleted outright, so a mistaken one doesn't block that employee's month. Anything with
+ * money on it stays: complete it, or void it once completed. */
+employeeSalariesRouter.delete("/:id", async (req, res, next) => {
+  const tid = tenantId(req);
+  try {
+    const existing = await prisma.employeeSalary.findFirst({
+      where: { id: req.params.id, tenantId: tid },
+      select: { id: true, status: true, basicSalary: true, grossPay: true, netPay: true, totalDeductions: true, totalAllowances: true, carriedOverAmount: true, _count: { select: { items: true } } },
+    });
+    if (!existing) { res.status(404).json({ error: "Salary record not found" }); return; }
+    if (existing.status !== "DRAFT") { res.status(409).json({ error: "Only an empty draft can be deleted" }); return; }
+    const amounts = [existing.basicSalary, existing.grossPay, existing.netPay, existing.totalDeductions, existing.totalAllowances, existing.carriedOverAmount];
+    if (existing._count.items > 0 || amounts.some((amount) => Math.abs(Number(amount)) > 0.005)) {
+      res.status(409).json({ error: "This draft has amounts on it - remove them first, or complete it" });
+      return;
+    }
+    const salary = await prisma.employeeSalary.findUniqueOrThrow({ where: { id: existing.id }, include: { employee: true } });
+    await prisma.employeeSalary.delete({ where: { id: existing.id } });
+    await logActivityAfter(req, { area: "PAYROLL", action: "salary.delete_draft", target: salaryTarget(salary as never), summary: `Deleted the empty draft ${salaryLine(salary as never)}` });
+    res.status(204).send();
+  } catch (error) { next(error); }
+});
+
 employeeSalariesRouter.post("/:id/complete", async (req, res, next) => {
   const data = completeSchema.safeParse(req.body);
   if (!data.success) { res.status(400).json({ error: "Invalid payment details", details: data.error.flatten() }); return; }
