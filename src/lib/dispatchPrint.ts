@@ -56,10 +56,11 @@ export function renderDispatchPrint(slip: Slip, columns: number, businessName: s
       }
     });
   };
-  section('ALREADY ON ORDER', slip.existingDishes);
+  // An update prints only what was added - the store has the rest on the earlier slip,
+  // and a big order would otherwise reprint metres of thermal roll every round.
   section(slip.kind === 'UPDATED_ORDER' ? 'UPDATED ITEMS TO DISPATCH' : 'ITEMS TO DISPATCH', slip.dishes);
   // No dishes recorded (e.g. an older request): the store still gets the pick list.
-  if (!slip.dishes.length && !slip.existingDishes.length && slip.items.length) {
+  if (!slip.dishes.length && slip.items.length) {
     line(rule); heading('ITEMS TO DISPATCH'); line(rule);
     for (const item of slip.items) {
       const amount = `${quantity(item.quantity)} ${item.unit ?? ''}`.trim();

@@ -3432,7 +3432,10 @@ posRouter.post("/print-jobs/:id/claim", async (req, res) => {
   if (!claimed.count) { res.status(409).json({ error: "Already claimed by another device, or not found" }); return; }
   const job = await prisma.printJob.findUniqueOrThrow({ where: { id: req.params.id }, select: { id: true, orderId: true, status: true, kind: true, dispatchRequestId: true, ticket: true } });
   // A dispatch slip travels with the claim, so the printing device needs no store permissions of its own.
-  const slip = job.kind === "DISPATCH" && job.dispatchRequestId ? await dispatchSlipFor(tid, job.dispatchRequestId) : null;
+  // A dispatch slip is frozen when queued (lib/dispatchAuto); older jobs are built now.
+  const slip = job.kind === "DISPATCH" && job.dispatchRequestId
+    ? (job.ticket as unknown as NonNullable<Awaited<ReturnType<typeof dispatchSlipFor>>> | null) ?? await dispatchSlipFor(tid, job.dispatchRequestId)
+    : null;
   const ticket = job.kind === "ORDER_TICKET" && job.ticket ? (job.ticket as unknown as OrderTicket) : null;
   const profile = slip || ticket ? await prisma.businessProfile.findUnique({ where: { tenantId: tid }, select: { businessName: true } }) : null;
   const columns = printOptions.data.columns ?? 42;

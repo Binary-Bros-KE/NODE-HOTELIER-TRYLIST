@@ -19,10 +19,13 @@ const stockLineInclude = {
   addons: { include: { addon: { include: addonStockInclude } } },
 } satisfies Prisma.PosOrderItemInclude;
 
-/** Queues the store's dispatch slip to the store's default printer. Returns null (nothing queued) when the store has no active printer set up. */
+/** Queues the store's dispatch slip to the store's default printer. Returns null (nothing queued) when the store has no active printer set up.
+ * The slip is frozen now, while this round is the one waiting: built at print time, a slip
+ * the store PC picked up hours late (after the round was dispatched from the screen) came
+ * out as a NEW ORDER listing everything (Omega #1070, #1074, #1081, #1102). */
 export async function queueDispatchSlip(
   client: Prisma.TransactionClient | typeof prisma,
-  args: { tenantId: string; requestId: string; orderId: string; storeLocationId: string; requestedBy: string | null | undefined },
+  args: { tenantId: string; requestId: string; orderId: string; storeLocationId: string; requestedBy: string | null | undefined; joinedPending?: boolean },
 ) {
   const printer = await client.printer.findFirst({
     where: { tenantId: args.tenantId, locationId: args.storeLocationId, isActive: true },
@@ -30,8 +33,12 @@ export async function queueDispatchSlip(
     select: { id: true },
   });
   if (!printer) return null;
+  // A round added while the previous one is still waiting joins the same request; the
+  // last slip printed for it marks where this round starts.
+  const lastSlip = args.joinedPending && await client.printJob.findFirst({ where: { tenantId: args.tenantId, kind: "DISPATCH", dispatchRequestId: args.requestId }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
+  const slip = await dispatchSlipFor(args.tenantId, args.requestId, lastSlip ? lastSlip.createdAt : null);
   return client.printJob.create({
-    data: { tenantId: args.tenantId, locationId: args.storeLocationId, printerId: printer.id, orderId: args.orderId, kind: "DISPATCH", dispatchRequestId: args.requestId, requestedBy: args.requestedBy ?? null },
+    data: { tenantId: args.tenantId, locationId: args.storeLocationId, printerId: printer.id, orderId: args.orderId, kind: "DISPATCH", dispatchRequestId: args.requestId, requestedBy: args.requestedBy ?? null, ticket: slip ? (JSON.parse(JSON.stringify(slip)) as Prisma.InputJsonValue) : undefined },
     select: { id: true },
   });
 }
@@ -53,9 +60,10 @@ export async function autoRequestDispatch(tenantId: string, orderId: string, act
     if (!order || !dispatchRequired(order.location)) return null;
     const untracked = await untrackedProductIds(prisma, tenantId, order.items);
     if (!order.items.some((item) => lineNeedsDispatch(item, untracked))) return null;
+    const waiting = await prisma.stockDispatchRequest.findFirst({ where: { tenantId, orderId }, orderBy: { requestedAt: "desc" }, select: { status: true } });
     const request = await createDispatchRequest({ ...order, tenantId }, actorId, "Sent to the store automatically when the order was posted");
     if (order.location?.dispatchAutoPrint) {
-      await queueDispatchSlip(prisma, { tenantId, requestId: request.id, orderId, storeLocationId: request.fromLocationId, requestedBy: actorId });
+      await queueDispatchSlip(prisma, { tenantId, requestId: request.id, orderId, storeLocationId: request.fromLocationId, requestedBy: actorId, joinedPending: waiting?.status === "REQUESTED" });
     }
     return request;
   } catch (error) {
@@ -191,20 +199,27 @@ export async function requestDishes(tenantId: string, requestId: string) {
   return dishesFromItems(tenantId, request?.fromLocationId, items);
 }
 
-export async function dispatchSlipDishSections(tenantId: string, request: { id: string; orderId: string; fromLocationId: string; status?: string; respondedAt?: Date | null }) {
+/** `roundSince`: lines up to this moment were already sent to the store on an earlier slip. */
+export async function dispatchSlipDishSections(tenantId: string, request: { id: string; orderId: string; fromLocationId: string; status?: string; respondedAt?: Date | null }, roundSince: Date | null = null) {
   const items = await prisma.posOrderItem.findMany({ where: { orderId: request.orderId }, include: stockLineInclude, orderBy: { createdAt: "asc" } });
-  const since = openRoundSince(request);
+  const open = openRoundSince(request);
+  const since = open && roundSince ? (open > roundSince ? open : roundSince) : open ?? roundSince;
   const current = items.filter((item) => item.dispatchRequestId === request.id && (!since || item.createdAt > since));
   const existing = items.filter((item) => item.dispatchRequestId !== request.id || (since != null && item.createdAt <= since));
   const [existingDishes, requestedDishes] = await Promise.all([
     dishesFromItems(tenantId, request.fromLocationId, existing),
     dishesFromItems(tenantId, request.fromLocationId, current),
   ]);
-  return { existingDishes, requestedDishes, isUpdate: existingDishes.length > 0 };
+  // An update only when the order already had lines before this round. A brand-new order's
+  // lines are written together, so a line the store doesn't supply (a drink, a kitchen-counted
+  // item) posted with it no longer turns its slip into an "update".
+  const firstNew = current[0]?.createdAt.getTime();
+  const isUpdate = firstNew == null ? existing.length > 0 : existing.some((item) => item.createdAt.getTime() < firstNew - 2000);
+  return { existingDishes, requestedDishes, isUpdate };
 }
 
 /** Everything a printer needs to draw the slip, so the printing device needs no permissions of its own. */
-export async function dispatchSlipFor(tenantId: string, requestId: string) {
+export async function dispatchSlipFor(tenantId: string, requestId: string, roundSince: Date | null = null) {
   const request = await prisma.stockDispatchRequest.findFirst({
     where: { id: requestId, tenantId },
     include: {
@@ -215,7 +230,7 @@ export async function dispatchSlipFor(tenantId: string, requestId: string) {
     },
   });
   if (!request) return null;
-  const sections = await dispatchSlipDishSections(tenantId, request);
+  const sections = await dispatchSlipDishSections(tenantId, request, roundSince);
   return {
     requestNo: request.requestNo,
     orderNumber: request.orderNumber,
