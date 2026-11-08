@@ -60,9 +60,16 @@ function isSuperAdmin(employee: { role: { name: string } | null }) {
   return employee.role?.name === "Super Admin";
 }
 
+// Anyone ticked as a supervisor can approve any staff member's shift — big
+// properties need a pool of approvers, not one fixed supervisor per person.
+// Everyone else only reaches the people who report to them.
+function canApproveAnyone(employee: { isSupervisor: boolean; role: { name: string } | null }) {
+  return isSuperAdmin(employee) || employee.isSupervisor;
+}
+
 async function assertCanApprove(tid: string, approverId: string | undefined, target: { employeeId: string; employee: { supervisorId: string | null; isSupervisor: boolean } }) {
   const approver = await currentEmployee(tid, approverId);
-  if (isSuperAdmin(approver) || target.employee.supervisorId === approver.id || (target.employeeId === approver.id && approver.isSupervisor)) return approver;
+  if (canApproveAnyone(approver) || target.employee.supervisorId === approver.id) return approver;
   throw Object.assign(new Error("Only this employee's supervisor can approve this shift"), { status: 403 });
 }
 
@@ -70,7 +77,7 @@ async function assertCanApprove(tid: string, approverId: string | undefined, tar
 // covers the employee looking at their own past shift, not just supervisors.
 async function assertCanView(tid: string, actorId: string | undefined, target: { employeeId: string; employee: { supervisorId: string | null; isSupervisor: boolean } }) {
   const actor = await currentEmployee(tid, actorId);
-  if (isSuperAdmin(actor) || target.employee.supervisorId === actor.id || target.employeeId === actor.id) return actor;
+  if (canApproveAnyone(actor) || target.employee.supervisorId === actor.id || target.employeeId === actor.id) return actor;
   throw Object.assign(new Error("You cannot view this employee's shift"), { status: 403 });
 }
 
@@ -445,7 +452,7 @@ shiftsRouter.get("/approvals", async (req, res, next) => {
       where: {
         tenantId: tid,
         status: { in: ["REQUESTED_START", "REQUESTED_END"] },
-        ...(isSuperAdmin(actor) ? {} : { employee: { supervisorId: actor.id } }),
+        ...(canApproveAnyone(actor) ? {} : { employee: { supervisorId: actor.id } }),
       },
       include: shiftInclude,
       orderBy: { updatedAt: "asc" },
