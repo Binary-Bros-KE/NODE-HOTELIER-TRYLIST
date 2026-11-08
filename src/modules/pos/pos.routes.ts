@@ -659,6 +659,8 @@ async function orderListWhere(tid: string, userId: string | undefined, f: OrderL
   };
 }
 
+const NON_FINAL_ORDER_STATUSES: PosOrderStatus[] = ["OPEN", "PREPARING", "READY", "SERVED"];
+
 posRouter.get("/orders", async (req, res) => {
   const query = orderListFilterSchema.extend({
     status: z.enum(["OPEN", "PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED", "PENDING_CANCELLATION"]).optional(),
@@ -667,6 +669,11 @@ posRouter.get("/orders", async (req, res) => {
     limit: z.coerce.number().int().min(1).max(500).optional(),
     // Completed but not fully paid (on credit / part-paid) - every one, however old.
     owing: z.enum(["true"]).optional(),
+    // Also return the other still-open parts of every linked bill on the list, wherever they
+    // are made: a waiter filtered to the bar then sees her whole bill (bar + restaurant) as
+    // one card, the way an admin does - not just her part with a "pay once every location
+    // has served" she can do nothing about (Omega #1173 + #1181).
+    linkedParts: z.enum(["true"]).optional(),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid filters" }); return; }
   const tid = tenantIdFor(req);
@@ -681,6 +688,19 @@ posRouter.get("/orders", async (req, res) => {
     }),
     taxSettingsFor(tid),
   ]);
+  if (query.data.linkedParts) {
+    const listed = new Set(orders.map((order) => order.id));
+    const groups = [...new Set(orders.flatMap((order) => (order.billGroupId && NON_FINAL_ORDER_STATUSES.includes(order.status) ? [order.billGroupId] : [])))];
+    if (groups.length) {
+      // Same who-may-see rule as the list (own orders unless allowed all), minus the location filter.
+      const { locationId: _locationId, ...unscoped } = scope.where;
+      const others = await prisma.posOrder.findMany({
+        where: { ...unscoped, billGroupId: { in: groups }, status: { in: NON_FINAL_ORDER_STATUSES }, id: { notIn: [...listed] } },
+        include: orderInclude,
+      });
+      orders.push(...others);
+    }
+  }
   res.status(200).json({ orders: await withBillParts(tid, orders.map((order) => withFinancials(order, tax)), tax) });
 });
 
