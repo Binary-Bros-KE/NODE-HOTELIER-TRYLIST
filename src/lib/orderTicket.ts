@@ -160,13 +160,12 @@ export function renderOrderTicketPrint(ticket: OrderTicket, columns: number, bus
   };
   const qty = (n: number) => Number(n).toLocaleString("en-KE", { maximumFractionDigits: 3 });
   const describe = (l: TicketLine) => [l.name, l.variant ? `(${l.variant})` : ""].filter(Boolean).join(" ");
-  // An item line in double width AND height so the counter can read it at a glance - double
-  // height alone stretched the letters tall and thin. Twice as wide means half the characters
-  // fit on a line, so wrap at half the width. Add-ons beneath at normal size.
+  // An item line in bold at normal size: double height stretched the letters and double
+  // width + height was far too big (printers only scale in whole steps). Add-ons beneath.
   const item = (text: string, addons: string[] = []) => {
-    command(27, 69, 1, 29, 33, 17);
-    wrap(text.toUpperCase(), Math.floor(cols / 2)).forEach((part) => line(part));
-    command(29, 33, 0, 27, 69, 0);
+    command(27, 69, 1);
+    wrap(text.toUpperCase(), cols).forEach((part) => line(part));
+    command(27, 69, 0);
     for (const addon of addons) wrap(`  + ${addon}`, cols).forEach((part) => line(part));
   };
   const section = (title: string) => { line(rule); heading(title); line(rule); };
