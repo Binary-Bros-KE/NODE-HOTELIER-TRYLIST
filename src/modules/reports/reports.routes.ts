@@ -643,7 +643,10 @@ reportsRouter.get("/sales", async (req, res, next) => {
     const repaymentTxnIds = await creditRepaymentTxnIds(tid, allTxns);
     const creditRepaymentsCash = round2(transactionsIn.filter((t) => repaymentTxnIds.has(t.id)).reduce((s, t) => s + Number(t.amount), 0));
     const creditSalesRevenue = round2(creditEntries.reduce((s, e) => s + Number(e.amount), 0));
-    const totalRevenue = round2(posSalesCash - creditRepaymentsCash + creditSalesRevenue + folioDepositsCash + folioSettlementsCash + serviceCenterCash);
+    // Invoice payments: stay invoices are paid through the folio (FOLIO_* above), so only
+    // payments on stand-alone invoices land here - nothing is counted twice.
+    const invoicePaymentsCash = round2(transactionsIn.filter((t) => t.source === "COMMERCIAL_DOCUMENT_PAYMENT" && !repaymentTxnIds.has(t.id)).reduce((s, t) => s + Number(t.amount), 0));
+    const totalRevenue = round2(posSalesCash - creditRepaymentsCash + creditSalesRevenue + folioDepositsCash + folioSettlementsCash + serviceCenterCash + invoicePaymentsCash);
 
     // ---- Completed orders: the sales-volume + Net Revenue/Profit basis.
     // Deliberately NOT the same base as Total Revenue above — a sale settled
@@ -659,7 +662,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
     let menuOrdersCompleted = 0;
     const taxBuckets = new Map<string, { key: string; label: string; treatment: string; rate: number; mode: string; net: number; tax: number; gross: number }>();
     const topItemsMap = new Map<string, { kind: "MENU" | "PRODUCT" | "SERVICE" | "OTHER"; name: string; variant: string | null; qty: number; revenue: number }>();
-    const byLocationMap = new Map<string, { name: string; count: number; revenue: number; cogs: number }>();
+    const byLocationMap = new Map<string, { name: string; count: number; revenue: number; cogs: number; details?: string[] }>();
     const byCustomerMap = new Map<string, { name: string; count: number; revenue: number }>();
     let complimentaryValue = 0;
     let complimentaryCogs = 0;
@@ -701,7 +704,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         complimentaryCount += 1;
       }
       const locKey = order.locationId ?? "unassigned";
-      const locBucket = byLocationMap.get(locKey) ?? { name: order.location?.name ?? "Unassigned", count: 0, revenue: 0, cogs: 0 };
+      const locBucket = byLocationMap.get(locKey) ?? { name: order.location?.name ?? "No location", count: 0, revenue: 0, cogs: 0 };
       locBucket.count += 1;
       locBucket.revenue += fin.total;
       locBucket.cogs += orderCogs;
@@ -742,7 +745,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       const fin = folioLinesFinancials(lines, tax);
       const attribution = roomFolioAttribution.get(folioId);
       const locKey = attribution?.locationId ?? "unassigned";
-      const locBucket = byLocationMap.get(locKey) ?? { name: attribution?.locationName ?? "Unassigned", count: 0, revenue: 0, cogs: 0 };
+      const locBucket = byLocationMap.get(locKey) ?? { name: attribution?.locationName ?? "No location", count: 0, revenue: 0, cogs: 0 };
       locBucket.count += 1;
       locBucket.revenue += fin.total; // rooms carry no cost of goods
       byLocationMap.set(locKey, locBucket);
@@ -756,11 +759,70 @@ reportsRouter.get("/sales", async (req, res, next) => {
 
     for (const m of membershipPayments) {
       const locKey = m.locationId ?? "unassigned";
-      const locBucket = byLocationMap.get(locKey) ?? { name: m.location?.name ?? "Unassigned", count: 0, revenue: 0, cogs: 0 };
+      const locBucket = byLocationMap.get(locKey) ?? { name: m.location?.name ?? "No location", count: 0, revenue: 0, cogs: 0 };
       locBucket.count += 1;
       locBucket.revenue += Number(m.amount);
       byLocationMap.set(locKey, locBucket);
     }
+
+    // ---- Invoices: sold on the day they're issued, like any other sale. Only stand-alone
+    // invoices (typed in, or from a quotation) count. One raised from a stay, a POS order or
+    // a service sale only bills what's already counted above, so it's skipped entirely, and
+    // so is any line copied in from a stay, folio or POS order. ----
+    const invoiceDocs = await prisma.commercialDocument.findMany({
+      where: {
+        tenantId: tid, type: "INVOICE", source: { in: ["MANUAL", "QUOTATION"] },
+        status: { in: ["ISSUED", "PARTIALLY_PAID", "PAID", "OVERDUE"] },
+        OR: [{ issuedAt: { gte: start, lte: end } }, { issuedAt: null, createdAt: { gte: start, lte: end } }],
+        ...(locationId ? { locationId } : {}),
+      },
+      select: {
+        documentNo: true, title: true, locationId: true, location: { select: { name: true } }, createdBy: true,
+        customerId: true, customer: { select: { firstName: true, lastName: true, businessName: true } }, prospectName: true,
+        lines: { select: { source: true, quantity: true, unitPrice: true, discount: true, taxRate: true, taxMode: true, taxTreatment: true } },
+      },
+    });
+    const linkedLineSources = new Set(["ROOM_STAY", "FOLIO", "POS_ORDER"]);
+    let invoiceGross = 0;
+    let invoiceDiscounts = 0;
+    const invoiceSales: { createdBy: string | null; total: number }[] = [];
+    for (const doc of invoiceDocs) {
+      const lines = doc.lines.filter((l) => !linkedLineSources.has(l.source));
+      if (!lines.length) continue;
+      const fin = computeOrderFinancials({
+        discount: 0,
+        items: lines.map((l) => ({
+          quantity: Number(l.quantity),
+          unitPrice: Math.max(0, Number(l.quantity) * Number(l.unitPrice) - Number(l.discount)) / Number(l.quantity),
+          addons: [], taxRate: l.taxRate, taxMode: l.taxMode, taxTreatment: l.taxTreatment,
+        })),
+      }, tax);
+      const lineDiscounts = lines.reduce((s, l) => s + Number(l.discount), 0);
+      invoiceGross += fin.total + lineDiscounts;
+      invoiceDiscounts += lineDiscounts;
+      taxCollected += fin.taxAmount;
+      for (const line of fin.taxLines) {
+        const bucket = taxBuckets.get(line.key) ?? { ...line, net: 0, tax: 0, gross: 0 };
+        bucket.net += line.net; bucket.tax += line.tax; bucket.gross += line.gross;
+        taxBuckets.set(line.key, bucket);
+      }
+      invoiceSales.push({ createdBy: doc.createdBy, total: fin.total });
+      const locKey = doc.locationId ?? "unassigned";
+      const locBucket = byLocationMap.get(locKey) ?? { name: doc.location?.name ?? "No location", count: 0, revenue: 0, cogs: 0 };
+      locBucket.count += 1;
+      locBucket.revenue += fin.total; // invoice lines carry no stock cost
+      // Sales with no location say what they were, so they're never just added in silently.
+      if (!doc.locationId) locBucket.details = [...(locBucket.details ?? []), `${doc.documentNo}${doc.title ? ` ${doc.title}` : ""} - KSh ${round2(fin.total).toLocaleString("en-KE")}`];
+      byLocationMap.set(locKey, locBucket);
+      const custKey = doc.customerId ?? `prospect:${doc.prospectName ?? doc.documentNo}`;
+      const custBucket = byCustomerMap.get(custKey) ?? { name: doc.customer ? customerLabel(doc.customer) : doc.prospectName || "Walk-in", count: 0, revenue: 0 };
+      custBucket.count += 1;
+      custBucket.revenue += fin.total;
+      byCustomerMap.set(custKey, custBucket);
+    }
+    invoiceGross = round2(invoiceGross);
+    invoiceDiscounts = round2(invoiceDiscounts);
+    taxCollected = round2(taxCollected);
 
     const soldItems = [...topItemsMap.values()].sort((a, b) => b.revenue - a.revenue).map((i) => ({ ...i, revenue: round2(i.revenue) }));
     const soldByKind = (["MENU", "PRODUCT", "SERVICE"] as const).map((kind) => {
@@ -855,8 +917,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
     // Net Profit: what was actually sold after discounts, less the cost of goods
     // sold and every expense. ----
     const grossPosSales = round2(completedSalesValue + discountsGiven);
-    const totalSoldValue = round2(grossPosSales + roomGross + serviceCenterCash);
-    const discountsAll = round2(discountsGiven + roomDiscountsGiven);
+    const totalSoldValue = round2(grossPosSales + roomGross + serviceCenterCash + invoiceGross);
+    const discountsAll = round2(discountsGiven + roomDiscountsGiven + invoiceDiscounts);
     const soldNetValue = round2(totalSoldValue - discountsAll);
     const netProfit = round2(soldNetValue - cogsTotal - totalExpenses);
 
@@ -879,6 +941,8 @@ reportsRouter.get("/sales", async (req, res, next) => {
         expenses: locExpenses,
         netProfit: netProfitHere,
         profitPercent: b.revenue ? round2((netProfitHere / b.revenue) * 100) : 0,
+        noLocation: locId === "unassigned",
+        details: b.details ?? [],
       };
     }).sort((a, b) => b.revenue - a.revenue);
 
@@ -964,6 +1028,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
       addToEmployee(key === "unattributed" ? null : key, folioLinesFinancials(lines, tax).total, new Set(lines.map((l) => l.folioId)).size);
     }
     for (const t of transactionsIn) if (t.source === "MEMBERSHIP_PAYMENT") addToEmployee(t.employeeId, Number(t.amount), 1);
+    for (const s of invoiceSales) addToEmployee(s.createdBy, s.total, 1);
     // Collected: money each person actually took in this period, whatever it was for (sales,
     // invoices, room deposits) - so anyone holding money appears, waiter or not, shift or not.
     const collectedBy = new Map<string, number>();
@@ -1051,7 +1116,7 @@ reportsRouter.get("/sales", async (req, res, next) => {
         complimentaryValue, complimentaryCogs,
         creditGiven, creditCount, creditRepaymentsCash,
         roomSalesValue, roomSalesCount, roomDiscountsGiven,
-        completedSalesValue, totalSoldValue, grossPosSales, roomGross, discountsAll, soldNetValue, unpaidValue, cashCollected: totalRevenue, cogs: cogsTotal, unresolvedCostLines,
+        completedSalesValue, totalSoldValue, grossPosSales, roomGross, invoiceGross, invoiceCount: invoiceSales.length, invoicePaymentsCash, discountsAll, soldNetValue, unpaidValue, cashCollected: totalRevenue, cogs: cogsTotal, unresolvedCostLines,
         expensesOnly, salariesPaid, inventoryConsumptionExpenses,
       },
       topItems,
