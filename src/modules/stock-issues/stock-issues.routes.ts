@@ -187,6 +187,8 @@ stockIssuesRouter.get("/requests", handle(async (req, res) => {
     toLocationId: z.string().min(1).optional(),
     // The store inbox: requests made to any store.
     fromStores: z.literal("1").optional(),
+    // Requests this employee made or answered.
+    employeeId: z.string().min(1).optional(),
   }), req.query, res);
   if (!query) return;
   const requests = await prisma.stockRequest.findMany({
@@ -196,6 +198,7 @@ stockIssuesRouter.get("/requests", handle(async (req, res) => {
       ...(query.fromLocationId ? { fromLocationId: query.fromLocationId } : {}),
       ...(query.toLocationId ? { toLocationId: query.toLocationId } : {}),
       ...(query.fromStores ? { fromLocation: { type: "STORE" as const } } : {}),
+      ...(query.employeeId ? { OR: [{ requestedBy: query.employeeId }, { respondedBy: query.employeeId }] } : {}),
     },
     include: stockRequestInclude,
     orderBy: { requestedAt: "desc" },
