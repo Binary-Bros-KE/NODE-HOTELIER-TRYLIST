@@ -244,7 +244,145 @@ const sources: Source[] = [
       }));
     },
   },
+  // Stock coming in, moving and being asked for: read straight from the documents, so
+  // every one shows from the first day, not just from when the log started.
+  {
+    key: "purchaseCreate", area: "FINANCE", targetTypes: ["Purchase"],
+    load: async (tid, f, take) => {
+      const purchases = await prisma.purchase.findMany({
+        where: {
+          tenantId: tid, ...(window(f) ? { createdAt: window(f) } : {}),
+          ...(f.actorId ? { createdBy: f.actorId } : {}),
+          ...(f.target ? { id: f.target.id } : {}),
+          ...(f.search ? { OR: [{ purchaseNo: insensitive(f.search) }, { supplier: { name: insensitive(f.search) } }] } : {}),
+        },
+        select: { id: true, purchaseNo: true, total: true, createdAt: true, createdBy: true, supplier: { select: { name: true } }, location: { select: { name: true } }, _count: { select: { items: true } } },
+        orderBy: { createdAt: "desc" }, take,
+      });
+      return purchases.map((p) => row({
+        id: `purchaseCreate:${p.id}`, occurredAt: p.createdAt, actorId: p.createdBy, area: "FINANCE", action: "purchase.create",
+        targetType: "Purchase", targetId: p.id, targetLabel: p.purchaseNo,
+        summary: `Created purchase ${p.purchaseNo} from ${p.supplier.name}: ${p._count.items} item${p._count.items === 1 ? "" : "s"}, ${money(p.total)}${p.location ? `, for ${p.location.name}` : ""}`,
+        reason: null,
+      }));
+    },
+  },
+  {
+    key: "goodsReceived", area: "STOCK", targetTypes: ["Purchase"],
+    load: async (tid, f, take) => {
+      const receipts = await prisma.goodsReceipt.findMany({
+        where: {
+          tenantId: tid, ...(window(f) ? { createdAt: window(f) } : {}),
+          ...(f.actorId ? { createdBy: f.actorId } : {}),
+          ...(f.target ? { purchaseId: f.target.id } : {}),
+          ...(f.search ? { OR: [{ receiptNo: insensitive(f.search) }, { purchase: { purchaseNo: insensitive(f.search) } }, { purchase: { supplier: { name: insensitive(f.search) } } }, { location: { name: insensitive(f.search) } }] } : {}),
+        },
+        select: { id: true, receiptNo: true, note: true, createdAt: true, createdBy: true, purchaseId: true, purchase: { select: { purchaseNo: true, supplier: { select: { name: true } } } }, location: { select: { name: true } }, _count: { select: { items: true } } },
+        orderBy: { createdAt: "desc" }, take,
+      });
+      return receipts.map((r) => row({
+        id: `goodsReceived:${r.id}`, occurredAt: r.createdAt, actorId: r.createdBy, area: "STOCK", action: "stock.goods_received",
+        targetType: "Purchase", targetId: r.purchaseId, targetLabel: r.receiptNo,
+        summary: `Received goods ${r.receiptNo} into ${r.location.name}: ${r._count.items} item${r._count.items === 1 ? "" : "s"} on purchase ${r.purchase.purchaseNo} (${r.purchase.supplier.name})`,
+        reason: r.note,
+      }));
+    },
+  },
+  {
+    // "Receive goods" on Store & Distribute, without a purchase.
+    key: "stockReceived", area: "STOCK", targetTypes: [],
+    load: async (tid, f, take) => {
+      const receipts = await prisma.stockReceipt.findMany({
+        where: {
+          tenantId: tid, ...(window(f) ? { createdAt: window(f) } : {}),
+          ...(f.actorId ? { createdBy: f.actorId } : {}),
+          ...(f.search ? { OR: [{ receiptNo: insensitive(f.search) }, { location: { name: insensitive(f.search) } }, { items: { some: { product: { name: insensitive(f.search) } } } }] } : {}),
+        },
+        select: { id: true, receiptNo: true, note: true, createdAt: true, createdBy: true, location: { select: { name: true } }, _count: { select: { items: true } } },
+        orderBy: { createdAt: "desc" }, take,
+      });
+      return receipts.map((r) => row({
+        id: `stockReceived:${r.id}`, occurredAt: r.createdAt, actorId: r.createdBy, area: "STOCK", action: "stock.goods_received",
+        targetType: "StockReceipt", targetId: r.id, targetLabel: r.receiptNo,
+        summary: `Received goods ${r.receiptNo} into ${r.location.name}: ${r._count.items} item${r._count.items === 1 ? "" : "s"}, no purchase`,
+        reason: r.note,
+      }));
+    },
+  },
+  {
+    key: "transfers", area: "STOCK", targetTypes: [],
+    load: async (tid, f, take) => {
+      const transfers = await prisma.stockTransfer.findMany({
+        where: {
+          tenantId: tid, ...(window(f) ? { createdAt: window(f) } : {}),
+          ...(f.actorId ? { createdBy: f.actorId } : {}),
+          ...(f.search ? { OR: [{ transferNo: insensitive(f.search) }, { fromLocation: { name: insensitive(f.search) } }, { toLocation: { name: insensitive(f.search) } }, { items: { some: { product: { name: insensitive(f.search) } } } }] } : {}),
+        },
+        select: { id: true, transferNo: true, note: true, createdAt: true, createdBy: true, fromLocation: { select: { name: true } }, toLocation: { select: { name: true } }, _count: { select: { items: true } } },
+        orderBy: { createdAt: "desc" }, take,
+      });
+      // A transfer made by dispatching a request shows once, as that request's dispatch.
+      const fromRequests = new Set((await prisma.stockRequest.findMany({ where: { tenantId: tid, transferId: { in: transfers.map((t) => t.id) } }, select: { transferId: true } })).map((r) => r.transferId));
+      return transfers.filter((t) => !fromRequests.has(t.id)).map((t) => row({
+        id: `transfers:${t.id}`, occurredAt: t.createdAt, actorId: t.createdBy, area: "STOCK", action: "stock.distribute",
+        targetType: "StockTransfer", targetId: t.id, targetLabel: t.transferNo,
+        summary: `Distributed ${t.transferNo}: ${t._count.items} item${t._count.items === 1 ? "" : "s"} from ${t.fromLocation.name} to ${t.toLocation.name}`,
+        reason: t.note,
+      }));
+    },
+  },
+  {
+    key: "requestMade", area: "STOCK", targetTypes: [],
+    load: async (tid, f, take) => {
+      const requests = await prisma.stockRequest.findMany({
+        where: {
+          tenantId: tid, ...(window(f) ? { requestedAt: window(f) } : {}),
+          ...(f.actorId ? { requestedBy: f.actorId } : {}),
+          ...(f.search ? requestSearch(f.search) : {}),
+        },
+        select: { id: true, requestNo: true, note: true, requestedAt: true, requestedBy: true, requestedByName: true, fromLocation: { select: { name: true } }, toLocation: { select: { name: true } }, _count: { select: { items: true } } },
+        orderBy: { requestedAt: "desc" }, take,
+      });
+      return requests.map((r) => row({
+        id: `requestMade:${r.id}`, occurredAt: r.requestedAt, actorId: r.requestedBy, actorName: r.requestedByName ?? undefined, area: "STOCK", action: "stock.request",
+        targetType: "StockRequest", targetId: r.id, targetLabel: r.requestNo,
+        summary: `Requested ${r._count.items} item${r._count.items === 1 ? "" : "s"} from ${r.fromLocation.name} for ${r.toLocation.name} (${r.requestNo})`,
+        reason: r.note,
+      }));
+    },
+  },
+  {
+    key: "requestAnswered", area: "STOCK", targetTypes: [],
+    load: async (tid, f, take) => {
+      const requests = await prisma.stockRequest.findMany({
+        where: {
+          tenantId: tid, respondedAt: window(f) ?? { not: null },
+          ...(f.actorId ? { respondedBy: f.actorId } : {}),
+          ...(f.search ? requestSearch(f.search) : {}),
+        },
+        select: { id: true, requestNo: true, status: true, rejectReason: true, respondedAt: true, respondedBy: true, respondedByName: true, requestedByName: true, fromLocation: { select: { name: true } }, toLocation: { select: { name: true } }, items: { select: { requestedQty: true, dispatchedQty: true } } },
+        orderBy: { respondedAt: "desc" }, take,
+      });
+      return requests.map((r) => {
+        const partial = r.status === "DISPATCHED" && r.items.some((i) => Number(i.dispatchedQty ?? 0) < Number(i.requestedQty));
+        const sent = r.items.filter((i) => Number(i.dispatchedQty ?? 0) > 0).length;
+        const by = r.requestedByName ? ` by ${r.requestedByName}` : "";
+        const summary = r.status === "DISPATCHED"
+          ? `${partial ? "Partly dispatched" : "Dispatched"} request ${r.requestNo}${by}: ${sent} of ${r.items.length} item${r.items.length === 1 ? "" : "s"} from ${r.fromLocation.name} to ${r.toLocation.name}`
+          : `${r.status === "REJECTED" ? "Rejected" : "Cancelled"} request ${r.requestNo}${by} (${r.fromLocation.name} to ${r.toLocation.name})`;
+        return row({
+          id: `requestAnswered:${r.id}`, occurredAt: r.respondedAt!, actorId: r.respondedBy, actorName: r.respondedByName ?? undefined, area: "STOCK",
+          action: r.status === "DISPATCHED" ? (partial ? "stock.request_partial" : "stock.request_dispatch") : r.status === "REJECTED" ? "stock.request_reject" : "stock.request_cancel",
+          targetType: "StockRequest", targetId: r.id, targetLabel: r.requestNo, summary, reason: r.rejectReason,
+        });
+      });
+    },
+  },
 ];
+
+function requestSearch(search: string): Prisma.StockRequestWhereInput {
+  return { OR: [{ requestNo: insensitive(search) }, { fromLocation: { name: insensitive(search) } }, { toLocation: { name: insensitive(search) } }, { items: { some: { product: { name: insensitive(search) } } } }] };
+}
 
 async function loggedRows(tid: string, f: Filter, take: number): Promise<Row[]> {
   const entries = await prisma.activityLog.findMany({
