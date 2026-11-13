@@ -17,6 +17,7 @@ import { createRoomTask } from "../../lib/housekeeping.js";
 import { computeOrderFinancials } from "../../lib/orderTotals.js";
 import { checkedPaymentReference } from "../../lib/paymentReferences.js";
 import { nairobiParts } from "../../lib/shifts.js";
+import { businessDayWindowForDateOnly } from "../../lib/businessDay.js";
 import { roomIsAvailable } from "../../lib/roomAvailability.js";
 import { notify, roomBookingConfirmed } from "../../lib/websiteNotifications.js";
 import { logActivity as writeActivity, changedFields, type ActivityChange } from "../../lib/activity.js";
@@ -481,13 +482,24 @@ async function freeRoom(tx: Prisma.TransactionClient, tenantId: string, roomId: 
 }
 
 receptionRouter.get("/reservations", async (req, res) => {
-  const query = z.object({ status: z.enum(["PENDING", "CONFIRMED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"]).optional(), search: optionalText(120) }).safeParse(req.query);
+  const query = z.object({
+    status: z.enum(["PENDING", "CONFIRMED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"]).optional(),
+    search: optionalText(120),
+    // Guest Stays date picker: stays checked in during that business day (the property's shift hours).
+    checkedInOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid query" }); return; }
-  const { status, search } = query.data;
+  const { status, search, checkedInOn } = query.data;
+  let checkedInWindow: { start: Date; end: Date } | null = null;
+  if (checkedInOn) {
+    const profile = await prisma.businessProfile.findUnique({ where: { tenantId: tenantId(req) }, select: { businessDayStartHour: true } });
+    checkedInWindow = businessDayWindowForDateOnly(profile?.businessDayStartHour ?? 0, new Date(`${checkedInOn}T00:00:00.000Z`));
+  }
   const reservations = await prisma.reservation.findMany({
     where: {
       tenantId: tenantId(req),
       status,
+      ...(checkedInWindow ? { activities: { some: { action: "CHECKED_IN", occurredAt: { gte: checkedInWindow.start, lte: checkedInWindow.end } } } } : {}),
       ...(search
         ? {
             OR: [
