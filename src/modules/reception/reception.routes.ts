@@ -488,9 +488,12 @@ receptionRouter.get("/reservations", async (req, res) => {
     // Not when the desk pressed Check In - receptionists sometimes record it after the guest left.
     // checkIn is a plain date (UTC midnight), so the day is matched exactly.
     stayFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    // Guest Stays reads in stay order: newest check-in date first (ties: newest booking first).
+    // Other callers (room pickers, dashboard) keep the last-changed order.
+    sort: z.enum(["checkIn"]).optional(),
   }).safeParse(req.query);
   if (!query.success) { res.status(400).json({ error: "Invalid query" }); return; }
-  const { status, search, stayFrom } = query.data;
+  const { status, search, stayFrom, sort } = query.data;
   const stayFromDay = stayFrom ? new Date(`${stayFrom}T00:00:00.000Z`) : null;
   const reservations = await prisma.reservation.findMany({
     where: {
@@ -511,7 +514,7 @@ receptionRouter.get("/reservations", async (req, res) => {
         : {}),
     },
     include: reservationInclude,
-    orderBy: [{ updatedAt: "desc" }],
+    orderBy: sort === "checkIn" ? [{ checkIn: "desc" }, { createdAt: "desc" }] : [{ updatedAt: "desc" }],
   });
   res.json({ reservations: await withCreditOutstanding(tenantId(req), reservations) });
 });
