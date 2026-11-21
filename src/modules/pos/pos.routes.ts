@@ -883,10 +883,43 @@ async function createGroupOrder(tx: Prisma.TransactionClient, tid: string, order
   return order;
 }
 
+/**
+ * A store-dispatch location set to skip the kitchen (Location.skipKitchenAfterDispatch):
+ * once nothing on the order is still waiting on the store it does what the chef would - the
+ * order goes to READY for the waiter, and an added round is acknowledged (on a served
+ * order its stock is settled, as the kitchen's ack does). Runs after a dispatch, and also
+ * after posting or editing an order: an order that needs nothing from the store (Milk Pot -
+ * milk is issue-only) never gets a dispatch, and the kitchen screen hides these locations,
+ * so it sat at "Waiting for kitchen" for good (Omega #1730). Never throws: the change
+ * itself is already done, and a hitch here leaves the order where the kitchen can still
+ * move it.
+ */
+export async function skipKitchenIfSet(tid: string, orderId: string | null, req: { userId?: string }) {
+  if (!orderId) return;
+  try {
+    const order = await prisma.posOrder.findFirst({ where: { id: orderId, tenantId: tid }, include: orderInclude });
+    if (!order?.location?.skipKitchenAfterDispatch || !dispatchRequired(order.location)) return;
+    if (!orderDispatchInfo(order, await untrackedProductIds(prisma, tid, order.items)).clear) return;
+    await prisma.$transaction(async (tx) => {
+      if (order.status === "OPEN" || order.status === "PREPARING") {
+        await tx.posOrder.updateMany({ where: { id: order.id, status: order.status }, data: { status: "READY", readyAt: new Date(), readyBy: req.userId ?? null } });
+      }
+      if (order.items.some((item) => item.addedAfterSend)) {
+        await settleServedAdditions(tx, tid, order, req);
+        await tx.posOrderItem.updateMany({ where: { orderId: order.id, addedAfterSend: true }, data: { addedAfterSend: false } });
+        await mergeDuplicateOrderLines(tx, order.id, { includeFlagged: false });
+      }
+    });
+  } catch (error) {
+    console.error("[dispatch] could not skip the kitchen for order", orderId, error);
+  }
+}
+
 /** After the write: store-dispatch locations request their ingredients now, and counter
  * locations print the barman a ticket of what was just posted. */
 async function afterOrdersCreated(tid: string, orders: PosOrderFull[], userId: string | undefined) {
   await Promise.all(orders.map((order) => autoRequestDispatch(tid, order.id, userId)));
+  await Promise.all(orders.map((order) => skipKitchenIfSet(tid, order.id, { userId })));
   await Promise.all(orders.map((order) => queueOrderTicket({ tenantId: tid, order, event: "NEW", after: order.items, by: userId })));
 }
 
@@ -1111,6 +1144,7 @@ async function prepareAddToOrder(
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
     await autoRequestDispatch(tid, order.id, req.userId);
+    await skipKitchenIfSet(tid, order.id, req);
     await queueOrderTicket({ tenantId: tid, order: updated, event: "UPDATED", before: order.items, after: updated.items, by: req.userId });
     return updated;
   };
@@ -1320,7 +1354,10 @@ posRouter.patch("/orders/:id/items/:itemId", async (req, res) => {
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
     await queueOrderTicket({ tenantId: tid, order: updated, event: "UPDATED", before: order.items, after: updated.items, by: req.userId });
-    res.status(200).json({ order: withFinancials(updated, tax) });
+    // An edit that leaves nothing waiting on the store moves a skip-kitchen order on to Ready.
+    await skipKitchenIfSet(tid, order.id, req);
+    const current = await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+    res.status(200).json({ order: withFinancials(current, tax) });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
@@ -1359,7 +1396,10 @@ posRouter.delete("/orders/:id/items/:itemId", async (req, res) => {
       return tx.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     });
     await queueOrderTicket({ tenantId: tid, order: updated, event: "UPDATED", before: order.items, after: updated.items, by: req.userId });
-    res.status(200).json({ order: withFinancials(updated, tax) });
+    // An edit that leaves nothing waiting on the store moves a skip-kitchen order on to Ready.
+    await skipKitchenIfSet(tid, order.id, req);
+    const current = await prisma.posOrder.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
+    res.status(200).json({ order: withFinancials(current, tax) });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Not enough ")) { res.status(409).json({ error: error.message }); return; }
     if (error instanceof Error && "status" in error) { res.status((error as Error & { status: number }).status).json({ error: error.message }); return; }
