@@ -35,17 +35,13 @@ type DispatchOrder = {
 type Db = Pick<Prisma.TransactionClient, "product">;
 
 /**
- * Products on these lines that recipes don't deduct (PERIODIC_COUNT - counted at
- * the kitchen). The store is never asked for them (see perSaleRequirements),
- * so they must not count as "needs the store" either - otherwise a line made
- * only of them (e.g. a juice whose fruit is counted at the kitchen) could never
- * be requested and its order could never be started or served.
+ * Products on these lines the store is never asked for. None any more: every
+ * recipe ingredient is requested and deducted, whatever its tracking setting (see
+ * perSaleRequirements). Kept as the one place that would decide it, so every
+ * "needs the store" check agrees with what is actually requested.
  */
-export async function untrackedProductIds(db: Db, tenantId: string, items: OrderItemForStock[]): Promise<Set<string>> {
-  const ids = [...computeStockRequirements(items).keys()];
-  if (ids.length === 0) return new Set();
-  const rows = await db.product.findMany({ where: { tenantId, id: { in: ids }, trackingMode: "PERIODIC_COUNT" }, select: { id: true } });
-  return new Set(rows.map((row) => row.id));
+export async function untrackedProductIds(_db: Db, _tenantId: string, _items: OrderItemForStock[]): Promise<Set<string>> {
+  return new Set();
 }
 
 const needsStock = (item: OrderItemForStock, untracked: Set<string>) =>
