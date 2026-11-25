@@ -1,0 +1,4352 @@
+[
+ {
+  "menuItemId": "cmufm797f001bw0kso00bgvv0",
+  "variantId": null,
+  "recipeName": "2pcs Boiled Eggs (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm794e001aw0kslkgh8mp6",
+  "variantId": null,
+  "recipeName": "2pcs Fried Eggs (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm798p001cw0ksk3l9xq73",
+  "variantId": null,
+  "recipeName": "2pcs Scramble Eggs (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79nk001iw0kscqnp9mzn",
+  "variantId": null,
+  "recipeName": "3pcs Pancakes (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Fat 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79rq001mw0ksn9z98y8o",
+  "variantId": null,
+  "recipeName": "A Mug of Beef Bone Soup (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm78e40011w0ksl39ylpq2",
+  "variantId": null,
+  "recipeName": "Affogato (placeholder)",
+  "ingredients": [
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77om000iw0ksy0h7pc8g",
+  "variantId": null,
+  "recipeName": "Americano (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7alp001zw0ksi2eariul",
+  "variantId": null,
+  "recipeName": "Andazi (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f5v007sw0ksyid1irc9",
+  "variantId": "cmufm7f5y007tw0ksl2i3ga6h",
+  "recipeName": "BBQ Chicken Pizza Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.02
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.08
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 2
+   },
+   {
+    "product": "Small Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f5v007sw0ksyid1irc9",
+  "variantId": "cmufm7f62007uw0ks02curvc5",
+  "recipeName": "BBQ Chicken Pizza Medium (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.3
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.03
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.12
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 3
+   },
+   {
+    "product": "Medium Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bp3002tw0ksgjfjozd0",
+  "variantId": null,
+  "recipeName": "BBQ/Sweet & Sour/Honey Glazed Chicken Wings (12pcs) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chicken Wings",
+    "qty": 0.75
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bbj002rw0ks7ffortd6",
+  "variantId": null,
+  "recipeName": "BBQ/Sweet & Sour/Honey Glazed Chicken Wings (4pcs) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chicken Wings",
+    "qty": 0.25
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bn0002sw0ksa0wxbiss",
+  "variantId": null,
+  "recipeName": "BBQ/Sweet & Sour/Honey Glazed Chicken Wings (8pcs) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chicken Wings",
+    "qty": 0.5
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7en2006dw0ksw88z0flj",
+  "variantId": null,
+  "recipeName": "Beef & Chicken Combo Burger (placeholder)",
+  "ingredients": [
+   {
+    "product": "Burger Buns",
+    "qty": 1
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.02
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 2
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7csc0040w0ks90la3wtv",
+  "variantId": null,
+  "recipeName": "Beef Fry (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7a4l001rw0ks9ty1lq20",
+  "variantId": null,
+  "recipeName": "Beef Kebab (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 0.15
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ct80041w0ksesdj46zr",
+  "variantId": null,
+  "recipeName": "Beef Matoke (placeholder)",
+  "ingredients": [
+   {
+    "product": "Raw Banana",
+    "qty": 0.3
+   },
+   {
+    "product": "Beef",
+    "qty": 0.1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7eba0062w0ksbqkdiy5i",
+  "variantId": null,
+  "recipeName": "Beef Noodles (Kids) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Spaghetti 500 Gm",
+    "qty": 0.2
+   },
+   {
+    "product": "Beef",
+    "qty": 0.1
+   },
+   {
+    "product": "Soy Sauce 625 Ml",
+    "qty": 0.02
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.05
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   },
+   {
+    "product": "Onions",
+    "qty": 0.02
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7a5l001sw0ksmr55qfzf",
+  "variantId": null,
+  "recipeName": "Beef Samosa (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Beef",
+    "qty": 0.05
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7abf001uw0ks1bf8wp4s",
+  "variantId": null,
+  "recipeName": "Beef Sausage (placeholder)",
+  "ingredients": [
+   {
+    "product": "Sausages",
+    "qty": 2
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cz30044w0ksszwrbndi",
+  "variantId": null,
+  "recipeName": "Beef Sirloin Steak (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7czx0045w0ks75zoog9c",
+  "variantId": null,
+  "recipeName": "Beef on Bone (500g) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 0.5
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cky003qw0ksk0bs9ld0",
+  "variantId": null,
+  "recipeName": "Bhajia (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77p0000jw0ksc3oszisz",
+  "variantId": null,
+  "recipeName": "Black Coffee (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77460006w0kspiyqwlws",
+  "variantId": null,
+  "recipeName": "Black Tea (placeholder)",
+  "ingredients": [
+   {
+    "product": "Tea Leaves 100 Gms",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7d2s0049w0ksh45y7neb",
+  "variantId": null,
+  "recipeName": "Boiled Beef Tumbukiza (1kg) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dcu004nw0ks93kfnbz0",
+  "variantId": null,
+  "recipeName": "Boiled Country Side Chicken (1/2) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Kienyeji",
+    "qty": 0.5
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dev004pw0ksr4ud6jm2",
+  "variantId": null,
+  "recipeName": "Boiled Country Side Chicken (Full) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Kienyeji",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dp4004yw0ksib8qrrmz",
+  "variantId": null,
+  "recipeName": "Boiled Mutton Tumbukiza (1kg) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Mutton",
+    "qty": 1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dn3004ww0ksopokrxos",
+  "variantId": null,
+  "recipeName": "Boiled Mutton Tumbukiza (500g) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Mutton",
+    "qty": 0.5
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7b2g002jw0ks3g3lc0t4",
+  "variantId": null,
+  "recipeName": "Butternut Soup (placeholder)",
+  "ingredients": [
+   {
+    "product": "Butternut",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Whipping Cream",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7c7w003aw0ksqq18vdaz",
+  "variantId": null,
+  "recipeName": "Cabbage (placeholder)",
+  "ingredients": [
+   {
+    "product": "Cabbage",
+    "qty": 0.5
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7epu006kw0ksbnwwdkw4",
+  "variantId": "cmufm7eq9006lw0ks7uttqc2u",
+  "recipeName": "Cafe Latte Single (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7epu006kw0ksbnwwdkw4",
+  "variantId": "cmufm7eqg006mw0ksrmb69ldq",
+  "recipeName": "Cafe Latte Double (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.04
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7etd006tw0ks5obor6l3",
+  "variantId": "cmufm7etm006uw0ksv9uduqxr",
+  "recipeName": "Cafe Mocha Single (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 20
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7etd006tw0ks5obor6l3",
+  "variantId": "cmufm7eu8006vw0ksimfaorqf",
+  "recipeName": "Cafe Mocha Double (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.04
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 40
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7eox006hw0ksa4f7t6nc",
+  "variantId": "cmufm7ep3006iw0kspqeti6qt",
+  "recipeName": "Cappuccino Single (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7eox006hw0ksa4f7t6nc",
+  "variantId": "cmufm7ep9006jw0ksj3430gen",
+  "recipeName": "Cappuccino Double (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.04
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7es6006qw0ks8egu4zf4",
+  "variantId": "cmufm7esc006rw0ksuva8cmjj",
+  "recipeName": "Caramel Macchiato Single (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7es6006qw0ks8egu4zf4",
+  "variantId": "cmufm7esh006sw0ksfmva0ocs",
+  "recipeName": "Caramel Macchiato Double (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.04
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm76wq0002w0ksj1v15qst",
+  "variantId": null,
+  "recipeName": "Chai Latte (placeholder)",
+  "ingredients": [
+   {
+    "product": "Tea Leaves 100 Gms",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cgi003lw0ksi1203gun",
+  "variantId": null,
+  "recipeName": "Chapati (White/Brown) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79n3001hw0ks5nvfl7lb",
+  "variantId": null,
+  "recipeName": "Chapati White/Brown (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7by50031w0ksmcg0a9xn",
+  "variantId": null,
+  "recipeName": "Cheese & Ham Sandwich (placeholder)",
+  "ingredients": [
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.01
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.02
+   },
+   {
+    "product": "Ham",
+    "qty": 0.03
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7eke006aw0ksz5k60cmn",
+  "variantId": null,
+  "recipeName": "Cheese & Tomato Burger (placeholder)",
+  "ingredients": [
+   {
+    "product": "Burger Buns",
+    "qty": 1
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.02
+   },
+   {
+    "product": "Beef Pattee",
+    "qty": 1
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7c0k0035w0ksl4zs6b0d",
+  "variantId": null,
+  "recipeName": "Cheese Goodness (Kids) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Bread",
+    "qty": 1
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.03
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79e3001ew0ksb9757xbq",
+  "variantId": null,
+  "recipeName": "Cheese Omelette (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Milk",
+    "qty": 0.02
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.03
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bys0032w0kskfpvtkkf",
+  "variantId": null,
+  "recipeName": "Chicken Club Sandwich (placeholder)",
+  "ingredients": [
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.01
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7d6a004fw0ks596axrb1",
+  "variantId": null,
+  "recipeName": "Chicken Maryland (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Broilers",
+    "qty": 0.5
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f3t007kw0ks03nebesf",
+  "variantId": "cmufm7f3x007lw0kseo7tf2h2",
+  "recipeName": "Chicken Mushroom Pizza Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.02
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.08
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 2
+   },
+   {
+    "product": "Mushroom 500 Gms",
+    "qty": 0.1
+   },
+   {
+    "product": "Small Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f3t007kw0ks03nebesf",
+  "variantId": "cmufm7f42007mw0ks8qm2vium",
+  "recipeName": "Chicken Mushroom Pizza Medium (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.3
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.03
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.12
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 3
+   },
+   {
+    "product": "Mushroom 500 Gms",
+    "qty": 0.15
+   },
+   {
+    "product": "Medium Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f3t007kw0ks03nebesf",
+  "variantId": "cmufm7f47007nw0kspz0h2o4j",
+  "recipeName": "Chicken Mushroom Pizza Large (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.4
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.04
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.16
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 4
+   },
+   {
+    "product": "Mushroom 500 Gms",
+    "qty": 0.2
+   },
+   {
+    "product": "Large Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ec20063w0ksaogawlvp",
+  "variantId": null,
+  "recipeName": "Chicken Noodles (Kids) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Spaghetti 500 Gm",
+    "qty": 0.2
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 1
+   },
+   {
+    "product": "Soy Sauce 625 Ml",
+    "qty": 0.02
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.05
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   },
+   {
+    "product": "Onions",
+    "qty": 0.02
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79x7001pw0ksci38lj1p",
+  "variantId": null,
+  "recipeName": "Chicken Pie (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Pastry Magerine 5 Kg",
+    "qty": 0.04
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 2
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7a98001tw0ksva03sf8a",
+  "variantId": null,
+  "recipeName": "Chicken Samosa (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bzs0034w0kscerjtg47",
+  "variantId": null,
+  "recipeName": "Chicken Sandwich (Kids) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.01
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7d6q004gw0ksyj8sl82z",
+  "variantId": null,
+  "recipeName": "Chicken Stew (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Broilers",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e38005mw0ksbixfepdi",
+  "variantId": null,
+  "recipeName": "Chinese Beef Noodles (placeholder)",
+  "ingredients": [
+   {
+    "product": "Spaghetti 500 Gm",
+    "qty": 0.2
+   },
+   {
+    "product": "Beef",
+    "qty": 0.1
+   },
+   {
+    "product": "Soy Sauce 625 Ml",
+    "qty": 0.02
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.05
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   },
+   {
+    "product": "Onions",
+    "qty": 0.02
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e3p005nw0ksra04atqh",
+  "variantId": null,
+  "recipeName": "Chinese Chicken Noodles (placeholder)",
+  "ingredients": [
+   {
+    "product": "Spaghetti 500 Gm",
+    "qty": 0.2
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 1
+   },
+   {
+    "product": "Soy Sauce 625 Ml",
+    "qty": 0.02
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.05
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   },
+   {
+    "product": "Onions",
+    "qty": 0.02
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e4c005ow0kss0kybe5r",
+  "variantId": null,
+  "recipeName": "Chinese Pork Noodles (placeholder)",
+  "ingredients": [
+   {
+    "product": "Spaghetti 500 Gm",
+    "qty": 0.2
+   },
+   {
+    "product": "Pork",
+    "qty": 0.1
+   },
+   {
+    "product": "Soy Sauce 625 Ml",
+    "qty": 0.02
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.05
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   },
+   {
+    "product": "Onions",
+    "qty": 0.02
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm78k50015w0kspvpafpwo",
+  "variantId": null,
+  "recipeName": "Chocolate Ice Cream (placeholder)",
+  "ingredients": [
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 20
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7eaa0061w0kstd9oybyo",
+  "variantId": null,
+  "recipeName": "Cinderella Basket (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sausages",
+    "qty": 2
+   },
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.05
+   },
+   {
+    "product": "Blue Band 1 Kg",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm788p000xw0kscggo6v58",
+  "variantId": null,
+  "recipeName": "Cold Milk (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.25
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7aox0025w0kstsktyjve",
+  "variantId": null,
+  "recipeName": "Cookies (Vanilla/Chocolate) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Eggs",
+    "qty": 1
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Fat 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   },
+   {
+    "product": "Cocoa Powder",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77wd000ow0ksbynvqjo9",
+  "variantId": null,
+  "recipeName": "Cortado (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dc4004mw0ks8zxtmz16",
+  "variantId": null,
+  "recipeName": "Country-side Chicken Choma (1/2) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Kienyeji",
+    "qty": 0.5
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7b41002kw0ksn4omdpjx",
+  "variantId": null,
+  "recipeName": "Cream of Chicken Soup (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chicken Pattee",
+    "qty": 1
+   },
+   {
+    "product": "Whipping Cream",
+    "qty": 0.05
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bss002vw0ksf9qi79or",
+  "variantId": null,
+  "recipeName": "Crispy Bacon (placeholder)",
+  "ingredients": [
+   {
+    "product": "Bacon",
+    "qty": 2
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7b7d002ow0kspu2g9wub",
+  "variantId": null,
+  "recipeName": "Crispy Coated Drumsticks (2pcs) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Broilers",
+    "qty": 0.5
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7b83002pw0ks8dygzibm",
+  "variantId": null,
+  "recipeName": "Crispy Coated Drumsticks (4pcs) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Broilers",
+    "qty": 1
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7b91002qw0ksn3o6cmzb",
+  "variantId": null,
+  "recipeName": "Crispy Coated Drumsticks (8pcs) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Broilers",
+    "qty": 2
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7apq0027w0ks4uaum3bg",
+  "variantId": null,
+  "recipeName": "Danish Pastry (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Pastry Magerine 5 Kg",
+    "qty": 0.04
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77rp000mw0ksdsibscoy",
+  "variantId": null,
+  "recipeName": "Doppio (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7elz006cw0ks2v65wzgl",
+  "variantId": null,
+  "recipeName": "Double Burger (placeholder)",
+  "ingredients": [
+   {
+    "product": "Burger Buns",
+    "qty": 1
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.02
+   },
+   {
+    "product": "Beef Pattee",
+    "qty": 2
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7am30020w0kszazu7hl3",
+  "variantId": null,
+  "recipeName": "Doughnut (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f0i007bw0ksq3kkozme",
+  "variantId": "cmufm7f0n007cw0kspaq9zaki",
+  "recipeName": "Easy Oreo Shake Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.25
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 20
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f0i007bw0ksq3kkozme",
+  "variantId": "cmufm7f0s007dw0ksit6cppgp",
+  "recipeName": "Easy Oreo Shake Jumbo (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.375
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.15
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 30
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm772g0005w0ksfavrnemm",
+  "variantId": null,
+  "recipeName": "English Tea (placeholder)",
+  "ingredients": [
+   {
+    "product": "Tea Leaves 100 Gms",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7enw006ew0ks2yzwx328",
+  "variantId": "cmufm7eo2006fw0ksyofsdob5",
+  "recipeName": "Espresso Single (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7enw006ew0ks2yzwx328",
+  "variantId": "cmufm7eo9006gw0ks8u6lnfyh",
+  "recipeName": "Espresso Double (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.04
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7eeq0066w0ksz7a4qo6w",
+  "variantId": null,
+  "recipeName": "Fish Fingers (Kids) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Fish Fillets",
+    "qty": 1
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dbi004lw0ksbquu26zg",
+  "variantId": null,
+  "recipeName": "Flame Grilled Chicken (Full) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Broilers",
+    "qty": 1
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dga004qw0kss8ghj3w1",
+  "variantId": null,
+  "recipeName": "Flame Grilled Country Side Chicken (Full) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Kienyeji",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79oh001jw0kswo5grvar",
+  "variantId": null,
+  "recipeName": "French Toast (placeholder)",
+  "ingredients": [
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Eggs",
+    "qty": 1
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Blue Band 1 Kg",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77e7000aw0ksw2op60oh",
+  "variantId": null,
+  "recipeName": "Fresh Ginger Water (placeholder)",
+  "ingredients": [
+   {
+    "product": "Ginger",
+    "qty": 0.01
+   },
+   {
+    "product": "Lemons",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77yz000rw0ksselfyfv4",
+  "variantId": null,
+  "recipeName": "Fresh Juice (placeholder)",
+  "ingredients": [
+   {
+    "product": "Oranges",
+    "qty": 0.3
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7d170047w0ksnreszhah",
+  "variantId": null,
+  "recipeName": "Fried Beef on Bone (1kg) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dxa005cw0kspkmhtrw1",
+  "variantId": null,
+  "recipeName": "Fried Pork (1kg) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Pork",
+    "qty": 1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dt40054w0ksxuf1yrxt",
+  "variantId": null,
+  "recipeName": "Fried Pork (250g) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Pork",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dvn0059w0ksrpy1e5tr",
+  "variantId": null,
+  "recipeName": "Fried Pork (500g) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Pork",
+    "qty": 0.5
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dse0052w0ksf8uipr38",
+  "variantId": null,
+  "recipeName": "Full Mutton Ribs Choma (placeholder)",
+  "ingredients": [
+   {
+    "product": "Mutton",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cbu003gw0ks8liyfum8",
+  "variantId": null,
+  "recipeName": "Githeri (Minji) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beans 1 Kg",
+    "qty": 0.15
+   },
+   {
+    "product": "Green Maize",
+    "qty": 0.1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ccp003hw0ks9hib3amq",
+  "variantId": null,
+  "recipeName": "Githeri (Vegetables) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beans 1 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7efj0067w0ksnvh4kafc",
+  "variantId": null,
+  "recipeName": "Grilled Chicken Cutlets (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Broilers",
+    "qty": 0.25
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7do2004xw0ksbqdt3coi",
+  "variantId": null,
+  "recipeName": "Grilled Mutton (1kg) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Mutton",
+    "qty": 1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f4o007ow0kslcxgqp77",
+  "variantId": "cmufm7f4w007pw0ks72u8mcp4",
+  "recipeName": "Hawaiian Pizza Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.02
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.08
+   },
+   {
+    "product": "Ham",
+    "qty": 0.05
+   },
+   {
+    "product": "Pineapples",
+    "qty": 0.2
+   },
+   {
+    "product": "Small Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f4o007ow0kslcxgqp77",
+  "variantId": "cmufm7f51007qw0ks23m6t7qe",
+  "recipeName": "Hawaiian Pizza Medium (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.3
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.03
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.12
+   },
+   {
+    "product": "Ham",
+    "qty": 0.075
+   },
+   {
+    "product": "Pineapples",
+    "qty": 0.3
+   },
+   {
+    "product": "Medium Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f4o007ow0kslcxgqp77",
+  "variantId": "cmufm7f58007rw0ks547palri",
+  "recipeName": "Hawaiian Pizza Large (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.4
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.04
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.16
+   },
+   {
+    "product": "Ham",
+    "qty": 0.1
+   },
+   {
+    "product": "Pineapples",
+    "qty": 0.4
+   },
+   {
+    "product": "Large Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7edt0065w0ks094i67bt",
+  "variantId": null,
+  "recipeName": "Hot Dog (placeholder)",
+  "ingredients": [
+   {
+    "product": "Sausages",
+    "qty": 1
+   },
+   {
+    "product": "Bread",
+    "qty": 1
+   },
+   {
+    "product": "Mustard 300 Ml",
+    "qty": 0.02
+   },
+   {
+    "product": "Ketchup 700 Gms",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm78az000zw0kst3unyjy5",
+  "variantId": null,
+  "recipeName": "Iced Americano (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77xu000qw0ksofqp8el4",
+  "variantId": null,
+  "recipeName": "Iced Coffee (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm789m000yw0ks5sy2ghto",
+  "variantId": null,
+  "recipeName": "Iced Latte (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm78ey0012w0ksgdrxwxb1",
+  "variantId": null,
+  "recipeName": "Iced Latte Machiato (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm78go0013w0ksojaoezdw",
+  "variantId": null,
+  "recipeName": "Iced Machiato (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm78by0010w0kse0fpbvbn",
+  "variantId": null,
+  "recipeName": "Iced Mocha (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 20
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7876000ww0ksdackrqeh",
+  "variantId": null,
+  "recipeName": "Iced Passion Tea (placeholder)",
+  "ingredients": [
+   {
+    "product": "Passion",
+    "qty": 0.05
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm785r000vw0ksx3whu218",
+  "variantId": null,
+  "recipeName": "Iced Tea (placeholder)",
+  "ingredients": [
+   {
+    "product": "Tea Leaves 100 Gms",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7aql002aw0ks7tea9wgn",
+  "variantId": null,
+  "recipeName": "Kachumbari (placeholder)",
+  "ingredients": [
+   {
+    "product": "Tomatoes",
+    "qty": 0.1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.05
+   },
+   {
+    "product": "Lemons",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bwm002yw0ksd5nxp8gd",
+  "variantId": null,
+  "recipeName": "Kebab (Beef/Chicken) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 0.15
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7810000uw0kskt97oy5o",
+  "variantId": null,
+  "recipeName": "Keringet 1 Litre (placeholder)",
+  "ingredients": [
+   {
+    "product": "Keringet 1LTR Bar.",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm780o000tw0kstxewvn2z",
+  "variantId": null,
+  "recipeName": "Keringet 500ml (placeholder)",
+  "ingredients": [
+   {
+    "product": "Keringet 1/2LTR Bar",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77me000fw0kstrp3lhgq",
+  "variantId": null,
+  "recipeName": "Lactose Free Milk (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.25
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7er4006nw0ksexkqzgqz",
+  "variantId": "cmufm7er9006ow0ksyyy62gwq",
+  "recipeName": "Latte Macchiato Single (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7er4006nw0ksexkqzgqz",
+  "variantId": "cmufm7erf006pw0ksa5f3gp4g",
+  "recipeName": "Latte Macchiato Double (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.04
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77ny000hw0kssenn9p1e",
+  "variantId": null,
+  "recipeName": "Lemon Coffee (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Lemons",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77db0009w0kswjdwqcn2",
+  "variantId": null,
+  "recipeName": "Lemon Tea (placeholder)",
+  "ingredients": [
+   {
+    "product": "Tea Leaves 100 Gms",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Lemons",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77ex000bw0ksevscc0j1",
+  "variantId": null,
+  "recipeName": "Lemon Water (placeholder)",
+  "ingredients": [
+   {
+    "product": "Lemons",
+    "qty": 0.03
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ecr0064w0ksq7pdqv7z",
+  "variantId": null,
+  "recipeName": "Lions Lunch (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Broilers",
+    "qty": 0.5
+   },
+   {
+    "product": "Potatos 15 Kg/ 1 Debe",
+    "qty": 0.2
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.03
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77v6000nw0ksbicucpq4",
+  "variantId": null,
+  "recipeName": "Long Black (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77pu000lw0ksszbif0ww",
+  "variantId": null,
+  "recipeName": "Lungo (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7clr003rw0ksj39z7odt",
+  "variantId": null,
+  "recipeName": "Lyonnaise Potatoes (placeholder)",
+  "ingredients": [
+   {
+    "product": "Potatos 15 Kg/ 1 Debe",
+    "qty": 0.3
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Onions",
+    "qty": 0.05
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77pe000kw0ksg3brzfa0",
+  "variantId": null,
+  "recipeName": "Machiato (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7c9i003dw0ksgta85jws",
+  "variantId": null,
+  "recipeName": "Managu (placeholder)",
+  "ingredients": [
+   {
+    "product": "Managu",
+    "qty": 0.15
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.02
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f2d007gw0ks9oldma8z",
+  "variantId": "cmufm7f2t007hw0kshlgwfhph",
+  "recipeName": "Margherita Pizza Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.02
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.08
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.05
+   },
+   {
+    "product": "Small Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f2d007gw0ks9oldma8z",
+  "variantId": "cmufm7f30007iw0ks8z8d5n3n",
+  "recipeName": "Margherita Pizza Medium (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.3
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.03
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.12
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.075
+   },
+   {
+    "product": "Medium Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cki003pw0ksnbxcjbg6",
+  "variantId": null,
+  "recipeName": "Masala Chips (placeholder)",
+  "ingredients": [
+   {
+    "product": "Potatos 15 Kg/ 1 Debe",
+    "qty": 0.3
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Curry Powder 100 Gm",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f7c0080w0ks7xyc5z5i",
+  "variantId": "cmufm7f7i0081w0ks9dtgc1va",
+  "recipeName": "Meat Deluxe Pizza Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.02
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.08
+   },
+   {
+    "product": "Beef Pattee",
+    "qty": 1
+   },
+   {
+    "product": "Sausages",
+    "qty": 1
+   },
+   {
+    "product": "Small Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f7c0080w0ks7xyc5z5i",
+  "variantId": "cmufm7f7m0082w0ks5nes8tan",
+  "recipeName": "Meat Deluxe Pizza Medium (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.3
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.03
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.12
+   },
+   {
+    "product": "Beef Pattee",
+    "qty": 1.5
+   },
+   {
+    "product": "Sausages",
+    "qty": 1.5
+   },
+   {
+    "product": "Medium Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79ue001ow0ksrhccqalj",
+  "variantId": null,
+  "recipeName": "Meat Pie (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Pastry Magerine 5 Kg",
+    "qty": 0.04
+   },
+   {
+    "product": "Beef",
+    "qty": 0.1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm76uz0001w0ks5kmqtrvm",
+  "variantId": null,
+  "recipeName": "Milk Pot (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.2
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77kp000ew0kswnt12t1u",
+  "variantId": null,
+  "recipeName": "Milo (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milo 400 Gm",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e80005xw0ks33g62ct4",
+  "variantId": null,
+  "recipeName": "Mini Beef Burger (placeholder)",
+  "ingredients": [
+   {
+    "product": "Burger Buns",
+    "qty": 1
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.02
+   },
+   {
+    "product": "Beef Pattee",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e8z005zw0ksq42cnnmh",
+  "variantId": null,
+  "recipeName": "Mini Cheese Burger (placeholder)",
+  "ingredients": [
+   {
+    "product": "Burger Buns",
+    "qty": 1
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.02
+   },
+   {
+    "product": "Beef Pattee",
+    "qty": 1
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e8k005yw0ksmvzi0oq9",
+  "variantId": null,
+  "recipeName": "Mini Chicken Burger (placeholder)",
+  "ingredients": [
+   {
+    "product": "Burger Buns",
+    "qty": 1
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.02
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7c140037w0ksuod2wo9q",
+  "variantId": null,
+  "recipeName": "Mixed Vegetable Stew (placeholder)",
+  "ingredients": [
+   {
+    "product": "Carrots",
+    "qty": 0.05
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.05
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Curry Powder 100 Gm",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7aon0024w0ksk0qtjiaj",
+  "variantId": null,
+  "recipeName": "Muffin (Chocolate/Vanilla) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Fat 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   },
+   {
+    "product": "Cocoa Powder",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7djq004tw0ks6dhzf8gp",
+  "variantId": null,
+  "recipeName": "Mutton Fry (placeholder)",
+  "ingredients": [
+   {
+    "product": "Mutton",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dru0051w0ksapt0br2x",
+  "variantId": null,
+  "recipeName": "Mutton Leg Choma (placeholder)",
+  "ingredients": [
+   {
+    "product": "Mutton",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dqr004zw0ks93mnyct8",
+  "variantId": null,
+  "recipeName": "Mutton Ribs Choma (1/2) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Mutton",
+    "qty": 0.5
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ez20078w0ksfqgywj5p",
+  "variantId": "cmufm7ezf0079w0ksq4yz352x",
+  "recipeName": "Neapolitan Shake Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.25
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 10
+   },
+   {
+    "product": "Strawberry Ess 200 Ml",
+    "qty": 10
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ez20078w0ksfqgywj5p",
+  "variantId": "cmufm7ezo007aw0ksmzdlmtwe",
+  "recipeName": "Neapolitan Shake Jumbo (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.375
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.15
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 15
+   },
+   {
+    "product": "Strawberry Ess 200 Ml",
+    "qty": 15
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79080019w0ksah0accxu",
+  "variantId": null,
+  "recipeName": "Omega Breakfast Buffet (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sausages",
+    "qty": 2
+   },
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.05
+   },
+   {
+    "product": "Blue Band 1 Kg",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7de6004ow0kst300lfyp",
+  "variantId": null,
+  "recipeName": "Omega Special Country Side Chicken (1/2) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chic Kienyeji",
+    "qty": 0.5
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7eww0072w0ksgd4uqnys",
+  "variantId": "cmufm7ex20073w0kshhohdr5i",
+  "recipeName": "Omega Wonder Shake Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.25
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Mangoes",
+    "qty": 0.5
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7eww0072w0ksgd4uqnys",
+  "variantId": "cmufm7ex70074w0ksl49pfbn1",
+  "recipeName": "Omega Wonder Shake Jumbo (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.375
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.15
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Mangoes",
+    "qty": 0.75
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e9q0060w0ksps29wn2z",
+  "variantId": null,
+  "recipeName": "Omega Zam Zam Basket (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sausages",
+    "qty": 2
+   },
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.05
+   },
+   {
+    "product": "Blue Band 1 Kg",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ay6002gw0ks0bfwcaed",
+  "variantId": null,
+  "recipeName": "Ossobucco (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 0.3
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7du00056w0kslqoo5now",
+  "variantId": null,
+  "recipeName": "Pan Fried Pork Chops (250g) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Pork",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dv30058w0kshgntx17t",
+  "variantId": null,
+  "recipeName": "Pan Fried Pork Chops (500g) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Pork",
+    "qty": 0.5
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cy70043w0ksedk2rq10",
+  "variantId": null,
+  "recipeName": "Pan-Fried Beef Pepper Steak (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beef",
+    "qty": 0.25
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e1p005jw0ksp7bi6y2l",
+  "variantId": null,
+  "recipeName": "Pasta Primavera (placeholder)",
+  "ingredients": [
+   {
+    "product": "Pene Pasta 500 Gm",
+    "qty": 0.2
+   },
+   {
+    "product": "Garden Peas",
+    "qty": 0.05
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   },
+   {
+    "product": "Whipping Cream",
+    "qty": 0.05
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.05
+   },
+   {
+    "product": "Garlic",
+    "qty": 0.005
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cju003ow0kszeenihdz",
+  "variantId": null,
+  "recipeName": "Plain Chips (placeholder)",
+  "ingredients": [
+   {
+    "product": "Potatos 15 Kg/ 1 Debe",
+    "qty": 0.3
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cey003jw0ksgru8zlxo",
+  "variantId": null,
+  "recipeName": "Plain Matoke (placeholder)",
+  "ingredients": [
+   {
+    "product": "Raw Banana",
+    "qty": 0.3
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ci4003mw0kszyjckp5f",
+  "variantId": null,
+  "recipeName": "Plain Rice (placeholder)",
+  "ingredients": [
+   {
+    "product": "Rice Pishori 1 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ap90026w0ksmlwoi041",
+  "variantId": null,
+  "recipeName": "Queen Cake (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Fat 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ant0023w0kstrul03dg",
+  "variantId": null,
+  "recipeName": "Red Velvet (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Fat 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   },
+   {
+    "product": "Cocoa Powder",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ey10075w0ksn1so5p7l",
+  "variantId": "cmufm7ey60076w0kslkk2zhwl",
+  "recipeName": "Rich Chocolate Shake Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.25
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 20
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ey10075w0ksn1so5p7l",
+  "variantId": "cmufm7eyc0077w0ksxqrt95di",
+  "recipeName": "Rich Chocolate Shake Jumbo (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.375
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.15
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Chocolate Syrup 750 Ml",
+    "qty": 30
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cmo003sw0ks270x2lym",
+  "variantId": null,
+  "recipeName": "Roast Potatoes (placeholder)",
+  "ingredients": [
+   {
+    "product": "Potatos 15 Kg/ 1 Debe",
+    "qty": 0.3
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   },
+   {
+    "product": "Salt 1 Kg",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm78on0018w0ksme34526f",
+  "variantId": null,
+  "recipeName": "Safari Mini Breakfast (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sausages",
+    "qty": 2
+   },
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.05
+   },
+   {
+    "product": "Blue Band 1 Kg",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7a37001qw0ksw6xw55ws",
+  "variantId": null,
+  "recipeName": "Sausage Roll (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Pastry Magerine 5 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sausages",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bvq002xw0kssi5w32rt",
+  "variantId": null,
+  "recipeName": "Shawarma (Beef/Chicken/Vegetables) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Chicken Pattee",
+    "qty": 1
+   },
+   {
+    "product": "Beef",
+    "qty": 0.1
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77zu000sw0ksg5w3pwa6",
+  "variantId": null,
+  "recipeName": "Soda 300ml (placeholder)",
+  "ingredients": [
+   {
+    "product": "Soda 330ML Bar",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79c5001dw0ks3i5xwdd8",
+  "variantId": null,
+  "recipeName": "Spanish Omelette (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Milk",
+    "qty": 0.02
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ace001vw0ksb742eitl",
+  "variantId": null,
+  "recipeName": "Special Beef Samosa (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Beef",
+    "qty": 0.05
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ajt001xw0ksh5oadhmf",
+  "variantId": null,
+  "recipeName": "Special Beef Sausages (placeholder)",
+  "ingredients": [
+   {
+    "product": "Sausages",
+    "qty": 2
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7aed001ww0ksscvxfbfw",
+  "variantId": null,
+  "recipeName": "Special Chicken Samosa (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Chicken Pattee",
+    "qty": 1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.05
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cec003iw0ksty6quobz",
+  "variantId": null,
+  "recipeName": "Special Githeri (placeholder)",
+  "ingredients": [
+   {
+    "product": "Beans 1 Kg",
+    "qty": 0.15
+   },
+   {
+    "product": "Green Maize",
+    "qty": 0.1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm770l0004w0ks2g4mfxyq",
+  "variantId": null,
+  "recipeName": "Special Tea (placeholder)",
+  "ingredients": [
+   {
+    "product": "Tea Leaves 100 Gms",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.01
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7c8r003bw0ksj2mf89bu",
+  "variantId": null,
+  "recipeName": "Spinach (placeholder)",
+  "ingredients": [
+   {
+    "product": "Spinach",
+    "qty": 0.15
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.02
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm78kz0016w0ksanxswfaf",
+  "variantId": null,
+  "recipeName": "Strawberry Ice Cream (placeholder)",
+  "ingredients": [
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Strawberry Ess 200 Ml",
+    "qty": 10
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ew4006zw0ksmecvktu8",
+  "variantId": "cmufm7ew90070w0ksuocga4h3",
+  "recipeName": "Strawberry Shake Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.25
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Strawberry Ess 200 Ml",
+    "qty": 10
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ew4006zw0ksmecvktu8",
+  "variantId": "cmufm7ewe0071w0ksji1jq7r9",
+  "recipeName": "Strawberry Shake Jumbo (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.375
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.15
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Strawberry Ess 200 Ml",
+    "qty": 15
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f1m007ew0ksnt7belvb",
+  "variantId": null,
+  "recipeName": "Tea Cakes (Lemon/Vanilla/Marble/Chocolate) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Fat 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   },
+   {
+    "product": "Cocoa Powder",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7c95003cw0ks3qbdxhum",
+  "variantId": null,
+  "recipeName": "Terere (placeholder)",
+  "ingredients": [
+   {
+    "product": "Terere",
+    "qty": 0.15
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.02
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7aq20028w0ks31zynbio",
+  "variantId": null,
+  "recipeName": "Toast White/Brown (placeholder)",
+  "ingredients": [
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Blue Band 1 Kg",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e7d005vw0ksf8olck6h",
+  "variantId": null,
+  "recipeName": "Tropical Fruit Salad Topped with Ice Cream (placeholder)",
+  "ingredients": [
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Pineapples",
+    "qty": 0.1
+   },
+   {
+    "product": "Mangoes",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cfj003kw0ksm28h1x8w",
+  "variantId": null,
+  "recipeName": "Ugali (placeholder)",
+  "ingredients": [
+   {
+    "product": "Maize Flour 2 Kgs",
+    "qty": 0.25
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7cb9003fw0ksguh0rlas",
+  "variantId": null,
+  "recipeName": "Ugali & Managu (placeholder)",
+  "ingredients": [
+   {
+    "product": "Maize Flour 2 Kgs",
+    "qty": 0.25
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Managu",
+    "qty": 0.15
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7c9w003ew0ks9gum8pl0",
+  "variantId": null,
+  "recipeName": "Ugali & Terere (placeholder)",
+  "ingredients": [
+   {
+    "product": "Maize Flour 2 Kgs",
+    "qty": 0.25
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Terere",
+    "qty": 0.15
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79pi001lw0kst8d5dfd2",
+  "variantId": null,
+  "recipeName": "Uji Power (placeholder)",
+  "ingredients": [
+   {
+    "product": "Maize Flour 1 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Milk",
+    "qty": 0.2
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm78in0014w0ks0fot7sd4",
+  "variantId": null,
+  "recipeName": "Vanilla Ice Cream (placeholder)",
+  "ingredients": [
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Vanilla Ess 200 Ml",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7e6q005uw0ksn9cn3737",
+  "variantId": null,
+  "recipeName": "Vanilla Ice Cream (Dessert) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Vanilla Ess 200 Ml",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79ga001fw0ks8ckbsud9",
+  "variantId": null,
+  "recipeName": "Vegetable Omelette (placeholder)",
+  "ingredients": [
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Milk",
+    "qty": 0.02
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.02
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7ciu003nw0kso6n6egkz",
+  "variantId": null,
+  "recipeName": "Vegetable Rice (placeholder)",
+  "ingredients": [
+   {
+    "product": "Rice Pishori 1 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   },
+   {
+    "product": "Garden Peas",
+    "qty": 0.02
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bxl0030w0ks90awc0aa",
+  "variantId": null,
+  "recipeName": "Vegetable Sandwich (placeholder)",
+  "ingredients": [
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.01
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.1
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7bz70033w0ksifjlz4mq",
+  "variantId": null,
+  "recipeName": "Vegetable Sandwich (Kids) (placeholder)",
+  "ingredients": [
+   {
+    "product": "Bread",
+    "qty": 2
+   },
+   {
+    "product": "Lettuce",
+    "qty": 0.25
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.03
+   },
+   {
+    "product": "Mayonnaise",
+    "qty": 0.01
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.1
+   },
+   {
+    "product": "Carrots",
+    "qty": 0.03
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f6l007ww0ks2iyqrlbg",
+  "variantId": "cmufm7f6p007xw0ks48mskffm",
+  "recipeName": "Veggie Feast Pizza Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.2
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.02
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.08
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.05
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.1
+   },
+   {
+    "product": "Small Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7f6l007ww0ks2iyqrlbg",
+  "variantId": "cmufm7f6t007yw0ksn5jv6u4m",
+  "recipeName": "Veggie Feast Pizza Medium (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.3
+   },
+   {
+    "product": "Tomato Sauce 5 Ltrs",
+    "qty": 0.03
+   },
+   {
+    "product": "Cheese",
+    "qty": 0.12
+   },
+   {
+    "product": "Onions",
+    "qty": 0.045
+   },
+   {
+    "product": "Tomatoes",
+    "qty": 0.075
+   },
+   {
+    "product": "Cabbage",
+    "qty": 0.15
+   },
+   {
+    "product": "Medium Pizza Box",
+    "qty": 1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7euz006ww0ksk0hc01cy",
+  "variantId": "cmufm7ev6006xw0ksey909r76",
+  "recipeName": "Very Vanilla Shake Small (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.25
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.1
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Vanilla Ess 200 Ml",
+    "qty": 0.01
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7euz006ww0ksk0hc01cy",
+  "variantId": "cmufm7evh006yw0ks21ocdk8e",
+  "recipeName": "Very Vanilla Shake Jumbo (placeholder)",
+  "ingredients": [
+   {
+    "product": "Milk",
+    "qty": 0.375
+   },
+   {
+    "product": "Ice Cream",
+    "qty": 0.15
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Vanilla Ess 200 Ml",
+    "qty": 0.015
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm79l3001gw0kso4bjnxxs",
+  "variantId": null,
+  "recipeName": "Waffles (placeholder)",
+  "ingredients": [
+   {
+    "product": "Wheat Flour 2 Kg",
+    "qty": 0.1
+   },
+   {
+    "product": "Eggs",
+    "qty": 2
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.03
+   },
+   {
+    "product": "Milk",
+    "qty": 0.05
+   },
+   {
+    "product": "Cooking Fat 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Baking Powder 100 Gm",
+    "qty": 0.005
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm77ng000gw0ksjfndefgd",
+  "variantId": null,
+  "recipeName": "White Coffee (placeholder)",
+  "ingredients": [
+   {
+    "product": "Coffee Beans 1 Kg",
+    "qty": 0.02
+   },
+   {
+    "product": "Sugar 1 Kg",
+    "qty": 0.005
+   },
+   {
+    "product": "Milk",
+    "qty": 0.1
+   }
+  ]
+ },
+ {
+  "menuItemId": "cmufm7dzl005fw0ksem32lnv2",
+  "variantId": null,
+  "recipeName": "Whole Tilapia (placeholder)",
+  "ingredients": [
+   {
+    "product": "Whole Fish",
+    "qty": 1
+   },
+   {
+    "product": "Onions",
+    "qty": 0.03
+   },
+   {
+    "product": "Cooking Oil 10 Ltrs",
+    "qty": 0.01
+   }
+  ]
+ }
+]

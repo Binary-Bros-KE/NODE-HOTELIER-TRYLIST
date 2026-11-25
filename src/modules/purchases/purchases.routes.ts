@@ -163,9 +163,16 @@ async function assertSupplier(tid: string, supplierId: string) {
 
 async function productsForLines(tid: string, items: { productId: string }[]) {
   const ids = [...new Set(items.map((i) => i.productId))];
-  const products = await prisma.product.findMany({ where: { id: { in: ids }, tenantId: tid }, select: { id: true, packSize: true } });
+  const products = await prisma.product.findMany({ where: { id: { in: ids }, tenantId: tid }, select: { id: true, name: true, packSize: true } });
   if (products.length !== ids.length) throw new HttpError(400, "One or more items reference a product that was not found");
   return new Map(products.map((product) => [product.id, product]));
+}
+
+// A line bought at KSh 0 lands in stock and on the supplier's bill at 0 and can
+// never be paid — every purchase line needs a real buying price.
+function assertBuyingPrices(lines: { unitCost: number | Prisma.Decimal; name: string }[]) {
+  const missing = [...new Set(lines.filter((l) => !(Number(l.unitCost) > 0)).map((l) => l.name))];
+  if (missing.length) throw new HttpError(400, `Enter a buying price for ${missing.join(", ")}`);
 }
 
 async function assertLocation(tid: string, locationId: string) {
@@ -334,6 +341,7 @@ purchasesRouter.post("/", async (req, res, next) => {
   try {
     await assertSupplier(tid, supplierId);
     const productsById = await productsForLines(tid, items);
+    assertBuyingPrices(items.map((i) => ({ unitCost: i.unitCost, name: productsById.get(i.productId)!.name })));
     await assertMenuPriceUpdates(tid, items);
     if (rest.locationId) await assertLocation(tid, rest.locationId);
     const { lines, subtotal, taxAmount, total } = computeTotals(items.map((item) => ({ ...item, packSize: productsById.get(item.productId)?.packSize ?? null })));
@@ -407,6 +415,7 @@ purchasesRouter.patch("/:id", async (req, res, next) => {
     const { supplierId, items, orderDate, ...rest } = data.data;
     if (supplierId) await assertSupplier(tid, supplierId);
     const productsById = items ? await productsForLines(tid, items) : null;
+    if (items) assertBuyingPrices(items.map((i) => ({ unitCost: i.unitCost, name: productsById!.get(i.productId)!.name })));
     if (items) await assertMenuPriceUpdates(tid, items);
     if (rest.locationId) await assertLocation(tid, rest.locationId);
 
@@ -487,6 +496,10 @@ purchasesRouter.post("/:id/status", async (req, res, next) => {
       res.status(409).json({ error: `Cannot move a ${existing.status.toLowerCase()} purchase to ${status.toLowerCase()}` });
       return;
     }
+    if (status === "ORDERED") {
+      const lines = await prisma.purchaseItem.findMany({ where: { purchaseId: existing.id }, select: { unitCost: true, product: { select: { name: true } } } });
+      assertBuyingPrices(lines.map((l) => ({ unitCost: l.unitCost, name: l.product.name })));
+    }
     const purchase = await prisma.purchase.update({
       where: { id: existing.id },
       data: {
@@ -500,6 +513,7 @@ purchasesRouter.post("/:id/status", async (req, res, next) => {
     await logActivityAfter(req, { area: "FINANCE", action: `purchase.${status.toLowerCase()}`, target: { type: "Purchase", id: existing.id, label: existing.purchaseNo }, reason: note ?? null, summary: `Moved purchase ${existing.purchaseNo} from ${existing.status.toLowerCase().replaceAll("_", " ")} to ${status.toLowerCase().replaceAll("_", " ")}` });
     res.json({ purchase });
   } catch (error) {
+    if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
     next(error);
   }
 });
@@ -589,6 +603,10 @@ purchasesRouter.post("/:id/goods-receipts", async (req, res, next) => {
         throw new HttpError(400, `Cannot receive ${line.quantity} ${item.product.name} — only ${remaining} left on this order`);
       }
     }
+    assertBuyingPrices(data.data.items.map((line) => {
+      const item = itemsById.get(line.purchaseItemId)!;
+      return { unitCost: line.unitCost ?? item.unitCost, name: item.product.name };
+    }));
 
     const receiptNo = await nextGoodsReceiptNo(tid);
     const receipt = await prisma.$transaction(async (tx) => {

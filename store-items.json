@@ -1,0 +1,1424 @@
+[
+  {
+    "name": "Beef",
+    "unit": "kg",
+    "qty": 3.25,
+    "cost": 700,
+    "note": null,
+    "raw": "BEEF/KG",
+    "rawBalance": "3.25 KGS"
+  },
+  {
+    "name": "Mutton",
+    "unit": "kg",
+    "qty": 2,
+    "cost": 800,
+    "note": null,
+    "raw": "MUTTON/KG",
+    "rawBalance": "2KGS"
+  },
+  {
+    "name": "Pork",
+    "unit": "kg",
+    "qty": 0.5,
+    "cost": 650,
+    "note": null,
+    "raw": "PORK/KG",
+    "rawBalance": "0.5KG"
+  },
+  {
+    "name": "Chic Kienyeji",
+    "unit": "pc",
+    "qty": 4.5,
+    "cost": 750,
+    "note": null,
+    "raw": "CHIC KIENYEJI/PC",
+    "rawBalance": "4.5PCS"
+  },
+  {
+    "name": "Chic Broilers",
+    "unit": "pc",
+    "qty": 2.25,
+    "cost": 600,
+    "note": null,
+    "raw": "CHIC BROILERS/PC",
+    "rawBalance": "2.25PCS"
+  },
+  {
+    "name": "Whole Fish",
+    "unit": "pc",
+    "qty": 1,
+    "cost": 300,
+    "note": null,
+    "raw": "WHOLE FISH/PC",
+    "rawBalance": "1PC"
+  },
+  {
+    "name": "Fish Fillets",
+    "unit": "portion",
+    "qty": 0,
+    "cost": 225,
+    "note": null,
+    "raw": "FISH FILLETS/PTN",
+    "rawBalance": 0
+  },
+  {
+    "name": "Bacon",
+    "unit": "portion",
+    "qty": 0,
+    "cost": 140.9,
+    "note": null,
+    "raw": "BACON/PTN",
+    "rawBalance": 0
+  },
+  {
+    "name": "Ham",
+    "unit": "kg",
+    "qty": 0.5,
+    "cost": 1330,
+    "note": null,
+    "raw": "HAM/KG",
+    "rawBalance": "0.5KG"
+  },
+  {
+    "name": "Cheese",
+    "unit": "kg",
+    "qty": 1,
+    "cost": 1440,
+    "note": null,
+    "raw": "CHEESE/KG",
+    "rawBalance": "1KG"
+  },
+  {
+    "name": "Sausages",
+    "unit": "pc",
+    "qty": 40,
+    "cost": 30.9,
+    "note": null,
+    "raw": "SAUSAGES/PC",
+    "rawBalance": "40PCS"
+  },
+  {
+    "name": "Eggs",
+    "unit": "pc",
+    "qty": 13,
+    "cost": 15,
+    "note": null,
+    "raw": "EGGS/PC",
+    "rawBalance": "13PCS"
+  },
+  {
+    "name": "Milk",
+    "unit": "litre",
+    "qty": 13.5,
+    "cost": 140,
+    "note": null,
+    "raw": "MILK/LTR",
+    "rawBalance": "13.5LTRS"
+  },
+  {
+    "name": "Packing Dishes",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 15.5,
+    "note": null,
+    "raw": "PACKING DISHES/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Coffee Cups",
+    "unit": "pc",
+    "qty": 19,
+    "cost": 12.5,
+    "note": null,
+    "raw": "COFFEE CUPS/PC",
+    "rawBalance": "19PCS"
+  },
+  {
+    "name": "Packing Bags 6*9",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 2.45,
+    "note": null,
+    "raw": "PACKING BAGS 6*9/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Packing Bags 7*10",
+    "unit": "pc",
+    "qty": 90,
+    "cost": 3.25,
+    "note": null,
+    "raw": "PACKING BAGS7*10/PC",
+    "rawBalance": "90PCS"
+  },
+  {
+    "name": "Salt Sachets",
+    "unit": "pc",
+    "qty": 900,
+    "cost": 0.5,
+    "note": null,
+    "raw": "SALT SACHETS/PC",
+    "rawBalance": "900PCS"
+  },
+  {
+    "name": "Coffee Sachets",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 8.33,
+    "note": null,
+    "raw": "COFFEE SACHETS/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Sugar Sachets",
+    "unit": "pc",
+    "qty": 853,
+    "cost": 1.7,
+    "note": null,
+    "raw": "SUGAR SACHETS/PC",
+    "rawBalance": "853PCS"
+  },
+  {
+    "name": "Chocolate Sachets 10 Gms",
+    "unit": "pc",
+    "qty": 76,
+    "cost": 5.2,
+    "note": null,
+    "raw": "CHOCOLATE SACHETS 10GMS",
+    "rawBalance": "76PCS"
+  },
+  {
+    "name": "Ice Cream",
+    "unit": "carton",
+    "qty": 5,
+    "cost": 800,
+    "note": null,
+    "raw": "ICE CREAM/CRT",
+    "rawBalance": "5 CRTS"
+  },
+  {
+    "name": "Tooth Picks",
+    "unit": "sachet",
+    "qty": 2,
+    "cost": 50,
+    "note": null,
+    "raw": "TOOTH PICKS/SACHET",
+    "rawBalance": "2 PACKETS"
+  },
+  {
+    "name": "Sodas 1 Ltr",
+    "unit": "pc",
+    "qty": 9,
+    "cost": 87.083,
+    "note": null,
+    "raw": "SODAS 1LTR",
+    "rawBalance": "9PCS"
+  },
+  {
+    "name": "Lime 1.5 Ltrs",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "LIME1.5LTRS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Honey 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 600,
+    "note": null,
+    "raw": "HONEY 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Honey Cups",
+    "unit": "pc",
+    "qty": 4,
+    "cost": 1.9,
+    "note": null,
+    "raw": "HONEY CUPS/PC",
+    "rawBalance": "4 PCS"
+  },
+  {
+    "name": "Soy Sauce 625 Ml",
+    "unit": "bottle",
+    "qty": 1,
+    "cost": 315,
+    "note": "750ML",
+    "raw": "SOY SAUCE625ML",
+    "rawBalance": "1 BOTTLE (750ML)"
+  },
+  {
+    "name": "Oyester 625 Ml",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 455,
+    "note": null,
+    "raw": "OYESTER625ML",
+    "rawBalance": 0
+  },
+  {
+    "name": "Vinegar 700 Ml",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 70,
+    "note": null,
+    "raw": "VINEGAR 700ML",
+    "rawBalance": 0
+  },
+  {
+    "name": "Blue Berry Syrup 750 Ml",
+    "unit": "ml",
+    "qty": 300,
+    "cost": 1500,
+    "note": null,
+    "raw": "BLUE BERRY SYRUP750ML",
+    "rawBalance": "300ML "
+  },
+  {
+    "name": "Caramel Syrup 750 Ml",
+    "unit": "bottle",
+    "qty": 1,
+    "cost": 1500,
+    "note": "750ML",
+    "raw": "CARAMEL SYRUP750ML",
+    "rawBalance": "1 BOTTLE (750ML)"
+  },
+  {
+    "name": "Chocolate Syrup 750 Ml",
+    "unit": "ml",
+    "qty": 300,
+    "cost": 1500,
+    "note": null,
+    "raw": "CHOCOLATE SYRUP750ML",
+    "rawBalance": "300ML"
+  },
+  {
+    "name": "Granadine 750 Ml",
+    "unit": "bottle",
+    "qty": 1.5,
+    "cost": 670,
+    "note": "1000ML",
+    "raw": "GRANADINE750ML",
+    "rawBalance": "1.5BOTTLE (1000ML)"
+  },
+  {
+    "name": "Sweet Corn 500 Gm",
+    "unit": "tin",
+    "qty": 0,
+    "cost": 150,
+    "note": null,
+    "raw": "SWEET CORN500GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Coffee Beans 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 1500,
+    "note": null,
+    "raw": "COFFEE BEANS1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Icing Sugar 500 Ml",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 150,
+    "note": null,
+    "raw": "ICING SUGAR500ML",
+    "rawBalance": 0
+  },
+  {
+    "name": "Straws",
+    "unit": "packet",
+    "qty": 1,
+    "cost": 100,
+    "note": null,
+    "raw": "STRAWS",
+    "rawBalance": "1PCT"
+  },
+  {
+    "name": "Pene Pasta 500 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 250,
+    "note": null,
+    "raw": "PENE PASTA500GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Chilli 250 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 100,
+    "note": null,
+    "raw": "CHILLI 250GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Tea Leaves 250 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 250,
+    "note": null,
+    "raw": "TEA LEAVES 250GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Tea Leaves 100 Gms",
+    "unit": "packet",
+    "qty": 1,
+    "cost": 130,
+    "note": null,
+    "raw": "TEA LEAVES 100GMS",
+    "rawBalance": "1PCT"
+  },
+  {
+    "name": "Salt 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 80,
+    "note": null,
+    "raw": "SALT 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Baking Powder 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 35,
+    "note": null,
+    "raw": "BAKING POWDER 100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Disposable Cups",
+    "unit": "pc",
+    "qty": 41,
+    "cost": 5,
+    "note": null,
+    "raw": "DISPOSABLE CUPS",
+    "rawBalance": "41PCS"
+  },
+  {
+    "name": "Sugar 1 Kg",
+    "unit": "kg",
+    "qty": 0.5,
+    "cost": 150,
+    "note": null,
+    "raw": "SUGAR 1KG",
+    "rawBalance": "0.5KG"
+  },
+  {
+    "name": "Beans 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 150,
+    "note": null,
+    "raw": "BEANS1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Green Maize",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 20,
+    "note": null,
+    "raw": "GREEN MAIZE",
+    "rawBalance": 0
+  },
+  {
+    "name": "Red Cherries",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 300,
+    "note": null,
+    "raw": "RED CHERRIES",
+    "rawBalance": 0
+  },
+  {
+    "name": "Sultanas 50 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 180,
+    "note": null,
+    "raw": "SULTANAS 50GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Raisins 500 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 180,
+    "note": null,
+    "raw": "RAISINS 500GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Rice Biryani 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 100,
+    "note": null,
+    "raw": "RICE BIRYANI 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Rice Pishori 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 180,
+    "note": null,
+    "raw": "RICE PISHORI 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Wheat Flour 2 Kg",
+    "unit": "kg",
+    "qty": 3,
+    "cost": 180,
+    "note": null,
+    "raw": "WHEAT FLOUR 2KG",
+    "rawBalance": "3KGS"
+  },
+  {
+    "name": "Self Raising Flour 2 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "SELF RAISING FLOUR 2KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Atta Mark Flour 2 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 180,
+    "note": null,
+    "raw": "ATTA MARK FLOUR 2KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Maize Flour 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 75,
+    "note": null,
+    "raw": "MAIIZE FLOUR 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Maize Flour 2 Kgs",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "MAIZE FLOUR 2KGS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Ketchup Sachet",
+    "unit": "sachet",
+    "qty": 0,
+    "cost": 8,
+    "note": null,
+    "raw": "KETCHUP SACHET",
+    "rawBalance": 0
+  },
+  {
+    "name": "Chilli Sachet 6 Grams",
+    "unit": "sachet",
+    "qty": 0,
+    "cost": 3,
+    "note": null,
+    "raw": "CHILLI SACHET 6GRAMS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Ketchup 400 Gms",
+    "unit": "bottle",
+    "qty": 1,
+    "cost": 180,
+    "note": null,
+    "raw": "KETCHUP  400GMS",
+    "rawBalance": "1 BOTTLE"
+  },
+  {
+    "name": "Ketchup 700 Gms",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 220,
+    "note": null,
+    "raw": "KETCHUP 700GMS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Tomato Sauce 5 Ltrs",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 420,
+    "note": null,
+    "raw": "TOMATO SAUCE 5LTRS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Pastry Magerine 5 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 2500,
+    "note": null,
+    "raw": "PASTRY MAGERINE 5KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Lala 1 Ltr",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 150,
+    "note": null,
+    "raw": "LALA 1LTR",
+    "rawBalance": 0
+  },
+  {
+    "name": "Yoghurt 1 Ltr",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "YOGHURT 1LTR",
+    "rawBalance": 0
+  },
+  {
+    "name": "Croma 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 330,
+    "note": null,
+    "raw": "CROMA 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Strawberry Ess 200 Ml",
+    "unit": "ml",
+    "qty": 120,
+    "cost": 260,
+    "note": null,
+    "raw": "STRAWBERRY ESS 200ML",
+    "rawBalance": "120ML"
+  },
+  {
+    "name": "Pina Colada Ess 50 Ml",
+    "unit": "ml",
+    "qty": 30,
+    "cost": 180,
+    "note": null,
+    "raw": "PINACO LADA ESS 50ML",
+    "rawBalance": "30ML"
+  },
+  {
+    "name": "Vanilla Ess 200 Ml",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 260,
+    "note": null,
+    "raw": "VANILLA ESS200ML",
+    "rawBalance": 0
+  },
+  {
+    "name": "Thermal Rolls",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 180,
+    "note": null,
+    "raw": "THERMAL ROLLS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Mustard 300 Ml",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 300,
+    "note": null,
+    "raw": "MUSTARD 300ML",
+    "rawBalance": 0
+  },
+  {
+    "name": "Garam Masala 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 270,
+    "note": null,
+    "raw": "GARAM MASALA100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Turmeric 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "TURMERIC100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Coconut Milk 500 Ml",
+    "unit": "tin",
+    "qty": 0,
+    "cost": 300,
+    "note": null,
+    "raw": "COCONUT MILK500ML",
+    "rawBalance": 0
+  },
+  {
+    "name": "Sweet Corn 500 Gm",
+    "unit": "tin",
+    "qty": 0,
+    "cost": 150,
+    "note": null,
+    "raw": "SWEET CORN500GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Baked Beans 500 Gm",
+    "unit": "tin",
+    "qty": 0,
+    "cost": 135,
+    "note": null,
+    "raw": "BAKED BEANS500GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Mushroom 500 Gms",
+    "unit": "tin",
+    "qty": 0,
+    "cost": 300,
+    "note": null,
+    "raw": "MUSHROOM500GMS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Tea Masala 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 300,
+    "note": null,
+    "raw": "TEA MASALA100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Pilau Masala 100 Gms",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 270,
+    "note": null,
+    "raw": "PILAU MASALA100GMS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Curry Powder 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 280,
+    "note": null,
+    "raw": "CURRY POWDER 100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Curry Powder Sachet 10 Gms",
+    "unit": "sachet",
+    "qty": 0,
+    "cost": 10,
+    "note": null,
+    "raw": "CURRY POWDER  SACHET 10GMS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Paprika 200 Gms",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "PAPRIKA 200GMS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Rosemary 50 Gms",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 80,
+    "note": null,
+    "raw": "ROSEMARY50GMS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Indomie",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 45,
+    "note": null,
+    "raw": "INDOMIE",
+    "rawBalance": 0
+  },
+  {
+    "name": "Mineral Water 500 Ml",
+    "unit": "bottle",
+    "qty": 24,
+    "cost": 14.08333,
+    "note": null,
+    "raw": "MINERAL WATER 500ML",
+    "rawBalance": "24 BOTTLES"
+  },
+  {
+    "name": "Tissue 1 Pc",
+    "unit": "pc",
+    "qty": 35,
+    "cost": 42,
+    "note": null,
+    "raw": "TISSUE1PC",
+    "rawBalance": "35 PCS"
+  },
+  {
+    "name": "Serviettes 1 Pct",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 100,
+    "note": null,
+    "raw": "SERVIETTES 1PCT",
+    "rawBalance": 0
+  },
+  {
+    "name": "Large Pizza Box",
+    "unit": "pc",
+    "qty": 11,
+    "cost": 70,
+    "note": null,
+    "raw": "LARGE PIZZA BOX",
+    "rawBalance": "11 PCS"
+  },
+  {
+    "name": "Medium Pizza Box",
+    "unit": "pc",
+    "qty": 3,
+    "cost": 50,
+    "note": null,
+    "raw": "MEDIUM PIZZA BOX",
+    "rawBalance": "3PCS"
+  },
+  {
+    "name": "Small Pizza Box",
+    "unit": "pc",
+    "qty": 7,
+    "cost": 40,
+    "note": null,
+    "raw": "SMALL PIZZA BOX",
+    "rawBalance": "7PCS"
+  },
+  {
+    "name": "Cooking Fat 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 300,
+    "note": null,
+    "raw": "COOKING FAT 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Weetabix 425 Gm",
+    "unit": "packet",
+    "qty": 0.5,
+    "cost": 400,
+    "note": null,
+    "raw": "WEETABIX 425GM",
+    "rawBalance": "0.5 PCT"
+  },
+  {
+    "name": "Corn Flakes 500 Gm",
+    "unit": "packet",
+    "qty": 1,
+    "cost": 350,
+    "note": null,
+    "raw": "CORN FLAKES500GM",
+    "rawBalance": "1PCT"
+  },
+  {
+    "name": "Worcester Sauce 250 Ml",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "WORCASTLE SAUCE 250ML",
+    "rawBalance": 0
+  },
+  {
+    "name": "Maple Syrup",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 650,
+    "note": null,
+    "raw": "MARPLE  SYRUP",
+    "rawBalance": 0
+  },
+  {
+    "name": "Mayonnaise",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 500,
+    "note": null,
+    "raw": "MAYYONAISE",
+    "rawBalance": 0
+  },
+  {
+    "name": "Whipping Cream",
+    "unit": "litre",
+    "qty": 0.5,
+    "cost": 660,
+    "note": null,
+    "raw": "WHIPPING CREAM",
+    "rawBalance": "0.5LTR"
+  },
+  {
+    "name": "Oregano",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 80,
+    "note": null,
+    "raw": "OREGANO",
+    "rawBalance": 0
+  },
+  {
+    "name": "Zesta Jam 500 Gm",
+    "unit": "tin",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "ZESTA JAM 500GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Thyme",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 80,
+    "note": null,
+    "raw": "THYME",
+    "rawBalance": 0
+  },
+  {
+    "name": "Beef Cubes 90 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 90,
+    "note": null,
+    "raw": "BEEF CUBES90GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Chicken Cubes 90 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 90,
+    "note": null,
+    "raw": "CHICKEN CUBES90GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Tomato Paste 900 Gm",
+    "unit": "tin",
+    "qty": 0,
+    "cost": 420,
+    "note": null,
+    "raw": "TOMATO PASTE 900G M",
+    "rawBalance": 0
+  },
+  {
+    "name": "Cardamom 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 300,
+    "note": null,
+    "raw": "CARDMON 100G M",
+    "rawBalance": 0
+  },
+  {
+    "name": "Cayyenne 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "CAYYENNE100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Cumin 50 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 280,
+    "note": null,
+    "raw": "CUMMIN 50GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Cinnamon 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 520,
+    "note": null,
+    "raw": "CINNAMON 100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Tea Bag 500 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 360,
+    "note": null,
+    "raw": "TEA BAG 500GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Milo Sachets",
+    "unit": "sachet",
+    "qty": 0,
+    "cost": 20,
+    "note": null,
+    "raw": "MILO SACHETS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Milo 400 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 500,
+    "note": null,
+    "raw": "MILO 400GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Basil 50 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 80,
+    "note": null,
+    "raw": "BASIL 50GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Yeast 500 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 430,
+    "note": null,
+    "raw": "YEAST 500GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Ajinomoto 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 160,
+    "note": null,
+    "raw": "AJINO MOTO 100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Bread Improver 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 650,
+    "note": null,
+    "raw": "BREAD IMPROVER 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Calcium 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 600,
+    "note": null,
+    "raw": "CALCIUM 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "White Pepper Powder 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 600,
+    "note": null,
+    "raw": "WHITE PEPPER POWDER 100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Black Pepper 100 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 300,
+    "note": null,
+    "raw": "BLACK PEPPR 100GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Olive Oil 0.5 Ml",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 1000,
+    "note": null,
+    "raw": "OLIVE OIL 0.5ML",
+    "rawBalance": 0
+  },
+  {
+    "name": "Blue Band 1 Kg",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 420,
+    "note": null,
+    "raw": "BLUE BAND 1KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Spaghetti 500 Gm",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 80,
+    "note": null,
+    "raw": "SPAGHETTI 500GM",
+    "rawBalance": 0
+  },
+  {
+    "name": "Compound Choc 2.5 Kg",
+    "unit": "kg",
+    "qty": 1.25,
+    "cost": 2500,
+    "note": null,
+    "raw": "COMPOUND CHOC 2.5KG",
+    "rawBalance": "1.25 KG"
+  },
+  {
+    "name": "Cooking Oil 10 Ltrs",
+    "unit": "litre",
+    "qty": 1.5,
+    "cost": 2800,
+    "note": null,
+    "raw": "COOKING OIL 10LTRS",
+    "rawBalance": "1.5LTR"
+  },
+  {
+    "name": "Bi Carbonate 100 Gms",
+    "unit": "packet",
+    "qty": 0,
+    "cost": 40,
+    "note": null,
+    "raw": "BI CARBONATE 100GMS",
+    "rawBalance": 0
+  },
+  {
+    "name": "Food Colours 10 Gm",
+    "unit": "pc",
+    "qty": 1,
+    "cost": 30,
+    "note": null,
+    "raw": "FOOD COLOURS 10GM",
+    "rawBalance": "1 PC"
+  },
+  {
+    "name": "Potatos 15 Kg/ 1 Debe",
+    "unit": "kg",
+    "qty": 11,
+    "cost": 1200,
+    "note": null,
+    "raw": "POTATOS 15KG/ 1 DEBE",
+    "rawBalance": "11KGS"
+  },
+  {
+    "name": "Onions",
+    "unit": "kg",
+    "qty": 2,
+    "cost": 80,
+    "note": null,
+    "raw": "ONIONS /KG",
+    "rawBalance": "2KGS"
+  },
+  {
+    "name": "Tomatoes",
+    "unit": "kg",
+    "qty": 2,
+    "cost": 40,
+    "note": null,
+    "raw": "TOMATOES /KG",
+    "rawBalance": "2KGS"
+  },
+  {
+    "name": "Carrots",
+    "unit": "kg",
+    "qty": 2,
+    "cost": 60,
+    "note": null,
+    "raw": "CARROTS/KG",
+    "rawBalance": "2KGS"
+  },
+  {
+    "name": "Passion",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "PASSION /KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Tree Tomatoes",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 120,
+    "note": null,
+    "raw": "TREE TOMATOES/KG",
+    "rawBalance": ""
+  },
+  {
+    "name": "Lemons",
+    "unit": "kg",
+    "qty": 0.25,
+    "cost": 80,
+    "note": null,
+    "raw": "LEMONS/KG",
+    "rawBalance": "0.25KG"
+  },
+  {
+    "name": "Oranges",
+    "unit": "kg",
+    "qty": 2,
+    "cost": 50,
+    "note": null,
+    "raw": "ORANGES/KG",
+    "rawBalance": "2KGS"
+  },
+  {
+    "name": "Ginger",
+    "unit": "kg",
+    "qty": 0.25,
+    "cost": 200,
+    "note": null,
+    "raw": "GINGER/KG",
+    "rawBalance": "0.25KG"
+  },
+  {
+    "name": "Garlic",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 400,
+    "note": null,
+    "raw": "GARLIC/KG",
+    "rawBalance": ""
+  },
+  {
+    "name": "Hoho",
+    "unit": "kg",
+    "qty": 0.5,
+    "cost": 80,
+    "note": null,
+    "raw": "HOHO/KG",
+    "rawBalance": "0.5KG"
+  },
+  {
+    "name": "Baby Marrow",
+    "unit": "kg",
+    "qty": 0.1,
+    "cost": 70,
+    "note": null,
+    "raw": "BABY MARROW/KG",
+    "rawBalance": "0.1KG"
+  },
+  {
+    "name": "Cucumber",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 80,
+    "note": null,
+    "raw": "CUCUMBER/KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Red Cabbage",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 50,
+    "note": null,
+    "raw": "RED CABBAGE/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Lettuce",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 30,
+    "note": null,
+    "raw": "LETTUCE/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Nduma",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 35,
+    "note": null,
+    "raw": "NDUMA/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Ngwaci",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 20,
+    "note": null,
+    "raw": "NGWACI/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Green Chilli",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 100,
+    "note": null,
+    "raw": "GREEN CHILLI/KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Spinach",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 40,
+    "note": null,
+    "raw": "SPINACH/KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Terere",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 40,
+    "note": null,
+    "raw": "TERERE/KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Mangoes",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 20,
+    "note": null,
+    "raw": "MANGOES/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Managu",
+    "unit": "kg",
+    "qty": 0,
+    "cost": null,
+    "note": null,
+    "raw": "MANAGU/",
+    "rawBalance": 0
+  },
+  {
+    "name": "Raw Banana",
+    "unit": "bunch",
+    "qty": 0,
+    "cost": 300,
+    "note": null,
+    "raw": "RAW BANANA/BUNCH",
+    "rawBalance": 0
+  },
+  {
+    "name": "Ripe Banana",
+    "unit": "bunch",
+    "qty": 0,
+    "cost": 80,
+    "note": null,
+    "raw": "RIPE BANANA/BUNCH",
+    "rawBalance": 0
+  },
+  {
+    "name": "Paw Paw",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 100,
+    "note": null,
+    "raw": "PAW PAW/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Pineapples",
+    "unit": "pc",
+    "qty": 2,
+    "cost": 80,
+    "note": null,
+    "raw": "PINEAPPLES/PC",
+    "rawBalance": "2PCS"
+  },
+  {
+    "name": "Water Melon",
+    "unit": "kg",
+    "qty": 2,
+    "cost": 40,
+    "note": null,
+    "raw": "WATER MELON/KG",
+    "rawBalance": "2KGS"
+  },
+  {
+    "name": "Avocados",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 30,
+    "note": null,
+    "raw": "OVACADOS/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Butternut",
+    "unit": "pc",
+    "qty": 0.5,
+    "cost": 100,
+    "note": null,
+    "raw": "BUTTERNUT/PC",
+    "rawBalance": "0.5PC"
+  },
+  {
+    "name": "Cabbage",
+    "unit": "pc",
+    "qty": 0,
+    "cost": 40,
+    "note": null,
+    "raw": "CABBAGE/PC",
+    "rawBalance": 0
+  },
+  {
+    "name": "Broccoli",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 150,
+    "note": null,
+    "raw": "BROCCOLI/KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Plaintain",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 200,
+    "note": null,
+    "raw": "PLAINTAIN/KG",
+    "rawBalance": 0
+  },
+  {
+    "name": "Egg Plant",
+    "unit": "kg",
+    "qty": 0,
+    "cost": 80,
+    "note": null,
+    "raw": "EGG PLANT/KG",
+    "rawBalance": 0
+  }
+]

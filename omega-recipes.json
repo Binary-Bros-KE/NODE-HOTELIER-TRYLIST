@@ -1,0 +1,318 @@
+{
+  "newProducts": [
+    { "name": "Ginger Garlic Paste", "unit": "kg", "category": "Spices & Seasoning" },
+    { "name": "Garden Peas", "unit": "kg", "category": "Fresh Produce" },
+    { "name": "Cocoa Powder", "unit": "packet", "category": "Spices & Seasoning" }
+  ],
+  "recipes": [
+    {
+      "menuItem": "Chicken Burger",
+      "recipeName": "Chicken Burger",
+      "ingredients": [
+        { "product": "Chic Broilers", "quantity": 0.125 },
+        { "product": "Cheese", "quantity": 0.0625 },
+        { "product": "Lettuce", "quantity": 0.167 },
+        { "product": "Onions", "quantity": 0.075 },
+        { "product": "Tomatoes", "quantity": 0.06 },
+        { "product": "Soy Sauce 625 Ml", "quantity": 0.0127 },
+        { "product": "Cooking Oil 10 Ltrs", "quantity": 0.0018 },
+        { "product": "Salt 1 Kg", "quantity": 0.0375 }
+      ]
+    },
+    {
+      "menuItem": "Traditional Beef Burger",
+      "recipeName": "Traditional Beef Burger",
+      "ingredients": [
+        { "product": "Beef", "quantity": 0.125 },
+        { "product": "Cheese", "quantity": 0.0625 },
+        { "product": "Lettuce", "quantity": 0.167 },
+        { "product": "Onions", "quantity": 0.075 },
+        { "product": "Tomatoes", "quantity": 0.06 },
+        { "product": "Soy Sauce 625 Ml", "quantity": 0.0127 },
+        { "product": "Cooking Oil 10 Ltrs", "quantity": 0.0018 },
+        { "product": "Salt 1 Kg", "quantity": 0.0375 }
+      ]
+    },
+    {
+      "menuItem": "Crispy Fish Fingers",
+      "recipeName": "Crispy Fish Fingers",
+      "ingredients": [
+        { "product": "Lemons", "quantity": 0.09 },
+        { "product": "Mustard 300 Ml", "quantity": 0.0083 },
+        { "product": "White Pepper Powder 100 Gm", "quantity": 0.005 },
+        { "product": "Salt 1 Kg", "quantity": 0.0005 },
+        { "product": "Fish Fillets", "quantity": 1 },
+        { "product": "Eggs", "quantity": 1 }
+      ]
+    },
+    {
+      "menuItem": "Chicken Nuggets",
+      "recipeName": "Chicken Nuggets",
+      "ingredients": [
+        { "product": "Chic Broilers", "quantity": 0.15 },
+        { "product": "Mustard 300 Ml", "quantity": 0.0083 },
+        { "product": "Garam Masala 100 Gm", "quantity": 0.005 },
+        { "product": "White Pepper Powder 100 Gm", "quantity": 0.005 },
+        { "product": "Salt 1 Kg", "quantity": 0.0005 },
+        { "product": "Vinegar 700 Ml", "quantity": 0.0071 },
+        { "product": "Soy Sauce 625 Ml", "quantity": 0.0033 },
+        { "product": "Ginger Garlic Paste", "quantity": 0.0025 },
+        { "product": "Wheat Flour 2 Kg", "quantity": 0.005 },
+        { "product": "Eggs", "quantity": 1 }
+      ]
+    },
+    {
+      "menuItem": "Omega Gardens Salad",
+      "recipeName": "Omega Gardens Salad",
+      "ingredients": [
+        { "product": "Tomatoes", "quantity": 0.12 },
+        { "product": "Carrots", "quantity": 0.1 },
+        { "product": "Lettuce", "quantity": 0.5 },
+        { "product": "Garden Peas", "quantity": 0.25 },
+        { "product": "Cabbage", "quantity": 0.125 },
+        { "product": "Sugar 1 Kg", "quantity": 0.0005 }
+      ]
+    },
+    {
+      "menuItem": "Omega Chicken Salad",
+      "recipeName": "Omega Chicken Salad",
+      "ingredients": [
+        { "product": "Cabbage", "quantity": 0.25 },
+        { "product": "Chic Broilers", "quantity": 0.125 },
+        { "product": "Carrots", "quantity": 0.05 },
+        { "product": "Tomatoes", "quantity": 0.06 },
+        { "product": "Mayonnaise", "quantity": 0.06 }
+      ]
+    },
+    {
+      "menuItem": "Omega Fish Salad",
+      "recipeName": "Omega Fish Salad",
+      "ingredients": [
+        { "product": "Cabbage", "quantity": 0.5 },
+        { "product": "Fish Fillets", "quantity": 1 },
+        { "product": "Carrots", "quantity": 0.05 },
+        { "product": "Tomatoes", "quantity": 0.12 }
+      ]
+    },
+    {
+      "menuItem": "Vegetable Curry",
+      "recipeName": "Vegetable Curry",
+      "ingredients": [
+        { "product": "Carrots", "quantity": 0.1 },
+        { "product": "Baby Marrow", "quantity": 0.075 },
+        { "product": "Garden Peas", "quantity": 0.1 },
+        { "product": "Broccoli", "quantity": 0.045 },
+        { "product": "Tomatoes", "quantity": 0.24 }
+      ]
+    },
+    {
+      "menuItem": "Spaghetti Napolitan",
+      "recipeName": "Spaghetti Napolitan",
+      "ingredients": [
+        { "product": "Spaghetti 500 Gm", "quantity": 0.3 },
+        { "product": "Salt 1 Kg", "quantity": 0.0005 }
+      ]
+    },
+    {
+      "menuItem": "Spaghetti Bolognaise",
+      "recipeName": "Spaghetti Bolognaise",
+      "ingredients": [
+        { "product": "Spaghetti 500 Gm", "quantity": 0.3 },
+        { "product": "Beef", "quantity": 0.2 },
+        { "product": "Salt 1 Kg", "quantity": 0.0005 },
+        { "product": "Black Pepper 100 Gm", "quantity": 0.005 },
+        { "product": "Cheese", "quantity": 0.05 }
+      ]
+    },
+    {
+      "menuItem": "Carbonara Pasta",
+      "recipeName": "Carbonara Pasta",
+      "ingredients": [
+        { "product": "Spaghetti 500 Gm", "quantity": 0.3 },
+        { "product": "Bacon", "quantity": 2 },
+        { "product": "Eggs", "quantity": 1 },
+        { "product": "Cheese", "quantity": 0.05 },
+        { "product": "Milk", "quantity": 0.1 },
+        { "product": "Tomato Paste 900 Gm", "quantity": 0.0028 },
+        { "product": "Vinegar 700 Ml", "quantity": 0.0071 }
+      ]
+    },
+    {
+      "menuItem": "Omega Special Country Side Chicken (Full)",
+      "recipeName": "Full Omega Special Country-Side Chicken",
+      "ingredients": [
+        { "product": "Chic Kienyeji", "quantity": 1 },
+        { "product": "Eggs", "quantity": 2 },
+        { "product": "Potatos 15 Kg/ 1 Debe", "quantity": 0.75 },
+        { "product": "Maize Flour 2 Kgs", "quantity": 0.1 },
+        { "product": "Green Maize", "quantity": 1 },
+        { "product": "Chicken Cubes 90 Gm", "quantity": 1 },
+        { "product": "Tomatoes", "quantity": 0.24 },
+        { "product": "Cooking Oil 10 Ltrs", "quantity": 0.075 },
+        { "product": "Salt 1 Kg", "quantity": 0.0005 },
+        { "product": "Onions", "quantity": 0.3 },
+        { "product": "Ginger Garlic Paste", "quantity": 0.005 },
+        { "product": "Soy Sauce 625 Ml", "quantity": 0.038 }
+      ]
+    },
+    {
+      "menuItem": "Black Forest",
+      "recipeName": "Black Forest Cake",
+      "ingredients": [
+        { "product": "Wheat Flour 2 Kg", "quantity": 0.5 },
+        { "product": "Sugar 1 Kg", "quantity": 0.25 },
+        { "product": "Eggs", "quantity": 15 },
+        { "product": "Baking Powder 100 Gm", "quantity": 0.1 },
+        { "product": "Cocoa Powder", "quantity": 0.1 }
+      ]
+    },
+    {
+      "menuItem": "White Forest",
+      "recipeName": "White Forest Cake",
+      "ingredients": [
+        { "product": "Wheat Flour 2 Kg", "quantity": 0.5 },
+        { "product": "Sugar 1 Kg", "quantity": 0.25 },
+        { "product": "Eggs", "quantity": 15 },
+        { "product": "Baking Powder 100 Gm", "quantity": 0.1 }
+      ]
+    },
+    {
+      "menuItem": "Mixed Grilled Platter (Ideal for 1)",
+      "recipeName": "Mixed Grilled Platter (1)",
+      "ingredients": [
+        { "product": "Fish Fillets", "quantity": 0.5 },
+        { "product": "Mutton", "quantity": 0.125 },
+        { "product": "Sausages", "quantity": 1 },
+        { "product": "Beef", "quantity": 0.125 },
+        { "product": "Chic Broilers", "quantity": 0.125 },
+        { "product": "Potatos 15 Kg/ 1 Debe", "quantity": 1 },
+        { "product": "Maize Flour 2 Kgs", "quantity": 0.085 },
+        { "product": "Cooking Oil 10 Ltrs", "quantity": 0.05 },
+        { "product": "Salt 1 Kg", "quantity": 0.0005 },
+        { "product": "Soy Sauce 625 Ml", "quantity": 0.0533 },
+        { "product": "Ginger Garlic Paste", "quantity": 0.005 },
+        { "product": "Vinegar 700 Ml", "quantity": 0.0714 },
+        { "product": "Tomatoes", "quantity": 0.12 },
+        { "product": "Onions", "quantity": 0.15 }
+      ]
+    },
+    {
+      "menuItem": "Mixed Grilled Platter (Ideal for 2)",
+      "recipeName": "Mixed Grilled Platter (2)",
+      "ingredients": [
+        { "product": "Fish Fillets", "quantity": 1 },
+        { "product": "Mutton", "quantity": 0.25 },
+        { "product": "Sausages", "quantity": 1 },
+        { "product": "Eggs", "quantity": 1 },
+        { "product": "Beef", "quantity": 0.25 },
+        { "product": "Chic Broilers", "quantity": 0.25 },
+        { "product": "Potatos 15 Kg/ 1 Debe", "quantity": 1 },
+        { "product": "Maize Flour 2 Kgs", "quantity": 0.17 },
+        { "product": "Cooking Oil 10 Ltrs", "quantity": 0.1 },
+        { "product": "Salt 1 Kg", "quantity": 0.0005 },
+        { "product": "Soy Sauce 625 Ml", "quantity": 0.0533 },
+        { "product": "Ginger Garlic Paste", "quantity": 0.005 },
+        { "product": "Vinegar 700 Ml", "quantity": 0.0714 },
+        { "product": "Tomatoes", "quantity": 0.24 },
+        { "product": "Onions", "quantity": 0.3 }
+      ]
+    },
+    {
+      "menuItem": "Mixed Grilled Platter (Ideal for Family)",
+      "recipeName": "Mixed Grilled Platter (Family)",
+      "ingredients": [
+        { "product": "Fish Fillets", "quantity": 1 },
+        { "product": "Mutton", "quantity": 0.5 },
+        { "product": "Sausages", "quantity": 2 },
+        { "product": "Eggs", "quantity": 2 },
+        { "product": "Beef", "quantity": 0.5 },
+        { "product": "Chic Broilers", "quantity": 0.5 },
+        { "product": "Potatos 15 Kg/ 1 Debe", "quantity": 2 },
+        { "product": "Maize Flour 2 Kgs", "quantity": 0.34 },
+        { "product": "Cooking Oil 10 Ltrs", "quantity": 0.15 },
+        { "product": "Salt 1 Kg", "quantity": 0.0005 },
+        { "product": "Soy Sauce 625 Ml", "quantity": 0.0533 },
+        { "product": "Ginger Garlic Paste", "quantity": 0.005 },
+        { "product": "Vinegar 700 Ml", "quantity": 0.0714 },
+        { "product": "Tomatoes", "quantity": 0.36 },
+        { "product": "Onions", "quantity": 0.45 }
+      ]
+    },
+    {
+      "menuItem": "Mega Pizza",
+      "recipeName": "Mega Pizza",
+      "ingredients": [
+        { "product": "Beef", "quantity": 0.25 },
+        { "product": "Bacon", "quantity": 2 },
+        { "product": "Cheese", "quantity": 0.3 },
+        { "product": "Sweet Corn 500 Gm", "quantity": 0.164 },
+        { "product": "Ham", "quantity": 0.06 },
+        { "product": "Wheat Flour 2 Kg", "quantity": 0.5 },
+        { "product": "Onions", "quantity": 0.3 },
+        { "product": "Salt 1 Kg", "quantity": 0.0375 }
+      ]
+    },
+    {
+      "menuItem": "BBQ Chicken Pizza",
+      "variantLabel": "Large",
+      "recipeName": "BBQ Chicken Pizza (Large)",
+      "ingredients": [
+        { "product": "Chic Broilers", "quantity": 0.25 },
+        { "product": "Cheese", "quantity": 0.25 },
+        { "product": "Ham", "quantity": 0.09 },
+        { "product": "Wheat Flour 2 Kg", "quantity": 0.25 },
+        { "product": "Onions", "quantity": 0.15 },
+        { "product": "Salt 1 Kg", "quantity": 0.0375 }
+      ]
+    },
+    {
+      "menuItem": "Meat Deluxe Pizza",
+      "variantLabel": "Large",
+      "recipeName": "Meat Deluxe Pizza (Large)",
+      "ingredients": [
+        { "product": "Beef", "quantity": 0.25 },
+        { "product": "Cheese", "quantity": 0.25 },
+        { "product": "Sweet Corn 500 Gm", "quantity": 0.164 },
+        { "product": "Ham", "quantity": 0.09 },
+        { "product": "Wheat Flour 2 Kg", "quantity": 0.25 },
+        { "product": "Onions", "quantity": 0.15 },
+        { "product": "Salt 1 Kg", "quantity": 0.0375 }
+      ]
+    },
+    {
+      "menuItem": "Margherita Pizza",
+      "variantLabel": "Large",
+      "recipeName": "Margherita Pizza (Large)",
+      "ingredients": [
+        { "product": "Cheese", "quantity": 0.25 },
+        { "product": "Tomatoes", "quantity": 0.36 },
+        { "product": "Wheat Flour 2 Kg", "quantity": 0.25 },
+        { "product": "Salt 1 Kg", "quantity": 0.0375 }
+      ]
+    },
+    {
+      "menuItem": "Veggie Feast Pizza",
+      "variantLabel": "Large",
+      "recipeName": "Veggie Feast Pizza (Large)",
+      "ingredients": [
+        { "product": "Cheese", "quantity": 0.25 },
+        { "product": "Sweet Corn 500 Gm", "quantity": 0.28 },
+        { "product": "Mushroom 500 Gms", "quantity": 0.21 },
+        { "product": "Tomatoes", "quantity": 0.36 },
+        { "product": "Wheat Flour 2 Kg", "quantity": 0.25 },
+        { "product": "Salt 1 Kg", "quantity": 0.0375 }
+      ]
+    },
+    {
+      "menuItem": "Chicken Dry Fry",
+      "recipeName": "Chicken Broiler Dry Fry",
+      "ingredients": [
+        { "product": "Onions", "quantity": 0.3 },
+        { "product": "Cooking Oil 10 Ltrs", "quantity": 0.0032 },
+        { "product": "Ginger Garlic Paste", "quantity": 0.005 },
+        { "product": "Salt 1 Kg", "quantity": 0.0375 },
+        { "product": "Chic Broilers", "quantity": 1 }
+      ]
+    }
+  ]
+}
